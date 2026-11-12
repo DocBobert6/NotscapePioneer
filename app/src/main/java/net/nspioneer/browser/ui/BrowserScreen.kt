@@ -1347,7 +1347,16 @@ fun BrowserScreen(
             AndroidView(
                 factory = { ctx -> GeckoView(ctx).also { geckoViewBox[0] = it } },
                 update = { view ->
-                    view.setSession(tab.session)
+                    // Never rebind a closed session: the engine
+                    // can destroy a tab itself (popup
+                    // window.close()), and rebinding its closed
+                    // session kills the app process with no
+                    // dialog. Bind only an open session, and
+                    // only when it actually changed.
+                    val session = tab.session
+                    if (session.isOpen && view.session !== session) {
+                        view.setSession(session)
+                    }
                     // Pull-to-refresh (Mariner
                     // BrowserScreen.kt:2200-2246): this listener
                     // only OBSERVES (always returns false): a

@@ -126,6 +126,22 @@ class MainActivity : ComponentActivity() {
             persistTabSession()
         }
 
+        // Tabs the engine destroys itself (a popup tab's
+        // window.close()): remove it from the shell's list too,
+        // or the shell keeps a dead tab whose closed session the
+        // view would rebind. Recorded in recently-closed first
+        // (Mariner onCloseWindow -> closeTab), and a tab is kept
+        // open so the browser never sits empty.
+        engine.onTabDestroyed = { deadTab ->
+            recordClosed(deadTab)
+            removeTabFromShell(deadTab)
+            if (tabs.isEmpty()) {
+                createTab(isPrivate = false)
+            } else {
+                persistTabSession()
+            }
+        }
+
         // Tracking protection: the engine is built ETP Strict;
         // apply the stored level only when it differs, so a
         // plain launch never reloads the fresh tab for nothing.
@@ -443,21 +459,33 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun closeTab(tab: EngineTab) {
-        val idx = tabs.indexOf(tab)
-        if (idx < 0) return
+        if (tabs.indexOf(tab) < 0) return
         recordClosed(tab)
         engine.destroyTab(tab)
-        tabs.removeAt(idx)
-        homeTabIds.remove(tab.id)
-        // Batch 4: closing the app-mode tab leaves app mode.
-        if (appModeTabId == tab.id) appModeTabId = null
+        // destroyTab fires onTabDestroyed, which already removed
+        // the tab from this list; removeTabFromShell is a no-op
+        // when it is gone.
+        removeTabFromShell(tab)
         if (tabs.isEmpty()) {
             createTab(isPrivate = false)
             return
         }
+        persistTabSession()
+    }
+
+    /** Remove [tab] from the shell's list and fix the active
+     *  index. Idempotent: a no-op when the tab is already gone
+     *  (the engine's onTabDestroyed callback removes it first
+     *  when the engine destroyed the tab itself). */
+    private fun removeTabFromShell(tab: EngineTab) {
+        val idx = tabs.indexOf(tab)
+        if (idx < 0) return
+        tabs.removeAt(idx)
+        homeTabIds.remove(tab.id)
+        // Batch 4: closing the app-mode tab leaves app mode.
+        if (appModeTabId == tab.id) appModeTabId = null
         if (activeTabIndex >= tabs.size) activeTabIndex = tabs.lastIndex
         else if (idx < activeTabIndex) activeTabIndex--
-        persistTabSession()
     }
 
     /** Batch 2 (Mariner TabList.recordClosed): a closed NORMAL

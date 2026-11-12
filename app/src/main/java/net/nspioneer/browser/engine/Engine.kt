@@ -138,6 +138,12 @@ interface Engine {
     var onTabCreated: ((EngineTab) -> Unit)?  // fired when the engine
         // creates a tab itself (onNewSession / window.open): the shell
         // adds it to its tab list and switches to it.
+    var onTabDestroyed: ((EngineTab) -> Unit)?  // fired when the engine
+        // destroys a tab itself (onCloseWindow / window.close() on a
+        // popup tab): the shell removes it from its tab list. Without
+        // this the shell keeps a dead tab whose closed session the
+        // view would rebind (watch-wrestling.eu crash suspect,
+        // 2026-11-12). Not fired while the engine itself is closing.
     // uBlock Origin: install goes through onExtensionInstallPrompt —
     // the shell shows a real dialog (name + permissions, Install /
     // Later). NEVER auto-approve (the spike's auto-approve was

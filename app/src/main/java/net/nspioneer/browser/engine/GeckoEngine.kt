@@ -234,6 +234,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     }
 
     override var onTabCreated: ((EngineTab) -> Unit)? = null
+    override var onTabDestroyed: ((EngineTab) -> Unit)? = null
     override var onExtensionInstallPrompt: ((String, List<String>, (Boolean) -> Unit) -> Unit)? = null
 
     override val uBlockState: State<String> get() = extensions.uBlockState
@@ -421,6 +422,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             wipePrivateData()
             Downloads.wipePrivateDownloads(appContext, store)
         }
+        // Tell the shell: the engine destroyed this tab itself
+        // (onCloseWindow). Without this the shell keeps the dead
+        // tab and the view rebinds its closed session. Not fired
+        // while the engine itself is closing (close() sets
+        // closed first) — the shell is going away too.
+        if (!closed) onTabDestroyed?.invoke(own)
     }
 
     override fun flushSessionStates() {
