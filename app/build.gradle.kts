@@ -24,8 +24,8 @@ android {
         applicationId = "net.nspioneer.browser"
         minSdk = 26 // GeckoView floor: Android 8.0 (API 26) or later.
         targetSdk = 36
-        versionCode = 22
-        versionName = "0.1.0-alpha.22"
+        versionCode = 23
+        versionName = "0.1.0-alpha.23"
         // arm64-v8a only, matching Mariner's ABI decision.
         ndk {
             abiFilters += listOf("arm64-v8a")
