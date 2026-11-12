@@ -35,6 +35,7 @@ import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.StorageController
 import org.mozilla.geckoview.WebExtension
 
 /**
@@ -267,10 +268,48 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             .contentBlocking(
                 ContentBlocking.Settings.Builder()
                     .enhancedTrackingProtectionLevel(ContentBlocking.EtpLevel.STRICT)
+                    .cookieBehavior(cookieBehaviorForStore())
                     .build()
+            )
+            // Batch 4: web dark mode is prefers-color-scheme
+            // only — GeckoView 159 has no forced-darkening
+            // API (verified against the pinned AAR: no
+            // setForceDark / algorithmic-darkening anywhere).
+            .preferredColorScheme(preferredColorSchemeForStore())
+            .forceUserScalableEnabled(
+                store.setting("forceZoom", "false") == "true"
+            )
+            .globalPrivacyControlEnabled(
+                store.setting("gpc", "true") == "true"
             )
             .build()
         return GeckoRuntime.create(appContext, settings)
+    }
+
+    /** The cookie behaviour the stored settings mean
+     *  (Batch 4): cookies off → ACCEPT_NONE; on with
+     *  third-party blocking → first-party + isolate others;
+     *  on otherwise → non-trackers. */
+    private fun cookieBehaviorForStore(): Int {
+        if (store.setting("cookies", "true") != "true") {
+            return ContentBlocking.CookieBehavior.ACCEPT_NONE
+        }
+        return if (store.setting("blockThirdPartyCookies", "true") == "true") {
+            ContentBlocking.CookieBehavior.ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
+        } else {
+            ContentBlocking.CookieBehavior.ACCEPT_NON_TRACKERS
+        }
+    }
+
+    /** The stored web-dark-mode value as a GeckoView colour
+     *  scheme (Batch 4): Auto → system, On → dark, Off →
+     *  light. */
+    private fun preferredColorSchemeForStore(): Int = when (
+        store.setting("webDarkMode", "Auto")
+    ) {
+        "On" -> GeckoRuntimeSettings.COLOR_SCHEME_DARK
+        "Off" -> GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
+        else -> GeckoRuntimeSettings.COLOR_SCHEME_SYSTEM
     }
 
     // ------------------------------------------------------------------
@@ -428,14 +467,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             else -> ContentBlocking.EtpLevel.STRICT
         }
         val cb = runtime.settings.contentBlocking
-        // Research §7: the level only takes effect if the cookie
-        // behaviour is ACCEPT_NON_TRACKERS (or
-        // ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS). If something ever
-        // leaves it at ACCEPT_ALL, changing the level would be a
-        // silent no-op — restore the working behaviour first.
-        if (cb.cookieBehavior == ContentBlocking.CookieBehavior.ACCEPT_ALL) {
-            cb.cookieBehavior = ContentBlocking.CookieBehavior.ACCEPT_NON_TRACKERS
-        }
+        // Batch 4: the stored cookie settings own the cookie
+        // behaviour — re-apply them instead of hardcoding
+        // ACCEPT_NON_TRACKERS, so "cookies off" (ACCEPT_NONE)
+        // survives a tracking-protection change. The level
+        // only takes effect with a non-ACCEPT_ALL behaviour
+        // (research §7), and applyCookieSettings never
+        // produces ACCEPT_ALL.
+        applyCookieSettings()
         cb.setEnhancedTrackingProtectionLevel(etp)
         statusPanel.status("tracking protection: $level")
         // Reload the current tab to be safe (level changes may not
@@ -526,6 +565,143 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     override fun answerPopupPrompt(allow: Boolean) {
         promptDelegate.answerPopup(allow)
+    }
+
+    // ------------------------------------------------------------------
+    // Batch 4: settings the engine enforces
+    // ------------------------------------------------------------------
+
+    override var onHttpsWarn: ((String) -> Unit)? = null
+
+    override fun setWebDarkMode(mode: String) {
+        runCatching {
+            runtime.settings.preferredColorScheme = when (mode) {
+                "On" -> GeckoRuntimeSettings.COLOR_SCHEME_DARK
+                "Off" -> GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
+                else -> GeckoRuntimeSettings.COLOR_SCHEME_SYSTEM
+            }
+        }.onFailure { e ->
+            statusPanel.status("web dark mode: apply failed: ${e.javaClass.simpleName}")
+        }
+        // Mariner's note, verbatim in spirit: applies to
+        // pages as they load; already-open pages pick it up
+        // on their next load. No reload here.
+        statusPanel.status("web dark mode: $mode (prefers-color-scheme only)")
+    }
+
+    override fun setForceZoom(enabled: Boolean) {
+        runCatching {
+            runtime.settings.forceUserScalableEnabled = enabled
+        }.onFailure { e ->
+            statusPanel.status("force zoom: apply failed: ${e.javaClass.simpleName}")
+        }
+        statusPanel.status("force zoom: ${if (enabled) "on" else "off"}")
+    }
+
+    override fun setGlobalPrivacyControl(enabled: Boolean) {
+        runCatching {
+            runtime.settings.globalPrivacyControl = enabled
+        }.onFailure { e ->
+            statusPanel.status("GPC: apply failed: ${e.javaClass.simpleName}")
+        }
+        statusPanel.status("GPC: ${if (enabled) "on" else "off"}")
+    }
+
+    override fun applyCookieSettings() {
+        runCatching {
+            runtime.settings.contentBlocking.cookieBehavior =
+                cookieBehaviorForStore()
+        }.onFailure { e ->
+            statusPanel.status("cookies: apply failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    override fun setReducedMotion(enabled: Boolean) {
+        tabs.toList().forEach { postReducedMotion(it, enabled) }
+        statusPanel.status("reduced motion: ${if (enabled) "on" else "off"}")
+    }
+
+    override fun applyWebTextZoom() {
+        tabs.toList().forEach { tab ->
+            val factor = effectiveZoomFor(tab)
+            tab.textZoomFactor = factor
+            postZoom(tab, factor)
+        }
+    }
+
+    override fun applyAutoplay() {
+        tabs.toList().forEach { postAutoplayMuted(it) }
+    }
+
+    override fun reloadTabsOnHost(host: String) {
+        val clean = host.lowercase().trimEnd('.')
+        if (clean.isBlank()) return
+        tabs.toList().filter { tab ->
+            runCatching { Uri.parse(tab.url.value).host }.getOrNull()
+                ?.lowercase()?.trimEnd('.') == clean
+        }.forEach { tab ->
+            // Apply the stored per-site JavaScript value before
+            // the reload, so the reload is the only one (the
+            // onLocationChange guard would otherwise reload
+            // a second time).
+            applySiteJavaScript(tab, clean)
+            tab.reload()
+        }
+    }
+
+    /** Set this tab's session JavaScript from the store for
+     *  [host], tracking the applied value so onLocationChange
+     *  does not reload again for the same host. Returns true
+     *  when the value changed. */
+    private fun applySiteJavaScript(tab: GeckoTab, host: String): Boolean {
+        val wantJs = store.siteSetting(host).javaScript
+        if (tab.jsAppliedValue == wantJs) return false
+        tab.session.settings.allowJavascript = wantJs
+        tab.jsAppliedValue = wantJs
+        return true
+    }
+
+    override fun syncUserRules() {
+        val net = UserBlockRules.parseNet(
+            store.setting(UserBlockRules.NET_KEY, "")
+        )
+        val cosmetic = UserBlockRules.parseCosmetic(
+            store.setting(UserBlockRules.COSMETIC_KEY, "")
+        )
+        blockingObserver.syncUserRules(net, cosmetic)
+    }
+
+    override fun refreshProbeRules() {
+        blockingObserver.syncBlockingFlags()
+    }
+
+    override fun clearGeckoData(flags: Long) {
+        runCatching {
+            runtime.storageController.clearData(flags)
+            statusPanel.status("storage: cleared flags=$flags")
+        }.onFailure { e ->
+            statusPanel.status("storage: clear failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    override fun clearDataForHost(host: String) {
+        val clean = host.lowercase().trimEnd('.')
+        if (clean.isBlank()) return
+        runCatching {
+            runtime.storageController.clearDataFromHost(
+                clean, StorageController.ClearFlags.SITE_DATA
+            )
+            statusPanel.status("storage: cleared data for $clean")
+        }.onFailure { e ->
+            statusPanel.status(
+                "storage: clear for $clean failed: ${e.javaClass.simpleName}"
+            )
+        }
+    }
+
+    override fun httpsUpgradeFor(tab: EngineTab, raw: String): String? {
+        val own = tab as? GeckoTab ?: return null
+        return httpsUpgradeFor(raw, own.httpOnlyHosts)
     }
 
     /** Parse an ExternalDownload from a WebResponse's headers.
@@ -623,6 +799,16 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun blockTrackersEnabled(): Boolean =
         store.setting("blockTrackers", "true") == "true"
 
+    /** Batch 4: every host whose `SiteSetting.blockImages`
+     *  is on. */
+    override fun blockImagesHosts(): Set<String> =
+        store.siteHosts().filter { store.siteSetting(it).blockImages }.toSet()
+
+    /** Batch 4: the stored referer policy ("", "origin" or
+     *  "never"). */
+    override fun refererPolicy(): String =
+        store.setting("refererPolicy", "")
+
     override fun noteStatus(line: String) {
         statusPanel.status(line)
     }
@@ -636,7 +822,37 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     }
 
     override fun zoomFactorFor(session: GeckoSession?): Float =
-        tabs.firstOrNull { it.session === session }?.textZoomFactor ?: 1.0f
+        tabs.firstOrNull { it.session === session }
+            ?.let { effectiveZoomFor(it) }
+            ?: globalWebTextZoom()
+
+    /** The global web text size (webTextZoom, default 100%)
+     *  as a factor. */
+    private fun globalWebTextZoom(): Float =
+        ((store.setting("webTextZoom", "100").toIntOrNull() ?: 100) / 100f)
+            .coerceIn(0.5f, 2.0f)
+
+    /** The effective text size for a tab: its host's
+     *  per-site override when set, else the global size. */
+    private fun effectiveZoomFor(tab: GeckoTab): Float {
+        val host = runCatching { Uri.parse(tab.url.value).host }.getOrNull()
+        val site = if (!host.isNullOrBlank()) store.siteZoom(host) else 1.0f
+        return if (site != 1.0f) site else globalWebTextZoom()
+    }
+
+    /** Batch 4: the stored reduced-motion setting. */
+    override fun reducedMotionEnabled(): Boolean =
+        store.setting("reducedMotion", "false") == "true"
+
+    /** Batch 4: whether media on [host] starts muted — the
+     *  per-site autoplay mode when set, else the global
+     *  autoplay setting. */
+    override fun autoplayMutedFor(host: String): Boolean {
+        val site = store.siteAutoplay(host)
+        val mode = if (site.isNotBlank()) site
+        else store.setting("autoplay", "allow")
+        return mode == "muted"
+    }
 
     override fun noteProbeMedia(tabNumber: Int, kind: String, url: String) {
         statusPanel.noteMedia(tabNumber, kind, url)
@@ -738,9 +954,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
         tab.probePort?.let { runCatching { it.disconnect() } }
         tab.probePort = port
-        // The freshly connected page gets its stored factor at once,
-        // so a live zoom change is not the only path that applies it.
-        if (tab.textZoomFactor != 1.0f) postZoom(tab, tab.textZoomFactor)
+        // The freshly connected page gets its effective factor
+        // at once, so a live zoom change is not the only path
+        // that applies it.
+        val zoom = effectiveZoomFor(tab)
+        tab.textZoomFactor = zoom
+        if (zoom != 1.0f) postZoom(tab, zoom)
+        // Batch 4: the freshly connected page also gets the
+        // current reduced-motion and autoplay-mute state; the
+        // probe asks for both on load too, so a missed push
+        // is not fatal.
+        postReducedMotion(tab, reducedMotionEnabled())
+        postAutoplayMuted(tab)
         // Batch 2: a pending scroll restore (URL-only relaunch
         // restore, pre-alpha.6 saves) rides the port the moment
         // it connects — the content script scrolls after load.
@@ -776,6 +1001,44 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             )
         }.onFailure { e ->
             statusPanel.status("zoom: post to tab ${tab.id} failed: ${e.message}")
+        }
+    }
+
+    /** Push the reduced-motion setting to a tab's live probe
+     *  port, if one is open (Batch 4). */
+    private fun postReducedMotion(tab: GeckoTab, enabled: Boolean) {
+        val port = tab.probePort ?: return
+        runCatching {
+            port.postMessage(
+                JSONObject().apply {
+                    put("type", "reduced-motion")
+                    put("on", enabled)
+                }
+            )
+        }.onFailure { e ->
+            statusPanel.status(
+                "tab ${tab.id}: reduced-motion post failed: ${e.message}"
+            )
+        }
+    }
+
+    /** Push the autoplay-mute state for this tab's host to
+     *  its live probe port, if one is open (Batch 4). */
+    private fun postAutoplayMuted(tab: GeckoTab) {
+        val port = tab.probePort ?: return
+        val host = runCatching { Uri.parse(tab.url.value).host }.getOrNull() ?: ""
+        val muted = autoplayMutedFor(host)
+        runCatching {
+            port.postMessage(
+                JSONObject().apply {
+                    put("type", "autoplay-muted")
+                    put("muted", muted)
+                }
+            )
+        }.onFailure { e ->
+            statusPanel.status(
+                "tab ${tab.id}: autoplay-muted post failed: ${e.message}"
+            )
         }
     }
 
@@ -890,6 +1153,16 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 if (!u.startsWith("http://") && !u.startsWith("https://")) return
                 tab.lastNavigatedUrl = u
                 tab.onNavigate?.invoke(u, tab.title.value)
+                // Batch 4: per-site JavaScript. The load path
+                // (GeckoTab.load) applies the value before
+                // loadUri; this covers loads the engine did not
+                // start (window.open / redirects). Guarded on
+                // the tracked value: without it the reload
+                // would re-trigger this effect and loop.
+                val host = runCatching { Uri.parse(u).host }.getOrNull()
+                if (!host.isNullOrBlank() && applySiteJavaScript(tab, host)) {
+                    tab.reload()
+                }
             }
 
             override fun onLoadRequest(
@@ -900,6 +1173,63 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // The probe extension is the real media detector.
                 if (isMediaUrl(request.uri)) {
                     statusPanel.noteMedia(n(), "nav", request.uri)
+                }
+                // Batch 4: HTTPS-only mode + open-links-in-new-tab
+                // (Mariner BrowserScreen.kt:2653-2700, Gecko-shaped).
+                // Both run before the popunder guard: an upgrade
+                // or a new-tab split is not a popunder. HTTPS-only
+                // runs first, as in Mariner — a tapped http link
+                // upgrades in place rather than splitting.
+                if (request.target ==
+                    GeckoSession.NavigationDelegate.TARGET_WINDOW_CURRENT &&
+                    (request.uri.startsWith("http://") ||
+                        request.uri.startsWith("https://"))
+                ) {
+                    val u = request.uri
+                    // HTTPS-only: in-page loads (not direct
+                    // navigations — typed addresses / app loads /
+                    // the user's confirmed "Continue for this
+                    // site" load) of http:// upgrade, or warn.
+                    if (store.setting("httpsOnly", "false") == "true" &&
+                        !request.isDirectNavigation &&
+                        u.startsWith("http://")
+                    ) {
+                        val host = runCatching { Uri.parse(u).host }.getOrNull() ?: ""
+                        if (!store.isHttpsException(host)) {
+                            val upgraded = httpsUpgradeFor(u, tab.httpOnlyHosts)
+                            if (upgraded != null) {
+                                tab.upgradedFromHttp = upgraded
+                                mainHandler.post { tab.load(upgraded) }
+                                statusPanel.status(
+                                    "tab ${n()}: https-only upgrade: $u"
+                                )
+                            } else {
+                                statusPanel.status(
+                                    "tab ${n()}: https-only warn: $u"
+                                )
+                                onHttpsWarn?.invoke(u)
+                            }
+                            return GeckoResult.fromValue(AllowOrDeny.DENY)
+                        }
+                    }
+                    // Open links in a new tab: a plain tap on a
+                    // link opens it in a foreground tab of the
+                    // same privacy class instead of navigating
+                    // here. Same-page anchors stay put, and
+                    // _blank links never reach here (onNewSession
+                    // owns them).
+                    if (store.setting("openLinksInNewTab", "false") == "true" &&
+                        request.hasUserGesture &&
+                        !isAnchorLink(tab.url.value, u)
+                    ) {
+                        val newTab = createTabInternal(tab.isPrivate, false)
+                        onTabCreated?.invoke(newTab)
+                        mainHandler.post { newTab.load(u) }
+                        statusPanel.status(
+                            "tab ${n()}: link opened in new tab: $u"
+                        )
+                        return GeckoResult.fromValue(AllowOrDeny.DENY)
+                    }
                 }
                 // Strict popup blocker — popunder guard (Mariner
                 // BrowserScreen.kt:2695+, adapted to GeckoView):
@@ -993,12 +1323,38 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 tab.isLoading.value = true
                 tab.progress.value = 0
                 statusPanel.status("tab ${n()}: loading $url")
+                // Batch 4: a new load that is not the pending
+                // upgrade clears the marker.
+                if (tab.upgradedFromHttp != null && tab.upgradedFromHttp != url) {
+                    tab.upgradedFromHttp = null
+                }
             }
 
             override fun onPageStop(session: GeckoSession, success: Boolean) {
                 tab.isLoading.value = false
                 tab.progress.value = 100
                 statusPanel.status("tab ${n()}: load ${if (success) "OK" else "FAILED"}")
+                // Batch 4: a failed HTTPS-only upgrade means the
+                // host does not serve https — remember it on the
+                // tab, so the next attempt warns instead of
+                // looping through the upgrade. A success clears
+                // the marker.
+                val upgraded = tab.upgradedFromHttp
+                if (upgraded != null) {
+                    tab.upgradedFromHttp = null
+                    if (!success) {
+                        val host = runCatching {
+                            Uri.parse(upgraded).host
+                        }.getOrNull()
+                        if (!host.isNullOrBlank()) {
+                            tab.httpOnlyHosts.add(host.lowercase())
+                            statusPanel.status(
+                                "tab ${n()}: https upgrade failed for $host — " +
+                                    "will warn next time"
+                            )
+                        }
+                    }
+                }
                 statusPanel.refreshStats()
             }
 
@@ -1096,7 +1452,17 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             ) {
                 // Link detection is element.linkUri != null (research
                 // §6); type only distinguishes image/video/audio/none.
-                element.linkUri?.let { tab.onLongPressLink?.invoke(it) }
+                // Batch 4: the image URL rides along (TYPE_IMAGE +
+                // srcUri) so the sheet can offer "View image",
+                // "Download" and "Block this element".
+                val imageUrl = if (
+                    element.type == GeckoSession.ContentDelegate.TYPE_IMAGE
+                ) element.srcUri else null
+                if (element.linkUri != null || imageUrl != null) {
+                    tab.onLongPressTarget?.invoke(
+                        LongPressTarget(element.linkUri, imageUrl)
+                    )
+                }
             }
         }
 
@@ -1157,7 +1523,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
 
         override var onNavigate: ((String, String) -> Unit)? = null
-        override var onLongPressLink: ((String) -> Unit)? = null
+        override var onLongPressTarget: ((LongPressTarget) -> Unit)? = null
         override var onCrash: (() -> Unit)? = null
 
         // ---- Phase 3: media / fullscreen / popups ----
@@ -1202,6 +1568,20 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
          * applies it (see Extensions.kt). */
         var textZoomFactor: Float = 1.0f
 
+        /** Batch 4: hosts where an HTTPS-only upgrade failed —
+         *  the next attempt warns instead of upgrading
+         *  (Mariner TabState.httpOnlyHosts). */
+        val httpOnlyHosts = mutableSetOf<String>()
+
+        /** Batch 4: the https URL loaded as an HTTPS-only
+         *  upgrade, until its load settles (onPageStop). */
+        var upgradedFromHttp: String? = null
+
+        /** Batch 4: the per-site JavaScript value last applied
+         *  to this session (null = never applied — the session
+         *  default, allow, stands). */
+        var jsAppliedValue: Boolean? = null
+
         /** Native port the probe content script opened in this tab's
          * page, for live zoom pushes. Null until the page loads. */
         var probePort: WebExtension.Port? = null
@@ -1213,6 +1593,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             session.setActive(true)
             session.setFocused(true)
             currentTab = this
+            // Batch 4: per-site JavaScript, applied before the
+            // load so the page's scripts see the right value.
+            val host = runCatching { Uri.parse(url).host }.getOrNull()
+            if (!host.isNullOrBlank()) applySiteJavaScript(this, host)
             session.loadUri(url)
         }
 

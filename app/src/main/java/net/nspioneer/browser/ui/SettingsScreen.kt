@@ -1,11 +1,24 @@
 package net.nspioneer.browser.ui
 
+import android.app.role.RoleManager
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Build
+import android.provider.OpenableColumns
+import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,23 +31,42 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.nspioneer.browser.BuildConfig
+import net.nspioneer.browser.data.HistoryEntry
 import net.nspioneer.browser.data.PioneerStore
+import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.engine.Engine
+import net.nspioneer.browser.engine.SearchTemplate
+import org.mozilla.geckoview.StorageController
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Focused settings for Pioneer Phase 2. Written new — Mariner's
@@ -42,12 +74,20 @@ import net.nspioneer.browser.engine.Engine
  * downloads and books to port. Every row does something real;
  * there are no dead rows.
  *
- * Sections: Appearance (theme, start-page tiles, banner), Search
- * (DuckDuckGo, fixed), Privacy (tracking protection, strict popup
- * blocking, Clear history, Erase private data), Blocking (filter
- * lists, custom rules, blocked counts), Bookmarks (Import/Export
- * HTML), Extensions (uBlock Origin status + Install/Remove),
- * About (version, GeckoView version, Licences).
+ * Sections: Appearance (theme, bar position, banner, web dark
+ * mode, web text size, UI font + scale), Browsing (immersive,
+ * restore tabs, open links in new tab), Search (engine choice +
+ * custom URL), Privacy (tracking protection, strict popup
+ * blocking, HTTPS-only, autoplay, Clear history, Erase private
+ * data), Cookies & storage (cookies, third-party), Connection
+ * (GPC, referer policy), Per-site controls, Data (storage sizes,
+ * clear browsing data, delete on exit), Start page (wallpaper,
+ * home page, home button, frequently-visited tiles),
+ * Accessibility (reduced motion, force zoom, system captions),
+ * Blocking (filter lists, custom rules, blocked counts),
+ * Bookmarks (Import/Export HTML), Extensions (uBlock Origin
+ * status + Install/Remove), About (version, GeckoView version,
+ * default browser, welcome guide, Licences).
  *
  * Notes:
  * - Tracking protection: the ETP level is changeable at runtime
@@ -59,6 +99,22 @@ import net.nspioneer.browser.engine.Engine
  *   comes back through uBlockState.
  * - GeckoView version is the pinned version from the app's
  *   build script (the coordinator updates it with the pin).
+ *
+ * Batch 4 fills in the missing-now rows from the UI audit
+ * (item 12). Deliberately OMITTED (no GeckoView 159 API —
+ * see the phase docs for the javap evidence, do not fake
+ * them): session-only cookies (no cookie-lifetime /
+ * session-only value in the 159 AAR), DOM storage toggle
+ * (GeckoSessionSettings has no setDomStorageEnabled), and
+ * per-site third-party cookies (no per-site cookie
+ * behaviour; the ContentPermission kinds have no cookie
+ * kind). Web dark mode is prefers-color-scheme only:
+ * GeckoView has no forced darkening API.
+ *
+ * Phase 3/4 rows stay out: filter lists and blocked counts
+ * live in BlockingSettingsContent, video-player settings
+ * with Phase 3, form-fill/vault and reader rows with
+ * Phase 4.
  */
 
 /** The GeckoView version pinned in app/build.gradle.kts. */
@@ -124,18 +180,49 @@ private fun ActionRow(
     }
 }
 
+/** One labelled switch row (Pioneer has no icon rows). */
 @Composable
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    supporting: String? = null,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            if (supporting != null) {
+                Text(
+                    supporting,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun SettingsScreen(
     store: PioneerStore,
     engine: Engine,
     onBack: () -> Unit,
     onOpenLicences: () -> Unit,
-    onOpenUrl: (String) -> Unit
+    onOpenUrl: (String) -> Unit,
+    onReplayWelcome: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val rev = store.revision
     var showClearHistory by remember { mutableStateOf(false) }
     var showErasePrivate by remember { mutableStateOf(false) }
+    var showSiteControls by remember { mutableStateOf(false) }
 
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -172,6 +259,125 @@ fun SettingsScreen(
                 Toast.LENGTH_SHORT
             ).show()
         }
+    }
+
+    // Custom UI font (Batch 4, Mariner's picker verbatim):
+    // a file is copied to fonts/ui-font only if its magic
+    // bytes and Typeface both accept it as a real font.
+    var uiFontName by remember { mutableStateOf(store.setting("uiFontCustomName", "")) }
+    val uiFontPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                var loadedName: String? = null
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val dir = File(context.filesDir, "fonts").apply { mkdirs() }
+                        val tmp = File(dir, "ui-font.tmp")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            tmp.outputStream().use { input.copyTo(it) }
+                        } ?: error("unreadable")
+                        val name = runCatching {
+                            context.contentResolver.query(
+                                uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+                            )?.use { c ->
+                                if (c.moveToFirst()) c.getString(0) else null
+                            }
+                        }.getOrNull()
+                        val magic = ByteArray(4)
+                        val read = tmp.inputStream().use { it.read(magic) }
+                        val asText = if (read == 4) String(magic, Charsets.US_ASCII) else ""
+                        val magicOk = read == 4 && (
+                            (magic[0] == 0.toByte() && magic[1] == 1.toByte() &&
+                                magic[2] == 0.toByte() && magic[3] == 0.toByte()) ||
+                                asText == "OTTO" || asText == "true"
+                            )
+                        val faceOk = magicOk && runCatching {
+                            Typeface.createFromFile(tmp) != null
+                        }.getOrDefault(false)
+                        if (!faceOk) {
+                            tmp.delete()
+                            false
+                        } else {
+                            tmp.copyTo(File(dir, "ui-font"), overwrite = true)
+                            tmp.delete()
+                            loadedName = name ?: "Custom font"
+                            true
+                        }
+                    }.getOrDefault(false)
+                }
+                if (ok) {
+                    uiFontName = loadedName ?: "Custom font"
+                    store.putSetting("uiFontCustomName", uiFontName)
+                    store.putSetting("uiFont", "custom")
+                    Toast.makeText(context, "Font loaded", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        context,
+                        "That file couldn't be loaded as a font - .ttf and .otf work best",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    // Custom-photo wallpaper (Batch 4): the photo is copied
+    // into files/wallpaper/custom.jpg, downscaled to ≤2048 on
+    // the long edge, JPEG 88. There is no crop/framing
+    // dialog — Mariner's WallpaperAdjustDialog is Mariner-only
+    // polish; the photo is saved as-is, downscaled.
+    val customWallpaperFile = remember {
+        File(context.filesDir, "wallpaper/custom.jpg")
+    }
+    var customWallpaperExists by remember {
+        mutableStateOf(customWallpaperFile.exists())
+    }
+    val wallpaperPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val bmp = context.contentResolver.openInputStream(uri)?.use { input ->
+                            BitmapFactory.decodeStream(input)
+                        } ?: return@runCatching false
+                        val scale = 2048f / maxOf(bmp.width, bmp.height)
+                        val scaled = if (scale < 1f) {
+                            Bitmap.createScaledBitmap(
+                                bmp,
+                                (bmp.width * scale).toInt().coerceAtLeast(1),
+                                (bmp.height * scale).toInt().coerceAtLeast(1),
+                                true
+                            )
+                        } else {
+                            bmp
+                        }
+                        customWallpaperFile.parentFile?.mkdirs()
+                        FileOutputStream(customWallpaperFile).use { fos ->
+                            scaled.compress(Bitmap.CompressFormat.JPEG, 88, fos)
+                        }
+                        if (scaled != bmp) scaled.recycle()
+                        true
+                    }.getOrDefault(false)
+                }
+                customWallpaperExists = customWallpaperFile.exists()
+                if (ok && customWallpaperExists) {
+                    store.putSetting("wallpaper", "custom")
+                } else {
+                    Toast.makeText(
+                        context, "Couldn't read that photo", Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    if (showSiteControls) {
+        PerSiteControlsContent(store, engine) { showSiteControls = false }
+        return
     }
 
     SubScreen("Settings", onBack) {
@@ -258,16 +464,9 @@ fun SettingsScreen(
                     onClick = { store.putSetting("barPosition", "top") }
                 )
                 InsetDivider()
-                ChoiceRow(
-                    label = "Start page tiles",
-                    supporting = "Show the Frequently visited tiles on the start page",
-                    selected = store.setting("startPageTiles", "true") == "true",
-                    onClick = {
-                        val now = store.setting("startPageTiles", "true") == "true"
-                        store.putSetting("startPageTiles", (!now).toString())
-                    }
-                )
-                InsetDivider()
+                // Batch 4: the "Start page tiles" row moved to
+                // the Start page group below (Mariner key
+                // "showFrequent") — it is no longer here.
                 ChoiceRow(
                     label = "Start page banner",
                     supporting = "Show the Notscape Pioneer banner on the start page",
@@ -277,17 +476,248 @@ fun SettingsScreen(
                         store.putSetting("showBanner", (!now).toString())
                     }
                 )
+                InsetDivider()
+                // Batch 4: web dark mode. GeckoView has no
+                // forced darkening — this sets prefers-color-
+                // scheme, so pages WITH a dark theme follow it
+                // and pages without one stay light. Applies to
+                // pages as they load; already-open pages pick
+                // it up on their next load.
+                Text(
+                    "Web dark mode",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Text(
+                    "Pages with a dark theme follow it. Pages without one stay light — " +
+                        "GeckoView has no forced darkening.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val darkMode = store.setting("webDarkMode", "auto")
+                    listOf(
+                        "auto" to "Auto",
+                        "on" to "On",
+                        "off" to "Off"
+                    ).forEach { (value, label) ->
+                        FilterChip(
+                            selected = darkMode == value,
+                            onClick = {
+                                store.putSetting("webDarkMode", value)
+                                engine.setWebDarkMode(value)
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                InsetDivider()
+                // Batch 4: web text size, 50–200% (Mariner's
+                // slider: draft on drag, save on release).
+                val textZoom = store.setting("webTextZoom", "100").toIntOrNull() ?: 100
+                var textZoomDraft by remember { mutableStateOf<Int?>(null) }
+                val shownZoom = textZoomDraft ?: textZoom
+                Text(
+                    "Web text size — $shownZoom%",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                Slider(
+                    value = shownZoom.toFloat(),
+                    onValueChange = { textZoomDraft = it.toInt() },
+                    onValueChangeFinished = {
+                        textZoomDraft?.let {
+                            store.putSetting("webTextZoom", it.toString())
+                            engine.applyWebTextZoom()
+                        }
+                        textZoomDraft = null
+                    },
+                    valueRange = 50f..200f,
+                    steps = 14,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                InsetDivider()
+                // Batch 4: interface font + scale + custom font
+                // (Mariner's Appearance rows). The wordmark
+                // fonts are separate — Cormorant Garamond Bold
+                // and Montserrat, always.
+                Text(
+                    "Interface font",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                ) {
+                    val uiFont = store.setting("uiFont", "default")
+                    listOf(
+                        "default" to "Default",
+                        "opensans" to "Open Sans",
+                        "roboto" to "Roboto",
+                        "inter" to "Inter",
+                        "custom" to "Custom"
+                    ).forEach { (value, label) ->
+                        FilterChip(
+                            selected = uiFont == value,
+                            onClick = {
+                                if (value == "custom" &&
+                                    !uiFontFile(context).exists()
+                                ) {
+                                    uiFontPicker.launch(arrayOf("*/*"))
+                                } else {
+                                    store.putSetting("uiFont", value)
+                                }
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                if (store.setting("uiFont", "default") == "custom") {
+                    Text(
+                        uiFontName.ifBlank { "Custom font" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        TextButton(onClick = {
+                            uiFontPicker.launch(arrayOf("*/*"))
+                        }) { Text("Replace") }
+                        TextButton(onClick = {
+                            uiFontFile(context).delete()
+                            store.putSetting("uiFont", "default")
+                            store.removeSetting("uiFontCustomName")
+                            uiFontName = ""
+                        }) { Text("Remove") }
+                    }
+                }
+                InsetDivider()
+                // Batch 4: interface text size.
+                Text(
+                    "Interface text size",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                ) {
+                    val uiScale = store.setting("uiFontScale", "1.0").toFloatOrNull() ?: 1.0f
+                    listOf(
+                        0.9f to "Compact",
+                        1.0f to "Default",
+                        1.15f to "Large",
+                        1.3f to "Extra large"
+                    ).forEach { (value, label) ->
+                        FilterChip(
+                            selected = uiScale == value,
+                            onClick = {
+                                store.putSetting("uiFontScale", value.toString())
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Text(
+                    "The quick brown fox jumps over the lazy dog.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 4.dp)
+                )
+                Text(
+                    "Text size follows your system font size throughout the app.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+            }
+
+            GroupTitle("Browsing")
+            SettingsCard {
+                ToggleRow(
+                    label = "Immersive full screen",
+                    supporting = "Hide the status bar while browsing",
+                    checked = store.setting("immersive", "false") == "true",
+                    onCheckedChange = { store.putSetting("immersive", it.toString()) }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Restore tabs on launch",
+                    supporting = "Reopen your tabs when Pioneer starts",
+                    checked = store.setting("restoreTabs", "true") == "true",
+                    onCheckedChange = { store.putSetting("restoreTabs", it.toString()) }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Open links in a new tab",
+                    supporting = "Links you tap open in a new tab instead of this one",
+                    checked = store.setting("openLinksInNewTab", "false") == "true",
+                    onCheckedChange = { store.putSetting("openLinksInNewTab", it.toString()) }
+                )
             }
 
             GroupTitle("Search")
             SettingsCard {
-                ActionRow(
-                    label = "DuckDuckGo",
-                    supporting = "The search engine. Fixed in this phase — searches and " +
-                        "anything that is not an address go to DuckDuckGo.",
-                    actionLabel = "Visit",
-                    onClick = { onOpenUrl("https://duckduckgo.com") }
+                val searchEngine = store.setting("searchEngine", "duckduckgo")
+                val searchEngines = listOf(
+                    "duckduckgo" to "DuckDuckGo (No AI)",
+                    "startpage" to "Startpage",
+                    "google" to "Google",
+                    "bing" to "Bing"
                 )
+                searchEngines.forEachIndexed { index, (value, label) ->
+                    if (index > 0) InsetDivider()
+                    ChoiceRow(
+                        label = label,
+                        selected = searchEngine == value,
+                        onClick = { store.putSetting("searchEngine", value) }
+                    )
+                }
+                InsetDivider()
+                ChoiceRow(
+                    label = "Custom",
+                    selected = searchEngine == "custom",
+                    onClick = { store.putSetting("searchEngine", "custom") }
+                )
+                if (searchEngine == "custom") {
+                    var customDraft by remember {
+                        mutableStateOf(store.setting("customSearchUrl", ""))
+                    }
+                    var customError by remember { mutableStateOf<String?>(null) }
+                    OutlinedTextField(
+                        value = customDraft,
+                        onValueChange = { customDraft = it; customError = null },
+                        label = { Text("Search URL (must contain %s)") },
+                        placeholder = { Text("https://search.example.com/?q=%s") },
+                        singleLine = true,
+                        isError = customError != null,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                    if (customError != null) {
+                        Text(
+                            customError ?: "",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                    TextButton(onClick = {
+                        val validation = SearchTemplate.validate(customDraft.trim())
+                        if (validation != null) {
+                            customError = validation
+                        } else {
+                            store.putSetting("customSearchUrl", customDraft.trim())
+                            customError = null
+                            Toast.makeText(
+                                context, "Search URL saved", Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }) { Text("Save search URL") }
+                }
             }
 
             GroupTitle("Privacy")
@@ -357,6 +787,53 @@ fun SettingsScreen(
                     modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
                 )
                 InsetDivider()
+                // Batch 4: HTTPS-only mode (app-layer — there is
+                // no public HTTPS-only API in GeckoView 159).
+                ToggleRow(
+                    label = "HTTPS-only mode",
+                    supporting = "Plain-http pages show a warning first; " +
+                        "you can allow one site once",
+                    checked = store.setting("httpsOnly", "false") == "true",
+                    onCheckedChange = { store.putSetting("httpsOnly", it.toString()) }
+                )
+                InsetDivider()
+                // Batch 4: autoplay cycle (Mariner's Allowed /
+                // Blocked / Muted only). The "muted" mode is a
+                // probe behaviour, implemented in probe.js.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Autoplay",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    val autoplay = store.setting("autoplay", "allow")
+                    TextButton(onClick = {
+                        val next = when (autoplay) {
+                            "allow" -> "block"
+                            "block" -> "muted"
+                            else -> "allow"
+                        }
+                        store.putSetting("autoplay", next)
+                        engine.applyAutoplay()
+                    }) {
+                        Text(
+                            when (autoplay) {
+                                "block" -> "Blocked"
+                                "muted" -> "Muted only"
+                                else -> "Allowed"
+                            }
+                        )
+                        Icon(
+                            Icons.Filled.KeyboardArrowDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                InsetDivider()
                 ActionRow(
                     label = "Clear history",
                     supporting = "Removes all visited pages from History",
@@ -369,6 +846,351 @@ fun SettingsScreen(
                     supporting = "Clears history and the saved tab session",
                     actionLabel = "Erase",
                     onClick = { showErasePrivate = true }
+                )
+            }
+
+            GroupTitle("Cookies & storage")
+            SettingsCard {
+                ToggleRow(
+                    label = "Accept cookies",
+                    checked = store.setting("cookies", "true") == "true",
+                    onCheckedChange = {
+                        store.putSetting("cookies", it.toString())
+                        engine.applyCookieSettings()
+                    }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Block third-party cookies",
+                    supporting = "Applies to every site — GeckoView has " +
+                        "no per-site cookie exception",
+                    checked = store.setting("blockThirdPartyCookies", "true") == "true",
+                    onCheckedChange = {
+                        store.putSetting("blockThirdPartyCookies", it.toString())
+                        engine.applyCookieSettings()
+                    }
+                )
+                // Session-only cookies and the DOM storage
+                // toggle are omitted on purpose: no GeckoView
+                // 159 API exists for either (no cookie-lifetime
+                // value in the AAR; GeckoSessionSettings has
+                // no setDomStorageEnabled). Not faked.
+            }
+
+            GroupTitle("Connection")
+            SettingsCard {
+                ToggleRow(
+                    label = "Send Global Privacy Control",
+                    supporting = "Ask sites not to sell or share your data (Sec-GPC: 1)",
+                    checked = store.setting("gpc", "true") == "true",
+                    onCheckedChange = {
+                        store.putSetting("gpc", it.toString())
+                        engine.setGlobalPrivacyControl(it)
+                    }
+                )
+                InsetDivider()
+                // Batch 4: referer policy, enforced by the
+                // probe's onBeforeSendHeaders.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Referer policy",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    val policy = store.setting("refererPolicy", "")
+                    TextButton(onClick = {
+                        val next = when (policy) {
+                            "" -> "origin"
+                            "origin" -> "never"
+                            else -> ""
+                        }
+                        store.putSetting("refererPolicy", next)
+                        engine.refreshProbeRules()
+                    }) {
+                        Text(
+                            when (policy) {
+                                "origin" -> "Origin only"
+                                "never" -> "Never"
+                                else -> "Default"
+                            }
+                        )
+                        Icon(
+                            Icons.Filled.KeyboardArrowDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            GroupTitle("Per-site controls")
+            SettingsCard {
+                ActionRow(
+                    label = "Per-site controls",
+                    supporting = "JavaScript, images, popups, ad blocking, text zoom, " +
+                        "desktop site, autoplay and permissions for each site",
+                    actionLabel = "Open",
+                    onClick = { showSiteControls = true }
+                )
+            }
+
+            GroupTitle("Data")
+            SettingsCard {
+                StorageSection()
+            }
+            Spacer(Modifier.height(8.dp))
+            SettingsCard {
+                // Batch 4: clear browsing data (Mariner's Data
+                // page). Cookies, cache and site data clear
+                // completely whatever the range — only history
+                // is in range, and only it shows a count.
+                val clearRange = remember { mutableStateOf("day") }
+                val clearHistoryOn = remember { mutableStateOf(true) }
+                val clearCookiesOn = remember { mutableStateOf(true) }
+                val clearCacheOn = remember { mutableStateOf(true) }
+                val clearSiteDataOn = remember { mutableStateOf(true) }
+                val clearedNote = remember { mutableStateOf<String?>(null) }
+                Text(
+                    "Clear browsing data",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                val cutoff = clearRangeCutoff(
+                    clearRange.value, System.currentTimeMillis()
+                )
+                val historyCount = countHistoryInRange(
+                    store.history.toList(), cutoff
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                ) {
+                    listOf(
+                        "hour" to "Last hour",
+                        "day" to "Last 24 hours",
+                        "week" to "Last 7 days",
+                        "all" to "All time"
+                    ).forEach { (value, label) ->
+                        FilterChip(
+                            selected = clearRange.value == value,
+                            onClick = { clearRange.value = value },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                ToggleRow(
+                    label = "History ($historyCount)",
+                    checked = clearHistoryOn.value,
+                    onCheckedChange = { clearHistoryOn.value = it }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Cookies",
+                    checked = clearCookiesOn.value,
+                    onCheckedChange = { clearCookiesOn.value = it }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Cache",
+                    checked = clearCacheOn.value,
+                    onCheckedChange = { clearCacheOn.value = it }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Site data",
+                    checked = clearSiteDataOn.value,
+                    onCheckedChange = { clearSiteDataOn.value = it }
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        val done = ArrayList<String>()
+                        if (clearHistoryOn.value) {
+                            store.clearHistoryOlderThan(cutoff)
+                            done.add("history ($historyCount)")
+                        }
+                        if (clearCookiesOn.value) {
+                            engine.clearGeckoData(StorageController.ClearFlags.COOKIES)
+                            done.add("cookies")
+                        }
+                        if (clearCacheOn.value) {
+                            engine.clearGeckoData(StorageController.ClearFlags.ALL_CACHES)
+                            StorageInfo.clearCache(context)
+                            done.add("cache")
+                        }
+                        if (clearSiteDataOn.value) {
+                            engine.clearGeckoData(StorageController.ClearFlags.SITE_DATA)
+                            done.add("site data")
+                        }
+                        clearedNote.value = if (done.isEmpty()) {
+                            "Nothing selected."
+                        } else {
+                            "Cleared: " + done.joinToString(", ") + "."
+                        }
+                    },
+                    enabled = clearHistoryOn.value || clearCookiesOn.value ||
+                        clearCacheOn.value || clearSiteDataOn.value,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Clear browsing data") }
+                if (clearedNote.value != null) {
+                    Text(
+                        clearedNote.value ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+                Text(
+                    "Cookies, cache and site data clear completely whatever the range. " +
+                        "Only history is cleared by range.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            SettingsCard {
+                ToggleRow(
+                    label = "Delete browsing data on exit",
+                    supporting = "History, cookies, cache, site data, and open tabs " +
+                        "are cleared when you leave the app",
+                    checked = store.setting("deleteOnExit", "false") == "true",
+                    onCheckedChange = { store.putSetting("deleteOnExit", it.toString()) }
+                )
+            }
+
+            GroupTitle("Start page")
+            SettingsCard {
+                // Batch 4: wallpaper (Follow theme / Custom
+                // photo). The photo is saved as-is,
+                // downscaled — no crop/framing dialog.
+                Text(
+                    "Wallpaper",
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                val wallpaper = store.setting("wallpaper", "auto")
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                ) {
+                    FilterChip(
+                        selected = wallpaper != "custom",
+                        onClick = { store.putSetting("wallpaper", "auto") },
+                        label = { Text("Follow theme") }
+                    )
+                    FilterChip(
+                        selected = wallpaper == "custom",
+                        onClick = {
+                            if (customWallpaperExists) {
+                                store.putSetting("wallpaper", "custom")
+                            } else {
+                                wallpaperPicker.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly
+                                    )
+                                )
+                            }
+                        },
+                        label = { Text("Custom photo") }
+                    )
+                }
+                if (wallpaper == "custom" && customWallpaperExists) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        TextButton(onClick = {
+                            wallpaperPicker.launch(
+                                PickVisualMediaRequest(
+                                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                                )
+                            )
+                        }) { Text("Replace photo") }
+                        TextButton(onClick = {
+                            customWallpaperFile.delete()
+                            customWallpaperExists = false
+                            store.putSetting("wallpaper", "auto")
+                        }) { Text("Remove photo") }
+                    }
+                }
+                InsetDivider()
+                // Batch 4: home-page URL + home button.
+                var homeDraft by remember {
+                    mutableStateOf(store.setting("homePage", ""))
+                }
+                var homeSaved by remember { mutableStateOf(false) }
+                OutlinedTextField(
+                    value = homeDraft,
+                    onValueChange = { homeDraft = it; homeSaved = false },
+                    label = { Text("Home page URL") },
+                    placeholder = { Text("Leave blank for the start page") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                )
+                TextButton(onClick = {
+                    store.putSetting("homePage", homeDraft.trim())
+                    homeSaved = true
+                }) {
+                    Text(if (homeSaved) "Home page saved" else "Save home page")
+                }
+                InsetDivider()
+                ToggleRow(
+                    label = "Show home button",
+                    supporting = "Show the Home button in the browser",
+                    checked = store.setting("showHomeButton", "true") == "true",
+                    onCheckedChange = { store.putSetting("showHomeButton", it.toString()) }
+                )
+                InsetDivider()
+                // Batch 4: showFrequent, moved from the old
+                // "Start page tiles" row (Mariner key).
+                val showFreq = if ("showFrequent" in store.settings) {
+                    store.setting("showFrequent", "true") == "true"
+                } else {
+                    store.setting("startPageTiles", "true") == "true"
+                }
+                ToggleRow(
+                    label = "Frequently visited tiles",
+                    supporting = "Show the Frequently visited tiles on the start page",
+                    checked = showFreq,
+                    onCheckedChange = { store.putSetting("showFrequent", it.toString()) }
+                )
+            }
+
+            GroupTitle("Accessibility")
+            SettingsCard {
+                ToggleRow(
+                    label = "Reduced motion",
+                    supporting = "Pages are told you prefer reduced motion, and " +
+                        "in-page animation and transitions are stilled",
+                    checked = store.setting("reducedMotion", "false") == "true",
+                    onCheckedChange = {
+                        store.putSetting("reducedMotion", it.toString())
+                        engine.setReducedMotion(it)
+                    }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Force zoom",
+                    supporting = "Pages that disable scaling stay zoomable",
+                    checked = store.setting("forceZoom", "false") == "true",
+                    onCheckedChange = {
+                        store.putSetting("forceZoom", it.toString())
+                        engine.setForceZoom(it)
+                    }
+                )
+                InsetDivider()
+                ActionRow(
+                    label = "System caption settings",
+                    supporting = "Captions for videos and other media",
+                    actionLabel = "Open",
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Settings.ACTION_CAPTIONING_SETTINGS)
+                            )
+                        }
+                    }
                 )
             }
 
@@ -420,8 +1242,20 @@ fun SettingsScreen(
             GroupTitle("About")
             SettingsCard {
                 ActionRow(
+                    label = "Local-only and private",
+                    supporting = "Your data is stored on this device.",
+                    onClick = { }
+                )
+                InsetDivider()
+                ActionRow(
                     label = "Version",
                     supporting = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    onClick = { }
+                )
+                InsetDivider()
+                ActionRow(
+                    label = "Package",
+                    supporting = context.packageName,
                     onClick = { }
                 )
                 InsetDivider()
@@ -429,6 +1263,45 @@ fun SettingsScreen(
                     label = "GeckoView",
                     supporting = "$GECKOVIEW_VERSION (stable)",
                     onClick = { }
+                )
+                InsetDivider()
+                ActionRow(
+                    label = "Set as default browser",
+                    supporting = "Open links in Notscape Pioneer",
+                    actionLabel = "Set",
+                    onClick = {
+                        runCatching {
+                            val intent = if (Build.VERSION.SDK_INT >= 29) {
+                                val rm = context.getSystemService(
+                                    RoleManager::class.java
+                                )
+                                if (rm != null &&
+                                    rm.isRoleAvailable(RoleManager.ROLE_BROWSER) &&
+                                    !rm.isRoleHeld(RoleManager.ROLE_BROWSER)
+                                ) {
+                                    rm.createRequestRoleIntent(RoleManager.ROLE_BROWSER)
+                                } else {
+                                    Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+                                }
+                            } else {
+                                Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+                            }
+                            context.startActivity(intent)
+                        }.onFailure {
+                            Log.w(
+                                "Pioneer",
+                                "SettingsScreen.openRoleSettings: " +
+                                    it.javaClass.simpleName
+                            )
+                        }
+                    }
+                )
+                InsetDivider()
+                ActionRow(
+                    label = "See the welcome guide again",
+                    supporting = "Replay the first-run guide",
+                    actionLabel = "Open",
+                    onClick = onReplayWelcome
                 )
                 InsetDivider()
                 ActionRow(
@@ -477,5 +1350,466 @@ fun SettingsScreen(
                 TextButton(onClick = { showErasePrivate = false }) { Text("Cancel") }
             }
         )
+    }
+}
+
+/**
+ * Storage sizes (Batch 4, Mariner's StorageSection shape,
+ * Pioneer areas only): measured off the UI thread, largest
+ * first, with the cache always listed and a Clear cache
+ * button that empties the cache directories.
+ */
+@Composable
+private fun StorageSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var areas by remember { mutableStateOf<List<StorageInfo.Area>?>(null) }
+    var total by remember { mutableStateOf(0L) }
+    var cleared by remember { mutableStateOf<String?>(null) }
+
+    fun refresh() {
+        scope.launch {
+            val measured = withContext(Dispatchers.IO) {
+                StorageInfo.measure(context)
+            }
+            areas = measured
+            total = measured.sumOf { it.bytes }
+        }
+    }
+    LaunchedEffect(Unit) { refresh() }
+
+    val list = areas
+    if (list == null) {
+        Text("Measuring…", style = MaterialTheme.typography.bodyLarge)
+    } else {
+        list.forEachIndexed { i, area ->
+            if (i > 0) InsetDivider()
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    area.label,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    StorageInfo.formatSize(area.bytes),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        InsetDivider()
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Total",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                StorageInfo.formatSize(total),
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    val freed = withContext(Dispatchers.IO) {
+                        StorageInfo.clearCache(context)
+                    }
+                    cleared = "Cache cleared — ${StorageInfo.formatSize(freed)} freed."
+                    refresh()
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Clear cache") }
+        if (cleared != null) {
+            Text(
+                cleared ?: "",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+    }
+}
+
+// --- Clear-data helpers (Mariner data/Store.kt:155-170, verbatim logic) ---
+
+/** The cutoff in ms for a clear-data time range: hour/day/week, else 0 (all time). */
+private fun clearRangeCutoff(range: String, nowMs: Long): Long = when (range) {
+    "hour" -> nowMs - 3_600_000L
+    "day" -> nowMs - 86_400_000L
+    "week" -> nowMs - 7L * 86_400_000L
+    else -> 0L
+}
+
+/** How many history entries fall inside the range (cutoff ≤ 0 = all of them). */
+private fun countHistoryInRange(
+    history: List<HistoryEntry>,
+    cutoffMs: Long
+): Int = if (cutoffMs <= 0) {
+    history.size
+} else {
+    history.count { it.visitedAt >= cutoffMs }
+}
+
+// --- Per-site controls (Batch 4, Mariner's panel shape) ---
+
+/**
+ * The per-site controls screen: one collapsed card per site
+ * (hosts from site settings + history), expanding to the
+ * per-site rows. Every change reloads that host's open tabs
+ * ([Engine.reloadTabsOnHost] — Pioneer has no
+ * `requestSiteReload`).
+ *
+ * Deliberately OMITTED: the Third-party cookies row — no
+ * per-site cookie API exists in GeckoView 159 (see the
+ * header comment). Desktop site is a two-state cycle
+ * (On/Default) — there is no global desktop mode to force
+ * off against.
+ */
+@Composable
+private fun PerSiteControlsContent(
+    store: PioneerStore,
+    engine: Engine,
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    var siteQuery by remember { mutableStateOf("") }
+    var expandedHost by remember { mutableStateOf<String?>(null) }
+    var siteLimit by remember { mutableStateOf(60) }
+    val httpsOnly = store.setting("httpsOnly", "false") == "true"
+
+    SubScreen("Per-site controls", onBack) {
+        Column(
+            modifier = Modifier.fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp)
+        ) {
+            OutlinedTextField(
+                value = siteQuery,
+                onValueChange = { siteQuery = it },
+                label = { Text("Search sites") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+            )
+            val hosts = remember(store.revision, siteQuery) {
+                (store.siteHosts() + store.history.mapNotNull {
+                    runCatching { Uri.parse(it.url).host }.getOrNull()
+                })
+                    .filter { !it.isNullOrBlank() }
+                    .map { it!! }
+                    .filter {
+                        siteQuery.isBlank() ||
+                            it.contains(siteQuery, ignoreCase = true)
+                    }
+                    .distinct()
+                    .sorted()
+            }
+            if (hosts.isEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "No sites yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp)
+                )
+            }
+            hosts.take(siteLimit).forEach { host ->
+                val expanded = expandedHost == host
+                Spacer(Modifier.height(8.dp))
+                SettingsCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            host,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        IconButton(onClick = {
+                            expandedHost = if (expanded) null else host
+                        }) {
+                            Icon(
+                                if (expanded) Icons.Filled.KeyboardArrowUp
+                                else Icons.Filled.KeyboardArrowDown,
+                                contentDescription = if (expanded) "Collapse" else "Expand"
+                            )
+                        }
+                    }
+                    if (expanded) {
+                        val site = store.siteSetting(host)
+                        val zoom = store.siteZoom(host)
+                        val autoplay = store.siteAutoplay(host)
+                        InsetDivider()
+                        ToggleRow(
+                            label = "JavaScript",
+                            checked = site.javaScript,
+                            onCheckedChange = {
+                                store.putSiteSetting(site.copy(javaScript = it))
+                                engine.reloadTabsOnHost(host)
+                            }
+                        )
+                        InsetDivider()
+                        ToggleRow(
+                            label = "Images",
+                            checked = !site.blockImages,
+                            onCheckedChange = {
+                                store.putSiteSetting(site.copy(blockImages = !it))
+                                engine.refreshProbeRules()
+                                engine.reloadTabsOnHost(host)
+                            }
+                        )
+                        InsetDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Popups",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            TextButton(onClick = {
+                                val next = when {
+                                    site.blockPopups -> site.copy(
+                                        allowPopups = true, blockPopups = false
+                                    )
+                                    site.allowPopups -> site.copy(
+                                        allowPopups = false, blockPopups = false
+                                    )
+                                    else -> site.copy(
+                                        allowPopups = false, blockPopups = true
+                                    )
+                                }
+                                store.putSiteSetting(next)
+                                engine.reloadTabsOnHost(host)
+                            }) {
+                                Text(
+                                    when {
+                                        site.allowPopups -> "Allowed"
+                                        site.blockPopups -> "Always denied"
+                                        else -> "Blocked"
+                                    }
+                                )
+                                Icon(
+                                    Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        InsetDivider()
+                        ToggleRow(
+                            label = "Ad blocking",
+                            checked = !site.disableBlocking,
+                            onCheckedChange = {
+                                engine.setBlockingEnabled(host, it)
+                                engine.reloadTabsOnHost(host)
+                            }
+                        )
+                        if (httpsOnly) {
+                            InsetDivider()
+                            ToggleRow(
+                                label = "Allow plain HTTP",
+                                supporting = "Let this site load over http://",
+                                checked = store.isHttpsException(host),
+                                onCheckedChange = {
+                                    store.setHttpsException(host, it)
+                                    engine.reloadTabsOnHost(host)
+                                }
+                            )
+                        }
+                        InsetDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Text zoom",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            TextButton(
+                                onClick = {
+                                    val next = (zoom - 0.25f).coerceAtLeast(0.5f)
+                                    store.putSiteZoom(host, next)
+                                    engine.reloadTabsOnHost(host)
+                                },
+                                enabled = zoom > 0.5f
+                            ) { Text("−") }
+                            Text(
+                                if (zoom != 1.0f) "${(zoom * 100).toInt()}%" else "Default",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            TextButton(
+                                onClick = {
+                                    val next = (zoom + 0.25f).coerceAtMost(2.0f)
+                                    store.putSiteZoom(host, next)
+                                    engine.reloadTabsOnHost(host)
+                                },
+                                enabled = zoom < 2.0f
+                            ) { Text("+") }
+                            TextButton(onClick = {
+                                store.putSiteZoom(host, 1.0f)
+                                engine.reloadTabsOnHost(host)
+                            }) { Text("Reset") }
+                        }
+                        InsetDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Desktop site",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            TextButton(onClick = {
+                                store.putSiteDesktop(host, !store.siteDesktop(host))
+                                engine.reloadTabsOnHost(host)
+                            }) {
+                                Text(if (store.siteDesktop(host)) "On" else "Default")
+                                Icon(
+                                    Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        InsetDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Autoplay",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            TextButton(onClick = {
+                                val next = when (autoplay) {
+                                    "" -> "block"
+                                    "block" -> "muted"
+                                    "muted" -> "allow"
+                                    else -> ""
+                                }
+                                store.putSiteAutoplay(host, next)
+                                engine.reloadTabsOnHost(host)
+                            }) {
+                                Text(
+                                    when (autoplay) {
+                                        "block" -> "Blocked"
+                                        "muted" -> "Muted only"
+                                        "allow" -> "Allowed"
+                                        else -> "Default"
+                                    }
+                                )
+                                Icon(
+                                    Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                        InsetDivider()
+                        SitePermissionRow(
+                            store = store,
+                            engine = engine,
+                            host = host,
+                            label = "Camera",
+                            resource = "camera"
+                        )
+                        InsetDivider()
+                        SitePermissionRow(
+                            store = store,
+                            engine = engine,
+                            host = host,
+                            label = "Microphone",
+                            resource = "microphone"
+                        )
+                        InsetDivider()
+                        SitePermissionRow(
+                            store = store,
+                            engine = engine,
+                            host = host,
+                            label = "Location",
+                            resource = "location"
+                        )
+                        InsetDivider()
+                        TextButton(
+                            onClick = {
+                                engine.clearDataForHost(host)
+                                Toast.makeText(
+                                    context,
+                                    "Data cleared for $host",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                engine.reloadTabsOnHost(host)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Clear data for this site") }
+                    }
+                }
+            }
+            if (hosts.size > siteLimit) {
+                TextButton(
+                    onClick = { siteLimit += 60 },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Show more sites") }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/** One Ask / Allowed / Denied cycle row in the per-site panel. */
+@Composable
+private fun SitePermissionRow(
+    store: PioneerStore,
+    engine: Engine,
+    host: String,
+    label: String,
+    resource: String
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyLarge
+        )
+        val current = store.sitePermission(host, resource)
+        TextButton(onClick = {
+            val next = when (current) {
+                "" -> "allow"
+                "allow" -> "deny"
+                else -> ""
+            }
+            store.putSitePermission(host, resource, next)
+            engine.reloadTabsOnHost(host)
+        }) {
+            Text(
+                when (current) {
+                    "allow" -> "Allowed"
+                    "deny" -> "Denied"
+                    else -> "Ask"
+                }
+            )
+            Icon(
+                Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+        }
     }
 }

@@ -4,8 +4,10 @@
  * lazy-loaded players). Reports media element / resource URLs and, on
  * DRM-ish pages only, Widevine EME availability to the app via native
  * messaging. It also applies per-site text zoom on the app's native
- * messages (see the zoom block below) — that is its only page change
- * besides the video pop-up button (Phase 3, below).
+ * messages (see the zoom block below), reduced motion and
+ * autoplay mute on the app's native messages (Batch 4,
+ * below) — those are its only page changes besides the
+ * video pop-up button (Phase 3, below).
  *
  * Media scan (Mariner MediaDetect.JS, carried over): video/audio
  * currentSrc/src + <source>, a[href] media links (label = link text
@@ -81,9 +83,131 @@
           window.scrollTo(0, msg.y);
           setTimeout(function () { window.scrollTo(0, msg.y); }, 500);
         }
+        // Batch 4: reduced motion + autoplay mute, pushed
+        // live by the app (the script also asks for both on
+        // load, below).
+        if (msg && msg.type === "reduced-motion") applyReducedMotion(!!msg.on);
+        if (msg && msg.type === "autoplay-muted") applyAutoplayMuted(!!msg.muted);
       });
     }
   } catch (e) { /* live zoom push unavailable; zoom-query still applies */ }
+
+  /* Reduced motion + autoplay mute (Batch 4): the app pushes
+   * the current settings on the native port and the script
+   * asks for them on load ("privacy-query" /
+   * "autoplay-query") — the replies resolve the
+   * sendNativeMessage promises, so a missed push is not
+   * fatal. Reduced motion overrides matchMedia
+   * prefers-reduced-motion and stills animations (Mariner's
+   * DOCUMENT_START script, probe-shaped, document_idle —
+   * an early animation may run once before it lands).
+   * Autoplay mute mutes media until the first pointer or
+   * key interaction, then stops re-muting for the page.
+   */
+  function applyReducedMotion(on) {
+    try {
+      if (on) {
+        if (window.__nsReducedMotion) return;
+        window.__nsReducedMotion = true;
+        window.__nsOrigMatchMedia = window.matchMedia.bind(window);
+        window.matchMedia = function (q) {
+          var m = window.__nsOrigMatchMedia(q);
+          if (typeof q === "string" &&
+              q.indexOf("prefers-reduced-motion") >= 0) {
+            return {
+              matches: true, media: q, onchange: null,
+              addListener: function () {},
+              removeListener: function () {},
+              addEventListener: function () {},
+              removeEventListener: function () {},
+              dispatchEvent: function () { return false; }
+            };
+          }
+          return m;
+        };
+        var st = document.createElement("style");
+        st.id = "notscape-reduced-motion";
+        st.textContent = "*{animation-duration:0.01ms!important;" +
+          "animation-iteration-count:1!important;" +
+          "transition-duration:0.01ms!important;" +
+          "scroll-behavior:auto!important}";
+        (document.head || document.documentElement).appendChild(st);
+      } else if (window.__nsReducedMotion) {
+        window.__nsReducedMotion = false;
+        if (window.__nsOrigMatchMedia) {
+          window.matchMedia = window.__nsOrigMatchMedia;
+        }
+        var old = document.getElementById("notscape-reduced-motion");
+        if (old) old.remove();
+      }
+    } catch (e) { /* best-effort */ }
+  }
+
+  var autoplayMuted = false;
+
+  function applyAutoplayMuted(muted) {
+    autoplayMuted = !!muted;
+    try {
+      document.querySelectorAll("video, audio").forEach(function (m) {
+        if (autoplayMuted && !m.muted) {
+          m.muted = true;
+          m.__nsMutedByUs = true;
+        }
+      });
+    } catch (e) { /* page not ready */ }
+  }
+
+  document.addEventListener("play", function (e) {
+    if (autoplayMuted && e.target &&
+        (e.target.tagName === "VIDEO" || e.target.tagName === "AUDIO")) {
+      try {
+        if (!e.target.muted) {
+          e.target.muted = true;
+          e.target.__nsMutedByUs = true;
+        }
+      } catch (err) { /* ignore */ }
+    }
+  }, true);
+
+  ["pointerdown", "keydown"].forEach(function (ev) {
+    document.addEventListener(ev, function () {
+      if (!autoplayMuted) return;
+      autoplayMuted = false;
+      try {
+        document.querySelectorAll("video, audio").forEach(function (m) {
+          if (m.__nsMutedByUs) {
+            m.muted = false;
+            m.__nsMutedByUs = false;
+          }
+        });
+      } catch (e) { /* ignore */ }
+    }, true);
+  });
+
+  function queryPrivacy() {
+    try {
+      browser.runtime.sendNativeMessage("pioneer", { type: "privacy-query" })
+        .then(function (reply) {
+          if (reply && typeof reply.reducedMotion === "boolean") {
+            applyReducedMotion(reply.reducedMotion);
+          }
+        })
+        .catch(function () { /* default: motion on */ });
+    } catch (e) { /* native bridge not ready */ }
+  }
+
+  function queryAutoplay() {
+    try {
+      browser.runtime.sendNativeMessage("pioneer", {
+        type: "autoplay-query",
+        host: location.hostname || ""
+      }).then(function (reply) {
+        if (reply && typeof reply.muted === "boolean") {
+          applyAutoplayMuted(reply.muted);
+        }
+      }).catch(function () { /* default: not muted */ });
+    } catch (e) { /* native bridge not ready */ }
+  }
 
   function collect() {
     var out = [];
@@ -294,6 +418,8 @@
   installVideoPopup();
   report("idle");
   queryZoom();
+  queryPrivacy();
+  queryAutoplay();
   setTimeout(function () { report("t+2s"); }, 2000);
   setTimeout(function () { report("t+6s"); }, 6000);
 })();

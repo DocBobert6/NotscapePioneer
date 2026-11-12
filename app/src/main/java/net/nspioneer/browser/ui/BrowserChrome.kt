@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -351,6 +352,9 @@ internal object BrowserMenuRows {
         "sharePage" to "Share page",
         "copyPageUrl" to "Copy page URL",
         "openOtherBrowser" to "Open in other browser",
+        // Batch 4: pin the page to the launcher as an
+        // app-mode shortcut (Mariner BrowserChrome.kt:820).
+        "addToHome" to "Add to home screen",
         "bookmark" to "Bookmark this page",
         "favorites" to "Add to favorites",
         "findInPage" to "Find in page",
@@ -425,7 +429,7 @@ internal object BrowserMenuRows {
      * and therefore never render for a private tab: a
      * private tab saves nothing. */
     val PRIVATE_HIDDEN: Set<String> =
-        setOf("bookmark", "favorites", "openOtherBrowser")
+        setOf("bookmark", "favorites", "openOtherBrowser", "addToHome")
     /** One authority for the private-tab menu: a row shows for a
      * private tab only when it is not a persisting row. */
     fun visibleForTab(id: String, isPrivate: Boolean): Boolean =
@@ -589,7 +593,9 @@ internal fun BrowserMenuRowsContent(
     onOpenScreen: (PioneerScreen) -> Unit,
     onCopyStatus: () -> Unit,
     onInstallUBlock: () -> Unit,
-    onCustomize: () -> Unit
+    onCustomize: () -> Unit,
+    // Batch 4: pin the page to the launcher (app mode).
+    onAddToHome: () -> Unit
 ) {
     val context = LocalContext.current
     val rev = store.revision
@@ -642,6 +648,14 @@ internal fun BrowserMenuRowsContent(
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                     context.startActivity(Intent.createChooser(intent, "Open with"))
                 }.onFailure { android.util.Log.w("Pioneer", "BrowserChrome.openWith: ${it.javaClass.simpleName}") }
+            }
+        },
+        // Batch 4: pin the page to the launcher as an app-mode
+        // shortcut. Mariner's row icon was not confirmed from
+        // the read, so this uses the Home icon.
+        MenuSlot("addToHome", shows("addToHome", hasPage)) {
+            MenuRowVisible(store, "addToHome", "Add to home screen", Icons.Filled.Home, isPrivate = isPrivate) {
+                onDismiss(); onAddToHome()
             }
         },
         MenuSlot("bookmark", shows("bookmark", hasPage)) {
@@ -811,7 +825,8 @@ internal fun BrowserMenuPage(
     onOpenScreen: (PioneerScreen) -> Unit,
     onCopyStatus: () -> Unit,
     onInstallUBlock: () -> Unit,
-    onCustomize: () -> Unit
+    onCustomize: () -> Unit,
+    onAddToHome: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize()
@@ -837,7 +852,8 @@ internal fun BrowserMenuPage(
                     onOpenScreen = onOpenScreen,
                     onCopyStatus = onCopyStatus,
                     onInstallUBlock = onInstallUBlock,
-                    onCustomize = onCustomize
+                    onCustomize = onCustomize,
+                    onAddToHome = onAddToHome
                 )
             }
         }

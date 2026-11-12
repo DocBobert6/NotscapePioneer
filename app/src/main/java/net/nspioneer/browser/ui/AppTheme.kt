@@ -49,9 +49,11 @@ import net.nspioneer.browser.data.PioneerStore
  * The banner typefaces are Mariner's Phase G pairing, carried
  * verbatim: Cormorant Garamond Bold carries the wordmark;
  * Montserrat carries the letterspaced line and the subtitle.
- * Both are OFL-licensed. The interface-font setting does not
- * exist in Phase 2, so the UI font is always the platform
- * default.
+ * Both are OFL-licensed. Batch 4: the interface font and
+ * size (uiFont / uiFontScale) apply here and only here —
+ * every Material text style takes the family and the scale,
+ * so the whole UI follows at once. The wordmark and the
+ * reader keep theirs.
  */
 val WordmarkFontFamily = FontFamily(
     Font(R.font.cormorant_bold)
@@ -60,6 +62,43 @@ val SmallCapsFontFamily = FontFamily(
     Font(R.font.montserrat_regular, FontWeight.Normal),
     Font(R.font.montserrat_semibold, FontWeight.SemiBold)
 )
+
+/** The custom interface-font file (Mariner AppTheme.kt:156). */
+fun uiFontFile(context: android.content.Context): java.io.File =
+    java.io.File(context.filesDir, "fonts/ui-font")
+
+/**
+ * The interface font for the uiFont setting (Batch 4,
+ * Mariner AppTheme.kt:159-202): the bundled faces, the
+ * platform default, or the user's own imported file
+ * (registered at four weights — one file carries one true
+ * weight, the rest are the platform's synthesis). Null
+ * means the platform default. The brand faces above are
+ * NOT UI and never pass through here.
+ */
+fun resolveUiFontFamily(
+    context: android.content.Context,
+    store: PioneerStore
+): FontFamily? =
+    when (store.setting("uiFont", "default")) {
+        "opensans" -> FontFamily(Font(R.font.opensans))
+        "inter" -> FontFamily(Font(R.font.inter))
+        "roboto" -> FontFamily.SansSerif
+        "custom" -> {
+            val f = uiFontFile(context)
+            if (f.exists()) {
+                FontFamily(
+                    Font(f, FontWeight.Normal),
+                    Font(f, FontWeight.Medium),
+                    Font(f, FontWeight.SemiBold),
+                    Font(f, FontWeight.Bold)
+                )
+            } else {
+                null
+            }
+        }
+        else -> null
+    }
 
 val IosInk = Color(0xFF1C1C1E)
 val IosInkDark = Color(0xFFF2F2F7)
@@ -203,9 +242,14 @@ fun NotscapeTheme(store: PioneerStore, content: @Composable () -> Unit) {
         dark -> notscapeDarkColors()
         else -> notscapeLightColors()
     }
+    // Batch 4: the interface font and size (Mariner 0.0.975).
+    // The scale is coerced to 0.8–1.4, default 1.0.
+    val uiFamily = resolveUiFontFamily(context, store)
+    val uiScale = store.setting("uiFontScale", "1.0").toFloatOrNull()
+        ?.coerceIn(0.8f, 1.4f) ?: 1.0f
     MaterialTheme(
         colorScheme = scheme,
-        typography = notscapeTypography(),
+        typography = notscapeTypography(uiFamily, uiScale),
         shapes = notscapeShapes()
     ) {
         // Material 3 does not seed LocalContentColor from the

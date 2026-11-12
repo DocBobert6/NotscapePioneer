@@ -8,6 +8,14 @@ import net.nspioneer.browser.media.DetectedMedia  // defined in C's
 
 data class FindResult(val ordinal: Int, val count: Int, val found: Boolean)
 
+/** What a long-press landed on (Batch 4): the link URL
+ *  (when the element is or contains a link) and the image
+ *  URL (when the element is an image — ContentDelegate
+ *  TYPE_IMAGE + srcUri, verified against the pinned 159
+ *  AAR). Either may be null; at least one is set when the
+ *  menu shows. */
+data class LongPressTarget(val linkUrl: String?, val imageUrl: String?)
+
 /** One entry of a tab's session (back/forward) history, from
  *  GeckoSession.SessionState (Batch 2). [index] is the absolute
  *  index in the session list; [isCurrent] the page showing now. */
@@ -81,9 +89,12 @@ interface EngineTab {
     // reports it via Engine.onTabCreated (below). There is no
     // onNewTabRequested on the tab; the shell opens long-press "new
     // tab" links itself via engine.createTab + load.
-    var onLongPressLink: ((url: String) -> Unit)?  // if GeckoView exposes
-        // a long-press/context hook; otherwise leave null (researcher
-        // decides — see PHASE2-GECKOVIEW-API.md).
+    var onLongPressTarget: ((LongPressTarget) -> Unit)?  // Batch 4:
+        // the context-menu hook (GeckoSession.ContentDelegate.
+        // onContextMenu, verified against the pinned 159 AAR:
+        // element.linkUri + element.srcUri + type). Fires when
+        // a link or an image is long-pressed; the shell shows
+        // the long-press sheet.
     var onCrash: (() -> Unit)?
 
     // ---- Phase 3: media detection ----
@@ -199,6 +210,63 @@ interface Engine {
     // arrives as onTabCreated (Phase 2), not here.
     var onPopupPrompt: ((targetUri: String?) -> Unit)?        // on Engine
     fun answerPopupPrompt(allow: Boolean)
+
+    // ---- Batch 4: settings the engine enforces ----
+    // Web dark mode ("Auto" | "On" | "Off"): GeckoView has no
+    // forced darkening — this sets prefers-color-scheme only
+    // (GeckoRuntimeSettings.setPreferredColorScheme, verified
+    // against the pinned 159 AAR). Pages with a dark theme
+    // follow it; pages without one stay light.
+    fun setWebDarkMode(mode: String)
+    fun setForceZoom(enabled: Boolean)   // runtime forceUserScalableEnabled
+    fun setGlobalPrivacyControl(enabled: Boolean)  // runtime GPC
+    // Re-read the cookies / block-third-party settings and
+    // apply the cookie behaviour (ACCEPT_NONE /
+    // ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS /
+    // ACCEPT_NON_TRACKERS). Called at runtime creation and
+    // whenever the settings change; setTrackingProtection
+    // routes through it instead of hardcoding a behaviour.
+    fun applyCookieSettings()
+    // Reduced motion: push the current setting to every open
+    // tab's probe port; pages ask for it on load
+    // ("privacy-query"). The probe overrides matchMedia and
+    // stills animations (Mariner's DOCUMENT_START script,
+    // probe-shaped, document_idle — an early animation may
+    // run once before it lands).
+    fun setReducedMotion(enabled: Boolean)
+    // Re-apply the effective text size (per-site override, else
+    // the global webTextZoom) to every open tab.
+    fun applyWebTextZoom()
+    // Push the current autoplay-mute state to every open tab's
+    // probe port (the probe mutes media until the first
+    // pointer/key interaction). Per-site changes reload the
+    // tab instead, which re-queries.
+    fun applyAutoplay()
+    // Reload every open tab on [host] (per-site panel changes).
+    // Applies the stored per-site JavaScript value to the
+    // session first, so the reload is the only one.
+    fun reloadTabsOnHost(host: String)
+    // Re-read the user's own block rules from the store and
+    // push them to the probe (the long-press "Block this
+    // element" row).
+    fun syncUserRules()
+    // Re-push the rule set (per-site image blocking /
+    // referer policy changed).
+    fun refreshProbeRules()
+    // Clear Gecko storage: StorageController.clearData flags
+    // (COOKIES / ALL_CACHES / SITE_DATA …).
+    fun clearGeckoData(flags: Long)
+    // Clear all site data for one host
+    // (StorageController.clearDataFromHost, SITE_DATA).
+    fun clearDataForHost(host: String)
+    // The https:// upgrade of an http URL for [tab], or null
+    // when the URL cannot be upgraded (not http, or the host
+    // is non-upgradeable / a previous upgrade failed there).
+    fun httpsUpgradeFor(tab: EngineTab, raw: String): String?
+    // A non-upgradeable http load was stopped by HTTPS-only
+    // mode: the shell shows the interstitial and, on the
+    // user's word, excepts the host and loads it.
+    var onHttpsWarn: ((url: String) -> Unit)?
 }
 
 // ---- Phase 3: downloads ----

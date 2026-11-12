@@ -30,6 +30,7 @@ import net.nspioneer.browser.data.TabSnapshot
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.EngineTab
 import net.nspioneer.browser.engine.GeckoEngine
+import net.nspioneer.browser.engine.LongPressTarget
 import net.nspioneer.browser.ui.BookmarksScreen
 import net.nspioneer.browser.ui.BrowserScreen
 import net.nspioneer.browser.ui.DiagnosticsScreen
@@ -42,6 +43,8 @@ import net.nspioneer.browser.ui.LicencesScreen
 import net.nspioneer.browser.ui.NotscapeTheme
 import net.nspioneer.browser.ui.PioneerScreen
 import net.nspioneer.browser.ui.SettingsScreen
+import net.nspioneer.browser.ui.WelcomeScreen
+import org.mozilla.geckoview.StorageController
 
 /**
  * Notscape Pioneer — Phase 2 shell.
@@ -68,6 +71,11 @@ private data class UBlockPrompt(
     val decide: (Boolean) -> Unit
 )
 
+/** The intent extra marking a pinned-site (app mode) launch
+ *  (Mariner TabList.kt:115). The shortcut intent carries
+ *  ACTION_VIEW + the site URL + this extra. */
+const val APP_MODE_EXTRA = "notscape_app_mode"
+
 class MainActivity : ComponentActivity() {
 
     private lateinit var store: PioneerStore
@@ -83,7 +91,11 @@ class MainActivity : ComponentActivity() {
     private val homeTabIds = mutableStateSetOf<Int>()
     private var browserBackHandler: (() -> Boolean)? = null
     private var uBlockPrompt by mutableStateOf<UBlockPrompt?>(null)
-    private var longPressUrl by mutableStateOf<String?>(null)
+    private var longPressTarget by mutableStateOf<LongPressTarget?>(null)
+    // Batch 4: first-run welcome (shown until "onboarded" is
+    // set) and app mode (the id of the pinned-site tab).
+    private var showWelcome by mutableStateOf(false)
+    private var appModeTabId by mutableStateOf<Int?>(null)
 
     private val activeTab: EngineTab?
         get() = tabs.getOrNull(activeTabIndex)
@@ -129,9 +141,25 @@ class MainActivity : ComponentActivity() {
         restoreTabSession()
         closedTabs.addAll(store.loadClosedTabs())
 
-        // Launched from another app with a link (ACTION_VIEW):
-        // open it in the active tab.
-        handleViewIntent(intent)
+        // Batch 4: first-run welcome. An existing user (one
+        // who has already been prompted about uBlock, or has
+        // any history or bookmarks) never sees the four-page
+        // welcome on upgrade — onboarded is seeded silently
+        // for them. A fresh install gets the welcome.
+        if (store.setting("onboarded", "") != "true") {
+            val existing = store.setting("uBlockPrompted", "false") == "true" ||
+                store.history.isNotEmpty() || store.bookmarks.isNotEmpty()
+            if (existing) {
+                store.putSetting("onboarded", "true")
+            } else {
+                showWelcome = true
+            }
+        }
+
+        // Launched from another app with a link (ACTION_VIEW),
+        // or as a pinned site (app mode — its own fresh
+        // chromeless tab).
+        handleAppModeOrViewIntent(intent)
 
         // First launch (or until the prompt has been shown once):
         // ask about uBlock Origin. installUBlock checks first — if
@@ -160,7 +188,12 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     when (screen) {
-                        PioneerScreen.Browser -> BrowserScreen(
+                        PioneerScreen.Browser -> if (showWelcome) {
+                            WelcomeScreen(store = store) {
+                                store.putSetting("onboarded", "true")
+                                showWelcome = false
+                            }
+                        } else BrowserScreen(
                             store = store,
                             engine = engine,
                             tabs = tabs,
@@ -186,12 +219,14 @@ class MainActivity : ComponentActivity() {
                             onOpenScreen = { target -> screen = target },
                             onCopyStatus = { copyStatusToClipboard() },
                             onInstallUBlock = { engine.installUBlock() },
-                            longPressUrl = longPressUrl,
-                            onLongPressHandled = { longPressUrl = null },
+                            longPressTarget = longPressTarget,
+                            onLongPressHandled = { longPressTarget = null },
                             onOpenUrlInNewTab = { url, isPrivate, switchTo ->
                                 createTab(isPrivate, url, switchTo)
                             },
-                            onSetBackHandler = { handler -> browserBackHandler = handler }
+                            onSetBackHandler = { handler -> browserBackHandler = handler },
+                            isAppMode = activeTab?.id == appModeTabId,
+                            onExitAppMode = { activeTab?.let { closeTab(it) } }
                         )
                         PioneerScreen.Bookmarks -> BookmarksScreen(
                             store = store,
@@ -222,7 +257,8 @@ class MainActivity : ComponentActivity() {
                             engine = engine,
                             onBack = { screen = PioneerScreen.Browser },
                             onOpenLicences = { screen = PioneerScreen.Licences },
-                            onOpenUrl = { url -> openUrlInActiveTab(url) }
+                            onOpenUrl = { url -> openUrlInActiveTab(url) },
+                            onReplayWelcome = { showWelcome = true }
                         )
                         PioneerScreen.Licences -> LicencesScreen(
                             onBack = { screen = PioneerScreen.Browser }
@@ -295,15 +331,35 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleViewIntent(intent)
+        handleAppModeOrViewIntent(intent)
     }
 
-    /** A link sent from another app (ACTION_VIEW): open it in
-     * the active tab. Anything else is ignored. */
-    private fun handleViewIntent(intent: Intent?) {
+    /** Batch 4: a link sent from another app (ACTION_VIEW).
+     *  A pinned-site launch carries APP_MODE_EXTRA and gets
+     *  its own fresh chromeless tab; a plain link opens in
+     *  the active tab. An external http:// link upgrades
+     *  when HTTPS-only is on; a non-upgradeable one loads
+     *  as-is (fail-open) — the interstitial is for
+     *  in-browser navigation, not for intents. Anything
+     *  else is ignored. */
+    private fun handleAppModeOrViewIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val url = intent.data?.toString() ?: return
-        openUrlInActiveTab(url)
+        if (intent.getBooleanExtra(APP_MODE_EXTRA, false)) {
+            screen = PioneerScreen.Browser
+            val tab = createTab(isPrivate = false, url = url)
+            appModeTabId = tab.id
+            return
+        }
+        val loadUrl = if (store.setting("httpsOnly", "false") == "true" &&
+            url.startsWith("http://")
+        ) {
+            val tab = activeTab ?: createTab(isPrivate = false)
+            engine.httpsUpgradeFor(tab, url) ?: url
+        } else {
+            url
+        }
+        openUrlInActiveTab(loadUrl)
     }
 
     override fun onPause() {
@@ -319,6 +375,28 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        // Batch 4: delete-on-exit (Mariner MainActivity): when
+        // the activity is finishing, wipe history, cookies,
+        // cache, site data and the tab session — before the
+        // engine closes.
+        if (isFinishing) {
+            runCatching {
+                if (::store.isInitialized &&
+                    store.setting("deleteOnExit", "false") == "true"
+                ) {
+                    store.clearHistory()
+                    store.saveTabSession(emptyList(), 0)
+                    engine.clearGeckoData(
+                        StorageController.ClearFlags.COOKIES or
+                            StorageController.ClearFlags.NETWORK_CACHE or
+                            StorageController.ClearFlags.IMAGE_CACHE or
+                            StorageController.ClearFlags.DOM_STORAGES or
+                            StorageController.ClearFlags.ALL_CACHES or
+                            StorageController.ClearFlags.SITE_DATA
+                    )
+                }
+            }
+        }
         runCatching { engine.close() }
         super.onDestroy()
     }
@@ -334,8 +412,8 @@ class MainActivity : ComponentActivity() {
         tab.onNavigate = { navigateUrl, navigateTitle ->
             if (!tab.isPrivate) store.addHistory(navigateTitle, navigateUrl)
         }
-        tab.onLongPressLink = { linkUrl ->
-            longPressUrl = linkUrl
+        tab.onLongPressTarget = { target ->
+            longPressTarget = target
         }
     }
 
@@ -371,6 +449,8 @@ class MainActivity : ComponentActivity() {
         engine.destroyTab(tab)
         tabs.removeAt(idx)
         homeTabIds.remove(tab.id)
+        // Batch 4: closing the app-mode tab leaves app mode.
+        if (appModeTabId == tab.id) appModeTabId = null
         if (tabs.isEmpty()) {
             createTab(isPrivate = false)
             return
@@ -504,6 +584,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun restoreTabSession() {
+        // Batch 4: "Restore tabs on launch" off means a fresh
+        // home tab; the saved session stays on disk, so
+        // re-enabling the setting restores it.
+        if (store.setting("restoreTabs", "true") != "true") {
+            createTab(isPrivate = false, persist = false)
+            return
+        }
         val saved = store.tabSession.toList()
         if (saved.isEmpty()) {
             createTab(isPrivate = false, persist = false)

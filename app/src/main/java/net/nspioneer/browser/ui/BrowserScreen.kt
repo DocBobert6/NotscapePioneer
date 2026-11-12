@@ -99,6 +99,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -144,16 +145,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.pm.ShortcutInfoCompat
+import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.core.graphics.drawable.IconCompat
 import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import net.nspioneer.browser.APP_MODE_EXTRA
+import net.nspioneer.browser.R
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.TabSnapshot
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.EngineTab
+import net.nspioneer.browser.engine.Fullscreen
 import net.nspioneer.browser.engine.GeckoEngine
+import net.nspioneer.browser.engine.LongPressTarget
 import net.nspioneer.browser.engine.PermPrompt
+import net.nspioneer.browser.engine.UserBlockRules
 import net.nspioneer.browser.media.Downloads
 import net.nspioneer.browser.media.MediaLog
 import net.nspioneer.browser.media.PlayerActivity
@@ -177,29 +186,41 @@ import org.mozilla.geckoview.GeckoView
  *   Thumbnails are memory-only, never persisted — a tab with no
  *   still yet shows its title rows, as Mariner does.
  * - address bar with local suggestions (history + bookmarks);
- *   the spike's loadAddress rule (bare domain -> https://, else
- *   DuckDuckGo search).
+ *   the address rule (Mariner's normalizeInput: bare domain ->
+ *   https://, else the chosen search engine).
  * - find bar wired to EngineTab.find / findNext / clearFind.
  * - per-site text zoom applied on navigation from store.siteZoom.
  * - back chain: engine back -> start page -> close tab / exit.
  *   The start page is a home state per tab (the session is not
  *   navigated away — the tab keeps its page underneath).
- * - long-press link menu, only when the engine fires
- *   onLongPressLink (if GeckoView exposes no hook, the menu
- *   simply never appears; recorded as a gap).
+ * - long-press link menu as a FrostSheet, fired from the
+ *   engine's onLongPressTarget (GeckoView ContextElement:
+ *   linkUri + srcUri for images).
  */
 
-/** The spike's address rule, preserved exactly: a bare domain
- * gains https://, anything else searches DuckDuckGo. Null
- * means "nothing to load" (blank input). */
-internal fun resolveAddress(raw: String): String? {
+/** Mariner's normalizeInput (BrowserScreen.kt:941-949):
+ *  a bare domain gains https://, anything else searches with
+ *  the chosen engine. Null means "nothing to load" (blank
+ *  input). The default engine is DuckDuckGo (No AI); a custom
+ *  URL is used only when it passes SearchTemplate validation. */
+internal fun resolveAddress(store: PioneerStore, raw: String): String? {
     val text = raw.trim()
     if (text.isEmpty()) return null
-    return when {
-        text.startsWith("http://") || text.startsWith("https://") -> text
-        text.contains(".") && !text.contains(" ") -> "https://$text"
-        else -> "https://duckduckgo.com/?q=" + URLEncoder.encode(text, "UTF-8")
+    if (text.startsWith("http://") || text.startsWith("https://")) return text
+    if (text.contains(".") && !text.contains(" ")) return "https://$text"
+    val query = URLEncoder.encode(text, "UTF-8")
+    val template = when (store.setting("searchEngine", "duckduckgo")) {
+        "google" -> "https://www.google.com/search?q=%s"
+        "bing" -> "https://www.bing.com/search?q=%s"
+        "startpage" -> "https://www.startpage.com/sp/search?query=%s"
+        "custom" -> {
+            val custom = store.setting("customSearchUrl", "")
+            if (net.nspioneer.browser.engine.SearchTemplate.isValid(custom)) custom
+            else "https://noai.duckduckgo.com/?q=%s"
+        }
+        else -> "https://noai.duckduckgo.com/?q=%s"
     }
+    return template.replace("%s", query)
 }
 
 /** One row of the Back/Forward history sheet: the title and URL
@@ -289,10 +310,15 @@ fun BrowserScreen(
     onOpenScreen: (PioneerScreen) -> Unit,
     onCopyStatus: () -> Unit,
     onInstallUBlock: () -> Unit,
-    longPressUrl: String?,
+    longPressTarget: LongPressTarget?,
     onLongPressHandled: () -> Unit,
     onOpenUrlInNewTab: (String, Boolean, Boolean) -> Unit,
-    onSetBackHandler: ((() -> Boolean)?) -> Unit
+    onSetBackHandler: ((() -> Boolean)?) -> Unit,
+    // Batch 4: app mode — a pinned site, chromeless, with a
+    // flat exit circle. Defaults keep older call sites
+    // compiling; MainActivity passes both explicitly.
+    isAppMode: Boolean = false,
+    onExitAppMode: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -323,6 +349,8 @@ fun BrowserScreen(
     val geckoViewBox = remember { arrayOf<GeckoView?>(null) }
     var findOpen by remember { mutableStateOf(false) }
     var findText by remember { mutableStateOf("") }
+    // Batch 4: the plain-http warning URL (HTTPS-only mode).
+    var httpsWarnUrl by remember { mutableStateOf<String?>(null) }
     var editingAddress by remember { mutableStateOf(false) }
     // Mariner's field value (BrowserScreen.kt:3830): a
     // TextFieldValue so focusing the pill selects the whole
@@ -376,14 +404,32 @@ fun BrowserScreen(
     LaunchedEffect(tabUrl) {
         if (tabUrl.isNotBlank()) homeTabIds.remove(tab.id)
     }
-    // Per-site text zoom, applied when a tab navigates to a host
-    // with a stored zoom.
+    // Text zoom (Batch 4): the effective factor for the tab —
+    // the per-site zoom when one is stored, else the global
+    // web text size — applied on every navigation. The engine
+    // answers probe zoom queries with the same factor.
     LaunchedEffect(tabUrl) {
         val host = runCatching { Uri.parse(tabUrl).host }.getOrNull()
         if (!host.isNullOrBlank()) {
-            val zoom = store.siteZoom(host)
-            if (zoom != 1.0f) tab.setTextZoom(zoom)
+            val siteZoom = store.siteZoom(host)
+            val factor = if (siteZoom != 1.0f) siteZoom
+            else (store.setting("webTextZoom", "100").toIntOrNull() ?: 100) / 100f
+            tab.setTextZoom(factor)
         }
+    }
+    // Immersive full screen (Batch 4): the setting hides the
+    // status bar while browsing; fullscreen video already
+    // enters immersive through the engine, so this does
+    // nothing while a tab is fullscreen. Exits on dispose.
+    val immersiveSetting = store.setting("immersive", "false") == "true"
+    val activity = context as? Activity
+    LaunchedEffect(immersiveSetting, tab.isFullscreen.value) {
+        val act = activity ?: return@LaunchedEffect
+        if (tab.isFullscreen.value) return@LaunchedEffect
+        if (immersiveSetting) Fullscreen.enter(act) else Fullscreen.exit(act)
+    }
+    DisposableEffect(Unit) {
+        onDispose { activity?.let { Fullscreen.exit(it) } }
     }
     // Per-site desktop mode, applied when a tab navigates to a host
     // with a stored desktop preference. Guarded on the tab's current
@@ -430,7 +476,28 @@ fun BrowserScreen(
         tab.load(url)
     }
     fun goAddress(raw: String) {
-        val resolved = resolveAddress(raw) ?: return
+        val resolved = resolveAddress(store, raw) ?: return
+        // Batch 4: HTTPS-only (Mariner's loadUrl check) — an
+        // http:// address upgrades in place, or warns when
+        // it can't.
+        if (store.setting("httpsOnly", "false") == "true" &&
+            resolved.startsWith("http://")
+        ) {
+            val upgraded = engine.httpsUpgradeFor(tab, resolved)
+            if (upgraded != null) {
+                openUrl(upgraded)
+                editingAddress = false
+                focusManager.clearFocus()
+                return
+            }
+            val host = runCatching { Uri.parse(resolved).host }.getOrNull()
+            if (!host.isNullOrBlank() && !store.isHttpsException(host)) {
+                httpsWarnUrl = resolved
+                editingAddress = false
+                focusManager.clearFocus()
+                return
+            }
+        }
         openUrl(resolved)
         editingAddress = false
         focusManager.clearFocus()
@@ -582,6 +649,52 @@ fun BrowserScreen(
     val castAvailable = rememberCastAvailable()
     val pageHost = runCatching { Uri.parse(tabUrl).host }.getOrNull() ?: ""
 
+    // Batch 4: wire the engine's HTTPS-only warning (fired
+    // from onLoadRequest when a tapped link can't be upgraded)
+    // to this screen's interstitial.
+    SideEffect { engine.onHttpsWarn = { url -> httpsWarnUrl = url } }
+
+    /** Mariner BrowserScreen.kt:258: the home URL is the
+     *  `homePage` setting, "" meaning the built-in start
+     *  page; a bare host gains https://. */
+    fun homeUrl(): String {
+        val raw = store.setting("homePage", "").trim()
+        if (raw.isEmpty()) return ""
+        return if (raw.startsWith("http://") || raw.startsWith("https://")) raw
+        else "https://$raw"
+    }
+
+    /** Batch 4 (Mariner BrowserChrome.kt:820): pin the
+     *  current page to the launcher as an app-mode
+     *  shortcut. The icon is the site's favicon when one
+     *  was fetched, else the launcher icon. */
+    fun addToHome() {
+        val url = tabUrl
+        if (url.isBlank()) return
+        val host = runCatching { Uri.parse(url).host }.getOrNull() ?: ""
+        val label = tab.title.value.ifBlank { host }.take(40)
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            putExtra(APP_MODE_EXTRA, true)
+        }
+        val icon = runCatching { store.loadFavicon(host) }
+            .getOrNull()?.let { IconCompat.createWithBitmap(it) }
+            ?: IconCompat.createWithResource(context, R.mipmap.ic_launcher)
+        val info = ShortcutInfoCompat.Builder(context, "site-" + url.hashCode())
+            .setShortLabel(label)
+            .setIntent(intent)
+            .setIcon(icon)
+            .build()
+        val ok = runCatching {
+            ShortcutManagerCompat.requestPinShortcut(context, info, null)
+        }.getOrDefault(false)
+        Toast.makeText(
+            context,
+            if (ok) "Shortcut requested - your launcher may ask you to confirm"
+            else "Couldn't add a shortcut for this page",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
     fun osPermFor(res: String): String = when (res) {
         "camera" -> Manifest.permission.CAMERA
         "microphone" -> Manifest.permission.RECORD_AUDIO
@@ -731,7 +844,7 @@ fun BrowserScreen(
     // are declared above in the Phase 3 section.
     val backHandler: () -> Boolean = {
         when {
-            longPressUrl != null -> { onLongPressHandled(); true }
+            longPressTarget != null -> { onLongPressHandled(); true }
             mediaSheetOpen -> { mediaSheetOpen = false; true }
             siteInfoOpen -> { siteInfoOpen = false; true }
             showPopupNotice -> { showPopupNotice = false; clearPendingPopups(); true }
@@ -740,6 +853,11 @@ fun BrowserScreen(
             tabSwitcherOpen -> { tabSwitcherOpen = false; true }
             findOpen -> { closeFind(); true }
             editingAddress -> { editingAddress = false; focusManager.clearFocus(); true }
+            // Batch 4: app mode never shows the start page —
+            // back goes through the page's history, then
+            // leaves (returns false; the activity finishes).
+            isAppMode && tab.canGoBack.value -> { tab.goBack(); true }
+            isAppMode -> false
             tab.canGoBack.value -> { tab.goBack(); true }
             !isHome -> { homeTabIds.add(tab.id); true }
             tabs.size > 1 -> { onCloseTab(tab); true }
@@ -1005,16 +1123,28 @@ fun BrowserScreen(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (!editingAddress) {
-                        // Home: the start page is a home state per
-                        // tab in Pioneer (no homePage setting);
-                        // long-press opens it in a new tab of the
-                        // SAME class (Mariner beta.69 #58).
+                    // Batch 4: the home button follows the
+                    // homePage setting (blank = the start page,
+                    // a home state per tab); long-press opens
+                    // it in a new tab of the SAME class
+                    // (Mariner beta.69 #58). Hidden when the
+                    // "Show home button" setting is off.
+                    if (!editingAddress &&
+                        store.setting("showHomeButton", "true") == "true"
+                    ) {
                         Box(
                             modifier = Modifier.size(34.dp)
                                 .combinedClickable(
-                                    onClick = { homeTabIds.add(tab.id) },
-                                    onLongClick = { onNewTab(tab.isPrivate) }
+                                    onClick = {
+                                        val home = homeUrl()
+                                        if (home.isBlank()) homeTabIds.add(tab.id)
+                                        else openUrl(home)
+                                    },
+                                    onLongClick = {
+                                        val home = homeUrl()
+                                        if (home.isBlank()) onNewTab(tab.isPrivate)
+                                        else onOpenUrlInNewTab(home, tab.isPrivate, true)
+                                    }
                                 ),
                             contentAlignment = Alignment.Center
                         ) {
@@ -1270,6 +1400,7 @@ fun BrowserScreen(
                 StartPage(
                     store = store,
                     onOpen = { url -> openUrl(url) },
+                    onOpenSection = { screen -> onOpenScreen(screen) },
                     contentTopPad = if (barAtBottom) 0.dp else 92.dp,
                     contentBottomPad = if (barAtBottom) 92.dp else 0.dp
                 )
@@ -1314,8 +1445,9 @@ fun BrowserScreen(
         // the whole bar leaves on scroll-down and slides back
         // on scroll-up. It never hides while the user is typing
         // in it, or on the start page (nothing to scroll).
+        // App mode is chromeless — no floating bar at all.
         AnimatedVisibility(
-            visible = !barHidden || editingAddress || isHome,
+            visible = (!barHidden || editingAddress || isHome) && !isAppMode,
             modifier = Modifier
                 .align(if (barAtBottom) Alignment.BottomCenter else Alignment.TopCenter)
                 .then(
@@ -1330,12 +1462,36 @@ fun BrowserScreen(
             addressBar()
         }
 
+        // App mode (Batch 4, Mariner BrowserScreen.kt:4448):
+        // a pinned site is chromeless — no floating bar —
+        // with a flat exit circle at the top end. The
+        // circle is NOT frost: surface at 0.92 alpha.
+        if (isAppMode && !tab.isFullscreen.value) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(top = 10.dp, end = 10.dp)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.92f))
+                    .clickable { onExitAppMode() },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Leave app mode",
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+
         // Local suggestions over the page while typing.
         if (editingAddress && suggestions.isNotEmpty()) {
             SuggestionsCard(
                 suggestions = suggestions,
                 barAtBottom = barAtBottom,
-                immersive = false,
+                immersive = immersiveSetting || tab.isFullscreen.value,
                 suggestionQuery = fieldValue.text,
                 onPick = { url ->
                     goAddress(url)
@@ -1348,7 +1504,7 @@ fun BrowserScreen(
             val result = tab.findResult.value
             FindBar(
                 barAtBottom = barAtBottom,
-                immersive = false,
+                immersive = immersiveSetting || tab.isFullscreen.value,
                 findText = findText,
                 findCount = result?.count ?: 0,
                 findOrdinal = result?.ordinal ?: 0,
@@ -2029,7 +2185,8 @@ fun BrowserScreen(
             onOpenScreen = { screen -> onOpenScreen(screen) },
             onCopyStatus = { onCopyStatus() },
             onInstallUBlock = { onInstallUBlock() },
-            onCustomize = { customizeOpen = true }
+            onCustomize = { customizeOpen = true },
+            onAddToHome = { addToHome() }
         )
     }
 
@@ -2041,25 +2198,42 @@ fun BrowserScreen(
         )
     }
 
-    // Long-press link menu. This only ever appears when the
-    // engine fires onLongPressLink — if GeckoView exposes no
-    // long-press hook, the engine leaves it null and this menu
-    // never shows (known gap, not a dead row: the trigger
-    // itself is absent).
-    if (longPressUrl != null) {
-        val linkUrl = longPressUrl
-        FrostDialog(
-            onDismissRequest = { onLongPressHandled() },
-            title = { Text("Link") },
-            text = {
-                Text(
-                    linkUrl, maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            },
-            confirmButton = {
-                Column {
+    // Long-press menu (Batch 4): a FrostSheet, as Mariner
+    // (BrowserScreen.kt:5671). The engine forwards the link
+    // AND the image source when the long-pressed element is
+    // an image (GeckoView ContextElement srcUri + TYPE_IMAGE)
+    // — "View image" and "Block this element" only show for
+    // an image. "Download" was missing from this menu (Phase
+    // 3 was said to have added it — it hadn't) and is added
+    // here, calling beginDownload directly. "Block this
+    // element" is a narrow honest version: it appends a URL
+    // rule for the image to the user's own block rules and
+    // reloads the tab. Mariner's full element picker is NOT
+    // built.
+    if (longPressTarget != null) {
+        val target = longPressTarget
+        val linkUrl = target.linkUrl
+        val imageUrl = target.imageUrl
+        FrostSheet(onDismiss = { onLongPressHandled() }) {
+            GroupedCard {
+                if (!linkUrl.isNullOrBlank()) {
+                    Text(
+                        linkUrl, maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                    )
+                }
+                if (imageUrl != null) {
+                    TextButton(
+                        onClick = {
+                            onOpenUrlInNewTab(imageUrl, false, true)
+                            onLongPressHandled()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("View image") }
+                }
+                if (!linkUrl.isNullOrBlank()) {
                     TextButton(
                         onClick = { onOpenUrlInNewTab(linkUrl, false, true); onLongPressHandled() },
                         modifier = Modifier.fillMaxWidth()
@@ -2074,6 +2248,16 @@ fun BrowserScreen(
                     ) { Text("Open in private tab") }
                     TextButton(
                         onClick = {
+                            beginDownload(
+                                linkUrl, linkUrl, false, null, null,
+                                tabUrl, tab.isPrivate
+                            )
+                            onLongPressHandled()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Download") }
+                    TextButton(
+                        onClick = {
                             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             cm.setPrimaryClip(ClipData.newPlainText("link", linkUrl))
                             Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
@@ -2086,9 +2270,61 @@ fun BrowserScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Share") }
                 }
+                if (imageUrl != null) {
+                    TextButton(
+                        onClick = {
+                            val current = UserBlockRules.parseNet(
+                                store.setting(UserBlockRules.NET_KEY, "")
+                            )
+                            if (current.none {
+                                    it is UserBlockRules.NetRule.Url && it.url == imageUrl
+                                }
+                            ) {
+                                store.putSetting(
+                                    UserBlockRules.NET_KEY,
+                                    UserBlockRules.serializeNet(
+                                        current + UserBlockRules.NetRule.Url(imageUrl)
+                                    )
+                                )
+                                engine.syncUserRules()
+                                tab.reload()
+                                Toast.makeText(
+                                    context, "Image blocked", Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                            onLongPressHandled()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Block this element") }
+                }
+            }
+        }
+    }
+
+    // HTTPS-only warning (Batch 4, Mariner's interstitial
+    // verbatim): a plain-http page that can't be upgraded.
+    // "Continue for this site" remembers the exception.
+    httpsWarnUrl?.let { warnUrl ->
+        val warnHost = runCatching { Uri.parse(warnUrl).host }.getOrNull() ?: warnUrl
+        FrostDialog(
+            onDismissRequest = { httpsWarnUrl = null },
+            title = { Text("Plain http page") },
+            text = {
+                Text(
+                    "$warnHost does not offer a secure connection. Anything you send could be " +
+                        "read by others. Continue for this site? Notscape will remember the " +
+                        "choice — take it back any time from the site's row in Settings → Per-site controls."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.setHttpsException(warnHost, true)
+                    httpsWarnUrl = null
+                    openUrl(warnUrl)
+                }) { Text("Continue for this site") }
             },
             dismissButton = {
-                TextButton(onClick = { onLongPressHandled() }) { Text("Cancel") }
+                TextButton(onClick = { httpsWarnUrl = null }) { Text("Go back") }
             }
         )
     }

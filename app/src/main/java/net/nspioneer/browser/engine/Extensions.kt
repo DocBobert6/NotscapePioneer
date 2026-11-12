@@ -145,6 +145,25 @@ class ExtensionManager(
                 val reply = JSONObject().apply { put("factor", factor.toDouble()) }
                 return GeckoResult.fromValue(reply as Any)
             }
+            // Batch 4: the content script asks whether reduced
+            // motion is on ("privacy-query") and whether media
+            // on its host starts muted ("autoplay-query").
+            // The replies resolve the script's sendNativeMessage
+            // promises; live changes arrive as port messages
+            // ("reduced-motion" / "autoplay-muted").
+            if (type == "privacy-query") {
+                val reply = JSONObject().apply {
+                    put("reducedMotion", host.reducedMotionEnabled())
+                }
+                return GeckoResult.fromValue(reply as Any)
+            }
+            if (type == "autoplay-query") {
+                val pageHost = message.optString("host")
+                val reply = JSONObject().apply {
+                    put("muted", host.autoplayMutedFor(pageHost))
+                }
+                return GeckoResult.fromValue(reply as Any)
+            }
             // Phase 3 (Worker C wiring): the video pop-up
             // watcher's per-site opt-out query. The reply
             // resolves the watcher's sendNativeMessage
@@ -357,6 +376,17 @@ interface ProbeHost {
 
     /** Stored per-site text-zoom factor for the tab (1.0f default). */
     fun zoomFactorFor(session: GeckoSession?): Float
+
+    /** Batch 4: the stored reduced-motion setting
+     *  ("reducedMotion", default false) — the probe asks on
+     *  load ("privacy-query"). */
+    fun reducedMotionEnabled(): Boolean = false
+
+    /** Batch 4: whether media on [host] starts muted — the
+     *  per-site autoplay mode when set, else the global
+     *  autoplay setting. The probe asks on load
+     *  ("autoplay-query"). */
+    fun autoplayMutedFor(host: String): Boolean = false
 
     fun noteProbeMedia(tabNumber: Int, kind: String, url: String)
     fun registerProbePort(session: GeckoSession?, port: WebExtension.Port)

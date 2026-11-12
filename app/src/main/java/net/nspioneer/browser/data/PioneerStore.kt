@@ -12,6 +12,10 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import net.nspioneer.browser.engine.HTTPS_EXCEPTIONS_KEY
+import net.nspioneer.browser.engine.isHttpsException
+import net.nspioneer.browser.engine.withHttpsException
+import net.nspioneer.browser.engine.withoutHttpsException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -553,6 +557,28 @@ class PioneerStore private constructor(context: Context) {
             siteSettings[setting.host] = setting
             mutated(Part.SITE_SETTINGS)
         }
+    }
+
+    /** Every host with a stored per-site setting — the
+     *  per-site controls panel unions this with the hosts
+     *  in history (Mariner SettingsScreen.kt:394-397). */
+    fun siteHosts(): Set<String> =
+        synchronized(lock) { siteSettings.keys.toSet() }
+
+    /** Batch 4: per-site HTTPS-only exceptions (Mariner
+     *  Store.kt:1180-1196, pure helpers in
+     *  engine/HttpsOnly.kt). One comma-separated setting
+     *  ("httpsExceptions") of lowercase hosts. */
+    fun isHttpsException(host: String): Boolean =
+        isHttpsException(setting(HTTPS_EXCEPTIONS_KEY, ""), host)
+
+    fun setHttpsException(host: String, on: Boolean) {
+        val raw = setting(HTTPS_EXCEPTIONS_KEY, "")
+        putSetting(
+            HTTPS_EXCEPTIONS_KEY,
+            if (on) withHttpsException(raw, host)
+            else withoutHttpsException(raw, host)
+        )
     }
 
     /** Per-site text-zoom factor, 1.0f when unset.

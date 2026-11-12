@@ -24,6 +24,13 @@
  *     the `rules-update` native message. The two matchers must
  *     agree on the fixed sample-URL table (scorecard row A).
  *
+ *  Batch 4: per-site image blocking (`blockImagesHosts` —
+ *  `SiteSetting.blockImages`) cancels image requests on the
+ *  page host, and the referer policy (`refererPolicy` —
+ *  "" / "origin" / "never") rewrites the Referer header in
+ *  `onBeforeSendHeaders`. Neither is a list rule; both ride
+ *  the same `rules-update` push.
+ *
  *  STRICT POPUP BLOCKER (`$document` / `$popup`, Beta.63 #64):
  *  main-frame loads to a `$document`-blocked host are cancelled
  *  here too (`isDocumentBlocked`), same as any other list match.
@@ -134,6 +141,7 @@
     neverBlock: {},
     builtinHosts: {},
     disabledHosts: {},
+    blockImagesHosts: {},
     userNet: []
   };
 
@@ -143,12 +151,13 @@
     return s;
   }
 
-  var flags = { blockAds: true, blockTrackers: true };
+  var flags = { blockAds: true, blockTrackers: true, refererPolicy: "" };
 
   function applyRules(r) {
     r = r || {};
     if (r.blockAds !== undefined) flags.blockAds = !!r.blockAds;
     if (r.blockTrackers !== undefined) flags.blockTrackers = !!r.blockTrackers;
+    if (r.refererPolicy !== undefined) flags.refererPolicy = String(r.refererPolicy || "");
     r = r.rules || r;
     rules.hosts = toSet(r.hosts);
     rules.trackerHosts = toSet(r.trackerHosts);
@@ -157,6 +166,7 @@
     rules.neverBlock = toSet(r.neverBlock);
     rules.builtinHosts = toSet(r.builtinHosts);
     rules.disabledHosts = toSet(r.disabledHosts);
+    rules.blockImagesHosts = toSet(r.blockImagesHosts);
     rules.pathKeywords = (r.pathKeywords || []).map(function (s) {
       return String(s).toLowerCase();
     });
@@ -422,6 +432,16 @@
       return {};
     }
 
+    /* Batch 4: per-site image blocking — an image request
+     * on a host whose SiteSetting.blockImages is on is
+     * cancelled. The page host (originUrl/documentUrl) is
+     * the site the user blocked images on, not the image's
+     * own host. */
+    if (details.type === "image" &&
+        matchesSet(rules.blockImagesHosts, pageHost)) {
+      return { cancel: true };
+    }
+
     /* Subresource blocking: Mariner's lists, second layer. The
      * toggles live in the app; the background script blocks
      * when EITHER is on (the Kotlin side applies the same
@@ -435,6 +455,31 @@
       return { cancel: true };
     }
     return {};
+  }
+
+  /* Referer policy (Batch 4): "never" strips the Referer
+   *  header, "origin" truncates it to scheme://host/.
+   *  "Default" (empty) leaves it alone. */
+  function onBeforeSendHeaders(details) {
+    var policy = flags.refererPolicy || "";
+    if (!policy) return {};
+    var headers = details.requestHeaders || [];
+    for (var i = 0; i < headers.length; i++) {
+      if (headers[i].name.toLowerCase() === "referer") {
+        if (policy === "never") {
+          headers.splice(i, 1);
+        } else if (policy === "origin") {
+          try {
+            var u = new URL(details.url);
+            headers[i].value = u.protocol + "//" + u.host + "/";
+          } catch (e) {
+            headers.splice(i, 1);
+          }
+        }
+        break;
+      }
+    }
+    return { requestHeaders: headers };
   }
 
   /* ---- startup: native port + initial rules ---- */
@@ -477,6 +522,15 @@
     );
     connectPort();
     requestRules();
+  }
+
+  if (typeof browser !== "undefined" && browser.webRequest &&
+      browser.webRequest.onBeforeSendHeaders) {
+    browser.webRequest.onBeforeSendHeaders.addListener(
+      onBeforeSendHeaders,
+      { urls: ["<all_urls>"] },
+      ["blocking", "requestHeaders"]
+    );
   }
 
   /* Node test harness: the matcher is exported without the

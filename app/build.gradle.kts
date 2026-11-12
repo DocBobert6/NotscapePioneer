@@ -24,8 +24,8 @@ android {
         applicationId = "net.nspioneer.browser"
         minSdk = 26 // GeckoView floor: Android 8.0 (API 26) or later.
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.1.0-alpha.7"
+        versionCode = 8
+        versionName = "0.1.0-alpha.8"
         // arm64-v8a only, matching Mariner's ABI decision.
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -116,6 +116,10 @@ dependencies {
     // Phase 3 downloads: WorkManager for the HLS / DASH /
     // segmented / merge workers (foreground dataSync).
     implementation("androidx.work:work-runtime-ktx:2.10.0")
+    // Batch 4: banner swatch from a custom-photo wallpaper
+    // (androidx.palette, dominant/vibrant/muted — Mariner
+    // StartPage.kt:234-247). palette-ktx pulls in palette.
+    implementation("androidx.palette:palette-ktx:1.0.0")
     // Phase 3 (Worker A): FilterEngineTest / UserBlockRulesTest.
     testImplementation("junit:junit:4.13.2")
     // Cast probe only (route discovery logging, no session launch).

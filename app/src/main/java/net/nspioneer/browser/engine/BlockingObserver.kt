@@ -238,6 +238,9 @@ class BlockingObserver(private val host: BlockingHost) {
             put("neverBlock", JSONArray(compiled.neverBlock))
             put("builtinHosts", JSONArray(compiled.builtinHosts))
             put("disabledHosts", JSONArray(compiled.disabledHosts))
+            // Batch 4: hosts whose SiteSetting.blockImages is
+            // on — the background script cancels their images.
+            put("blockImagesHosts", JSONArray(host.blockImagesHosts()))
             put("userNet", JSONArray().apply {
                 for (r in compiled.userNet) {
                     put(JSONObject().apply {
@@ -257,6 +260,11 @@ class BlockingObserver(private val host: BlockingHost) {
             // push; the engine re-pushes when a toggle changes.
             put("blockAds", host.blockAdsEnabled())
             put("blockTrackers", host.blockTrackersEnabled())
+            // Batch 4: the referer policy ("", "origin" or
+            // "never") rides top-level with the flags; the
+            // per-site image-blocking hosts ride inside the
+            // rules, beside disabledHosts.
+            put("refererPolicy", host.refererPolicy())
             put("rules", rules)
         }
     }
@@ -427,6 +435,14 @@ interface BlockingHost {
     /** Mariner-list tracker blocking on (`blockTrackers`,
      *  default true). */
     fun blockTrackersEnabled(): Boolean = true
+
+    /** Batch 4: every host whose `SiteSetting.blockImages`
+     *  is on. */
+    fun blockImagesHosts(): Set<String> = emptySet()
+
+    /** Batch 4: the stored referer policy ("", "origin" or
+     *  "never"). */
+    fun refererPolicy(): String = ""
 
     /** Status-panel line (diagnostics only). */
     fun noteStatus(line: String) {}
