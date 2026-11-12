@@ -270,6 +270,20 @@ class PopupController(
                 blockPopups = site?.blockPopups == true,
             )) {
                 PopupVerdict.ALLOW -> {
+                    // Alpha.23 item 3: log the direct open, as
+                    // the scripted path logs its ALLOW — a
+                    // whitelisted (or strict-off) tapped link
+                    // otherwise leaves no trace in Copy status,
+                    // which is what made the alpha.22 trace look
+                    // like the prompt had been bypassed. The
+                    // suffix names the reason: only a whitelisted
+                    // site earns it (strict-off opens log plain).
+                    val why =
+                        if (site?.allowPopups == true) " — whitelisted" else ""
+                    status(
+                        "popup allowed: ${targetUri ?: "(no target)"} " +
+                            "(tab ${source?.id ?: "?"})$why"
+                    )
                     result.complete(runCatching { createTab() }.getOrNull())
                     return result
                 }
