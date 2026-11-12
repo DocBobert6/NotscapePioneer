@@ -2478,9 +2478,11 @@ fun formatTime(ms: Long): String {
  * player settings page. Applies only when he has set at
  * least one subtitle option - until then the player's
  * default (the system caption style) stands untouched.
- * Pioneer ships no bundled fonts, so the opensans/inter/
- * custom faces fall back to the platform default; serif,
- * mono and the system sans still apply.
+ * Pioneer ships no bundled fonts, so the opensans/inter
+ * faces fall back to the platform default; serif, mono
+ * and the system sans still apply. "custom" loads the
+ * font imported in Settings (files/fonts/subtitle-font);
+ * a missing or unreadable file falls back silently.
  */
 internal fun applySubtitleStyle(context: Context, view: PlayerView) {
     val store = PioneerStore.get(context)
@@ -2517,6 +2519,13 @@ internal fun applySubtitleStyle(context: Context, view: PlayerView) {
         )
         "serif" -> android.graphics.Typeface.SERIF
         "mono" -> android.graphics.Typeface.MONOSPACE
+        // Imported in Settings (validated .ttf/.otf in
+        // files/fonts/subtitle-font); unreadable falls back.
+        "custom" -> runCatching {
+            android.graphics.Typeface.createFromFile(
+                java.io.File(context.filesDir, "fonts/subtitle-font")
+            )
+        }.getOrNull()
         else -> null
     }
     sv.setStyle(

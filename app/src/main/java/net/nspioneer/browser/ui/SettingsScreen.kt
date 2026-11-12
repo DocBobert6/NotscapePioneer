@@ -323,6 +323,70 @@ fun SettingsScreen(
         }
     }
 
+    // Custom subtitle font (alpha.10, Mariner's picker
+    // pattern as in uiFontPicker above): a file is copied
+    // to fonts/subtitle-font only if its magic bytes and
+    // Typeface both accept it as a real font. The player
+    // loads it for the "custom" subtitle face.
+    var subFontName by remember { mutableStateOf(store.setting("subFontCustomName", "")) }
+    val subFontPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                var loadedName: String? = null
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val dir = File(context.filesDir, "fonts").apply { mkdirs() }
+                        val tmp = File(dir, "subtitle-font.tmp")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            tmp.outputStream().use { input.copyTo(it) }
+                        } ?: error("unreadable")
+                        val name = runCatching {
+                            context.contentResolver.query(
+                                uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+                            )?.use { c ->
+                                if (c.moveToFirst()) c.getString(0) else null
+                            }
+                        }.getOrNull()
+                        val magic = ByteArray(4)
+                        val read = tmp.inputStream().use { it.read(magic) }
+                        val asText = if (read == 4) String(magic, Charsets.US_ASCII) else ""
+                        val magicOk = read == 4 && (
+                            (magic[0] == 0.toByte() && magic[1] == 1.toByte() &&
+                                magic[2] == 0.toByte() && magic[3] == 0.toByte()) ||
+                                asText == "OTTO" || asText == "true"
+                            )
+                        val faceOk = magicOk && runCatching {
+                            Typeface.createFromFile(tmp) != null
+                        }.getOrDefault(false)
+                        if (!faceOk) {
+                            tmp.delete()
+                            false
+                        } else {
+                            tmp.copyTo(File(dir, "subtitle-font"), overwrite = true)
+                            tmp.delete()
+                            loadedName = name ?: "Custom font"
+                            true
+                        }
+                    }.getOrDefault(false)
+                }
+                if (ok) {
+                    subFontName = loadedName ?: "Custom font"
+                    store.putSetting("subFontCustomName", subFontName)
+                    store.putSetting("subFont", "custom")
+                    Toast.makeText(context, "Font loaded", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        context,
+                        "That file couldn't be loaded as a font - .ttf and .otf work best",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
     // Custom-photo wallpaper (Batch 4): the photo is copied
     // into files/wallpaper/custom.jpg, downscaled to ≤2048 on
     // the long edge, JPEG 88. There is no crop/framing
@@ -1061,6 +1125,131 @@ fun SettingsScreen(
                     onCheckedChange = { store.putSetting("deleteOnExit", it.toString()) }
                 )
             }
+
+            // Video player (alpha.10, Mariner's Video player
+            // page): skip interval + subtitle font/size/colour/
+            // background/edge + font import. Written to the
+            // store; the player applies it (applySubtitleStyle).
+            GroupTitle("Video player")
+            GroupTitle("Skip interval")
+            SettingsCard {
+                listOf(
+                    5 to "5 seconds", 10 to "10 seconds",
+                    15 to "15 seconds", 20 to "20 seconds",
+                    25 to "25 seconds", 30 to "30 seconds",
+                    60 to "1 minute", 90 to "90 seconds",
+                    120 to "2 minutes", 150 to "150 seconds",
+                    180 to "3 minutes", 300 to "5 minutes"
+                ).forEachIndexed { i, (value, label) ->
+                    if (i > 0) InsetDivider()
+                    ChoiceRow(
+                        label = label,
+                        selected = store.setting("playerSkipSec", "10") == value.toString()
+                    ) { store.putSetting("playerSkipSec", value.toString()) }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            GroupTitle("Subtitle font")
+            SettingsCard {
+                listOf(
+                    "default" to "Default",
+                    "opensans" to "Open Sans",
+                    "roboto" to "Roboto",
+                    "inter" to "Inter",
+                    "serif" to "Serif",
+                    "mono" to "Monospace",
+                    "custom" to "Custom"
+                ).forEachIndexed { i, (value, label) ->
+                    if (i > 0) InsetDivider()
+                    ChoiceRow(
+                        label = label,
+                        selected = store.setting("subFont", "default") == value
+                    ) { store.putSetting("subFont", value) }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 4.dp)
+            ) {
+                TextButton(
+                    onClick = { subFontPicker.launch(arrayOf("*/*")) }
+                ) { Text("Import font file") }
+                if (subFontName.isNotBlank()) {
+                    Text(
+                        subFontName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            GroupTitle("Subtitle size")
+            SettingsCard {
+                listOf("75", "100", "125", "150", "200")
+                    .forEachIndexed { i, value ->
+                        if (i > 0) InsetDivider()
+                        ChoiceRow(
+                            label = "$value%",
+                            selected = store.setting("subSize", "100") == value
+                        ) { store.putSetting("subSize", value) }
+                    }
+            }
+            GroupTitle("Subtitle colour")
+            SettingsCard {
+                listOf(
+                    "white" to "White",
+                    "yellow" to "Yellow",
+                    "cyan" to "Cyan",
+                    "green" to "Green",
+                    "magenta" to "Magenta",
+                    "red" to "Red",
+                    "blue" to "Blue",
+                    "black" to "Black"
+                ).forEachIndexed { i, (value, label) ->
+                    if (i > 0) InsetDivider()
+                    ChoiceRow(
+                        label = label,
+                        selected = store.setting("subColor", "white") == value
+                    ) { store.putSetting("subColor", value) }
+                }
+            }
+            GroupTitle("Subtitle background")
+            SettingsCard {
+                listOf(
+                    "none" to "None",
+                    "black50" to "Black, half",
+                    "black75" to "Black, strong",
+                    "black" to "Black, solid",
+                    "white75" to "White, strong"
+                ).forEachIndexed { i, (value, label) ->
+                    if (i > 0) InsetDivider()
+                    ChoiceRow(
+                        label = label,
+                        selected = store.setting("subBg", "none") == value
+                    ) { store.putSetting("subBg", value) }
+                }
+            }
+            GroupTitle("Subtitle edge")
+            SettingsCard {
+                listOf(
+                    "outline" to "Outline",
+                    "shadow" to "Drop shadow",
+                    "none" to "None"
+                ).forEachIndexed { i, (value, label) ->
+                    if (i > 0) InsetDivider()
+                    ChoiceRow(
+                        label = label,
+                        selected = store.setting("subEdge", "outline") == value
+                    ) { store.putSetting("subEdge", value) }
+                }
+            }
+            Text(
+                "Applied in the video player. Until you change " +
+                    "something here, your Android system caption " +
+                    "style applies, as before.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 12.dp)
+            )
 
             GroupTitle("Start page")
             SettingsCard {
