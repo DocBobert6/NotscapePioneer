@@ -1,6 +1,8 @@
 package net.nspioneer.browser
 
 import android.app.ActivityManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
 import android.os.Process
@@ -115,7 +117,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        status("Pioneer spike 0.1.0-alpha.1 — GeckoView 159.0.20261102144711 (stable)")
+        status("Pioneer spike 0.1.0-alpha.2 — GeckoView 159.0.20261102144711 (stable)")
 
         runtime = createRuntime()
         status("runtime: created (ETP Strict)")
@@ -505,6 +507,27 @@ class MainActivity : ComponentActivity() {
         statusLines.add(stats)
     }
 
+    private fun copyStatusToClipboard() {
+        val lines = mutableListOf<String>()
+        lines += "SPIKE STATUS — $castRoutes"
+        lines += "— status —"
+        lines += statusLines
+        lines += "— media probe —"
+        if (mediaLines.isEmpty()) {
+            lines += "(no media URLs reported yet — load a video page)"
+        } else {
+            lines += mediaLines
+        }
+        val text = lines.joinToString("\n")
+        try {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Pioneer spike status", text))
+            status("status copied to clipboard (${lines.size} lines)")
+        } catch (e: Throwable) {
+            status("copy failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
     private fun loadAddress(raw: String) {
         val text = raw.trim()
         if (text.isEmpty()) return
@@ -588,6 +611,9 @@ class MainActivity : ComponentActivity() {
                     }
                     OutlinedButton(onClick = { refreshStats() }) {
                         Text("Stats", fontSize = 12.sp)
+                    }
+                    OutlinedButton(onClick = { copyStatusToClipboard() }) {
+                        Text("Copy status", fontSize = 12.sp)
                     }
                 }
                 // The engine.

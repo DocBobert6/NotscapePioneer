@@ -17,7 +17,7 @@ parity) does not start until the spike report is written and Robert
 decides go or no-go.
 
 - Package: `net.nspioneer.browser`
-- Version: `0.1.0-alpha.1` (versionCode 1), debug-signed only
+- Version: `0.1.0-alpha.2` (versionCode 2), debug-signed only
 - Engine: GeckoView **159.0.20261102144711** (stable, Firefox 159) —
   pinned, never nightly or beta. arm64-v8a only, minSdk 26.
   Toolchain: AGP 9.4.1 / Kotlin 2.3.21 / Gradle 9.8.1 / compileSdk 36
