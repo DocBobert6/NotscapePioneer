@@ -24,8 +24,8 @@ android {
         applicationId = "net.nspioneer.browser"
         minSdk = 26 // GeckoView floor: Android 8.0 (API 26) or later.
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.1.0-alpha.8"
+        versionCode = 9
+        versionName = "0.1.0-alpha.9"
         // arm64-v8a only, matching Mariner's ABI decision.
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -55,6 +55,13 @@ android {
         // SettingsScreen reads BuildConfig.VERSION_NAME/VERSION_CODE
         // for the About row.
         buildConfig = true
+    }
+    testOptions {
+        unitTests {
+            // Row F: DownloadsStoreTest runs under Robolectric,
+            // which needs the merged manifest/resources.
+            isIncludeAndroidResources = true
+        }
     }
 }
 
@@ -122,6 +129,13 @@ dependencies {
     implementation("androidx.palette:palette-ktx:1.0.0")
     // Phase 3 (Worker A): FilterEngineTest / UserBlockRulesTest.
     testImplementation("junit:junit:4.13.2")
+    // Row F follow-up: DownloadsStoreTest runs the store-backed
+    // download helpers (engineFor / locationFor / job bundles)
+    // under Robolectric — a plain JVM test cannot build a
+    // PioneerStore (context.filesDir + main-looper Handler throw
+    // on the android.jar stubs). 4.14.1 is the latest stable;
+    // runtime SDK is pinned to 35 in the test class.
+    testImplementation("org.robolectric:robolectric:4.14.1")
     // Cast probe only (route discovery logging, no session launch).
     // Same versions as Mariner.
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
