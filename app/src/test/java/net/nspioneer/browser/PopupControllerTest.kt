@@ -1,19 +1,26 @@
 package net.nspioneer.browser
 
+import net.nspioneer.browser.engine.PopupAnswerEffect
+import net.nspioneer.browser.engine.PopupChoice
 import net.nspioneer.browser.engine.PopupVerdict
 import net.nspioneer.browser.engine.addPopupCapture
+import net.nspioneer.browser.engine.answerEffect
 import net.nspioneer.browser.engine.decidePopup
+import net.nspioneer.browser.engine.isGestureBlocked
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.mozilla.geckoview.AllowOrDeny
 
 /**
  * Scorecard row K (logic half): unit tests for the popup
  * controller's pure decision + capture rules (rebuild items
- * 1 + 5, alpha.13). These run on the plain JVM, like
- * FilterEngineTest — no Robolectric. The Gecko wiring
- * (session → tab mapping, onNewSession bring-up) is
- * device-verified via the Copy-status discriminator lines
- * (PHASE3-DESIGN.md §8.9).
+ * 1 + 5, alpha.13; four-choice prompt, alpha.14). These run
+ * on the plain JVM, like FilterEngineTest — no Robolectric.
+ * The Gecko wiring (session → tab mapping, onNewSession
+ * bring-up, held-request completion) is device-verified via
+ * the Copy-status discriminator lines (PHASE3-DESIGN.md §8.9).
  */
 class PopupControllerTest {
 
@@ -31,16 +38,21 @@ class PopupControllerTest {
         )
     }
 
-    @Test fun decide_strictOn_default_deniesAndCaptures() {
+    @Test fun decide_strictOn_default_asks() {
+        // Alpha.14: an unlisted site's popup is HELD for the
+        // four-choice prompt, never answered by default.
         assertEquals(
-            PopupVerdict.DENY_CAPTURE,
+            PopupVerdict.ASK,
             decidePopup(strict = true, allowPopups = false, blockPopups = false)
         )
     }
 
-    @Test fun decide_strictOn_blacklisted_deniesSilently() {
+    @Test fun decide_strictOn_blacklisted_deniesAndCaptures() {
+        // Alpha.14: a blacklisted site's popup is denied
+        // without asking and its URL is captured for the
+        // notice — no more silent blacklist.
         assertEquals(
-            PopupVerdict.DENY_SILENT,
+            PopupVerdict.DENY_CAPTURE,
             decidePopup(strict = true, allowPopups = false, blockPopups = true)
         )
     }
@@ -76,5 +88,53 @@ class PopupControllerTest {
     @Test fun capture_capsAtFive() {
         val five = (1..5).map { "https://$it.example/" }
         assertEquals(five, addPopupCapture(five, "https://6.example/"))
+    }
+
+    // ---- four-choice prompt (alpha.14): answer effects ----
+
+    @Test fun answer_allowOnce() {
+        assertEquals(
+            PopupAnswerEffect(AllowOrDeny.ALLOW, true, false, null, null),
+            answerEffect(PopupChoice.ALLOW_ONCE)
+        )
+    }
+
+    @Test fun answer_denyOnce() {
+        assertEquals(
+            PopupAnswerEffect(AllowOrDeny.DENY, false, true, null, null),
+            answerEffect(PopupChoice.DENY_ONCE)
+        )
+    }
+
+    @Test fun answer_trust() {
+        assertEquals(
+            PopupAnswerEffect(AllowOrDeny.ALLOW, true, false, true, false),
+            answerEffect(PopupChoice.TRUST)
+        )
+    }
+
+    @Test fun answer_dontTrust() {
+        assertEquals(
+            PopupAnswerEffect(AllowOrDeny.DENY, false, true, false, true),
+            answerEffect(PopupChoice.DONT_TRUST)
+        )
+    }
+
+    // ---- gesture links (alpha.14): blacklist check ----
+
+    @Test fun gesture_blacklisted_isBlocked() {
+        assertTrue(isGestureBlocked(strict = true, allowPopups = false, blockPopups = true))
+    }
+
+    @Test fun gesture_unlisted_isNotBlocked() {
+        assertFalse(isGestureBlocked(strict = true, allowPopups = false, blockPopups = false))
+    }
+
+    @Test fun gesture_whitelisted_isNotBlocked() {
+        assertFalse(isGestureBlocked(strict = true, allowPopups = true, blockPopups = false))
+    }
+
+    @Test fun gesture_strictOff_isNotBlockedEvenWhenBlacklisted() {
+        assertFalse(isGestureBlocked(strict = false, allowPopups = false, blockPopups = true))
     }
 }
