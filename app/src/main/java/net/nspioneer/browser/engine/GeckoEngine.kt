@@ -350,6 +350,15 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         restoreStateJson: String? = null,
         desktopMode: Boolean = false,
         scrollY: Int = 0,
+        // onNewSession passes false: Gecko opens the session it
+        // is handed itself, and opening an already-open session
+        // throws AssertionError ("Must use an unopened
+        // GeckoSession instance") as an uncaught GeckoResult
+        // exception that kills the app process
+        // (watch-wrestling.eu crash, 2026-11-12, alpha.11).
+        // Delegates are attached above either way — Gecko needs
+        // them in place when it opens the session.
+        openSession: Boolean = true,
     ): EngineTab {
         val session = if (isPrivate) {
             GeckoSession(
@@ -366,7 +375,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // The session is fully open before any load can be issued
         // (first-load watch item: the spike loaded immediately after
         // open, before setActive/setFocused and before any view).
-        session.open(runtime)
+        // Skipped only for onNewSession (see openSession above):
+        // GeckoTab.load re-opens on demand if a load ever arrives
+        // before Gecko's own open.
+        if (openSession) session.open(runtime)
         if (desktopMode) {
             // Batch 2: desktop UA + viewport BEFORE any load or
             // restore — setDesktopMode would reload and lose the
@@ -1349,7 +1361,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                     (expectPopupTarget == null || expectPopupTarget == uri)
                 expectPopupSession = false
                 expectPopupTarget = null
-                val newTab = createTabInternal(tab.isPrivate, isPopup) as GeckoTab
+                // openSession=false: the session MUST reach Gecko
+                // unopened — Gecko opens it itself, and handing it
+                // an already-open session throws AssertionError and
+                // kills the app (watch-wrestling.eu, alpha.11).
+                val newTab = createTabInternal(
+                    tab.isPrivate, isPopup, openSession = false
+                ) as GeckoTab
                 onTabCreated?.invoke(newTab)
                 statusPanel.status(
                     "tab ${n()}: window.open -> tab ${newTab.id}" +
