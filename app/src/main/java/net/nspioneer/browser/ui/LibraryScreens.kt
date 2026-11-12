@@ -375,12 +375,10 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
     }
 
     SubScreen("Bookmarks", onBack) {
-        OutlinedTextField(
+        FrostSearchBar(
             value = bookmarkQuery,
             onValueChange = { bookmarkQuery = it },
-            label = { Text("Search bookmarks") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            placeholder = "Search bookmarks"
         )
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -882,12 +880,10 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
         store.restoreHistory(deleted)
     }
     SubScreen("History", onBack) {
-        OutlinedTextField(
+        FrostSearchBar(
             value = historyQuery,
             onValueChange = { historyQuery = it },
-            label = { Text("Search history") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            placeholder = "Search history"
         )
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
             TextButton(onClick = {
@@ -1083,12 +1079,10 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
     var query by remember { mutableStateOf("") }
     SubScreen(title = "Favorites", onBack = onBack) {
         Column(modifier = Modifier.fillMaxSize()) {
-            OutlinedTextField(
+            FrostSearchBar(
                 value = query,
                 onValueChange = { query = it },
-                label = { Text("Search favorites") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(12.dp)
+                placeholder = "Search favorites"
             )
             val shown = store.favourites.filter { f ->
                 query.isBlank() ||
@@ -1442,12 +1436,10 @@ fun LibraryScreen(
     SubScreen("Offline library", onBack) {
         var refreshing by remember { mutableStateOf(false) }
         val refreshScope = rememberCoroutineScope()
-        OutlinedTextField(
+        FrostSearchBar(
             value = downloadQuery,
             onValueChange = { downloadQuery = it },
-            label = { Text("Search downloads") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            placeholder = "Search downloads"
         )
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -1667,12 +1659,10 @@ fun DownloadsScreen(
     SubScreen("Downloads", onBack) {
         var refreshing by remember { mutableStateOf(false) }
         val refreshScope = rememberCoroutineScope()
-        OutlinedTextField(
+        FrostSearchBar(
             value = downloadQuery,
             onValueChange = { downloadQuery = it },
-            label = { Text("Search downloads") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            placeholder = "Search downloads"
         )
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
