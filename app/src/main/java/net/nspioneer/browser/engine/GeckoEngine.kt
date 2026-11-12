@@ -1040,17 +1040,20 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
      *  [notePageHtml] to [onPageHtml]. No reply if the port
      *  is not connected (page still loading, or a non-web
      *  tab) — the caller toasts that itself. */
-    var onPageHtml: ((GeckoTab, String) -> Unit)? = null
+    override var onPageHtml: ((EngineTab, String) -> Unit)? = null
 
-    fun requestPageHtml(tab: GeckoTab) {
-        val port = tab.probePort ?: return
+    override fun requestPageHtml(tab: EngineTab) {
+        // GeckoTab is private-in-class: the public API takes
+        // the EngineTab and resolves it by identity.
+        val geckoTab = tabs.firstOrNull { it === tab } ?: return
+        val port = geckoTab.probePort ?: return
         runCatching {
             port.postMessage(
                 JSONObject().apply { put("type", "page-html-request") }
             )
         }.onFailure { e ->
             statusPanel.status(
-                "tab ${tab.id}: page-html request failed: ${e.message}"
+                "tab ${geckoTab.id}: page-html request failed: ${e.message}"
             )
         }
     }

@@ -152,6 +152,11 @@ interface Engine {
     var onExtensionInstallPrompt: ((name: String, permissions: List<String>,
         decide: (allow: Boolean) -> Unit) -> Unit)?
     fun installUBlock()
+    // alpha.10 (Save offline): the shell asks for a tab's
+    // page HTML (requestPageHtml) and the probe's answer
+    // arrives on onPageHtml with the tab + outerHTML.
+    var onPageHtml: ((EngineTab, String) -> Unit)?
+    fun requestPageHtml(tab: EngineTab)
     val uBlockState: State<String>  // "not installed" | "installing…" |
         // "installed 1.76.0" | "failed: …" | "declined — retry from menu"
     fun setTrackingProtection(level: String)  // "strict" | "basic" |

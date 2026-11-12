@@ -23,8 +23,8 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.ui.window.Dialog
 import com.google.zxing.BinaryBitmap
-import com.google.zxing.QRCodeReader
 import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import java.util.concurrent.Executors
 import androidx.compose.animation.AnimatedVisibility
