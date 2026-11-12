@@ -124,6 +124,14 @@ fun BlockingSettingsContent(
     @Suppress("UNUSED_VARIABLE")
     val rev = store.revision
 
+    // Blocked-elements Manage dialogs (alpha.10): function-level
+    // state — the dialogs sit after the content Column, so these
+    // must not live inside it.
+    var showBlockedElements by remember { mutableStateOf(false) }
+    var showBlockImport by remember { mutableStateOf(false) }
+    var blockImportText by remember { mutableStateOf("") }
+    var blockImportResult by remember { mutableStateOf("") }
+
     // Beta.63 #26: flush today's counts before showing the
     // history, so it shows the current session too.
     LaunchedEffect(Unit) {
@@ -284,10 +292,6 @@ fun BlockingSettingsContent(
         }
 
         BlockingSectionTitle("Your rules")
-        var showBlockedElements by remember { mutableStateOf(false) }
-        var showBlockImport by remember { mutableStateOf(false) }
-        var blockImportText by remember { mutableStateOf("") }
-        var blockImportResult by remember { mutableStateOf("") }
         val netCount = UserBlockRules.parseNet(
             store.setting(UserBlockRules.NET_KEY, "")
         ).size
