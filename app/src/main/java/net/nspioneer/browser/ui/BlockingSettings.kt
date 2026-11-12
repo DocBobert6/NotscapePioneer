@@ -1,10 +1,13 @@
 package net.nspioneer.browser.ui
 
+import android.content.Intent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -19,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.text.DateFormat
 import java.util.Date
@@ -107,7 +111,12 @@ fun BlockingSettingsContent(
     store: PioneerStore,
     uBlockState: String,
     onUninstallUBlock: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Called after any user-rule mutation (delete / import /
+    // clear-all) so the shell can push the new rules to the
+    // probe (engine.syncUserRules) — the store + FilterEngine
+    // alone do not reach the background script.
+    onRulesChanged: () -> Unit = {}
 ) {
     val context = LocalContext.current
     // The store revision drives recomposition when any setting
@@ -275,17 +284,28 @@ fun BlockingSettingsContent(
         }
 
         BlockingSectionTitle("Your rules")
+        var showBlockedElements by remember { mutableStateOf(false) }
+        var showBlockImport by remember { mutableStateOf(false) }
+        var blockImportText by remember { mutableStateOf("") }
+        var blockImportResult by remember { mutableStateOf("") }
         val netCount = UserBlockRules.parseNet(
             store.setting(UserBlockRules.NET_KEY, "")
         ).size
         val cosCount = UserBlockRules.parseCosmetic(
             store.setting(UserBlockRules.COSMETIC_KEY, "")
         ).size
-        Text(
-            "$netCount network rules · $cosCount cosmetic rules",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                "$netCount network rules · $cosCount cosmetic rules",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = { showBlockedElements = true }) { Text("Manage") }
+        }
 
         BlockingSectionTitle("uBlock Origin")
         Row(
@@ -309,6 +329,198 @@ fun BlockingSettingsContent(
                 "your rules).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+
+    // Blocked-elements Manage (alpha.10, Mariner's dialog):
+    // per-rule Delete, Export, Import, Clear all. Every
+    // mutation writes the store, updates FilterEngine, and
+    // calls onRulesChanged so the probe gets the new rules.
+    if (showBlockedElements) {
+        FrostDialog(
+            onDismissRequest = { showBlockedElements = false },
+            title = { Text("Blocked elements") },
+            text = {
+                val netRules = UserBlockRules.parseNet(
+                    store.setting(UserBlockRules.NET_KEY, "")
+                )
+                val cosRules = UserBlockRules.parseCosmetic(
+                    store.setting(UserBlockRules.COSMETIC_KEY, "")
+                )
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                ) {
+                    if (netRules.isEmpty() && cosRules.isEmpty()) {
+                        Text(
+                            "Nothing blocked yet. Long-press a link or " +
+                                "image, or use “Block an element” in the " +
+                                "browser menu, to add a rule here.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    netRules.forEach { rule ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                when (rule) {
+                                    is UserBlockRules.NetRule.Host ->
+                                        "Everything from ${rule.host}"
+                                    is UserBlockRules.NetRule.Url ->
+                                        rule.url
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = {
+                                    val kept = netRules - rule
+                                    store.putSetting(
+                                        UserBlockRules.NET_KEY,
+                                        UserBlockRules.serializeNet(kept)
+                                    )
+                                    FilterEngine.userNetRules = kept
+                                    onRulesChanged()
+                                }
+                            ) { Text("Delete") }
+                        }
+                    }
+                    cosRules.forEach { rule ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${rule.selector} on ${rule.host}",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = {
+                                    val kept = cosRules - rule
+                                    store.putSetting(
+                                        UserBlockRules.COSMETIC_KEY,
+                                        UserBlockRules.serializeCosmetic(kept)
+                                    )
+                                    FilterEngine.userCosmeticRules = kept
+                                    onRulesChanged()
+                                }
+                            ) { Text("Delete") }
+                        }
+                    }
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        TextButton(onClick = {
+                            val exportText = listOf(
+                                UserBlockRules.serializeNet(netRules),
+                                UserBlockRules.serializeCosmetic(cosRules)
+                            ).filter { it.isNotEmpty() }
+                                .joinToString("\n")
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, exportText)
+                            }
+                            context.startActivity(
+                                Intent.createChooser(send, "Export block list")
+                            )
+                        }) { Text("Export") }
+                        TextButton(onClick = {
+                            blockImportText = ""
+                            blockImportResult = ""
+                            showBlockImport = true
+                        }) { Text("Import") }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        store.putSetting(UserBlockRules.NET_KEY, "")
+                        store.putSetting(UserBlockRules.COSMETIC_KEY, "")
+                        FilterEngine.userNetRules = emptyList()
+                        FilterEngine.userCosmeticRules = emptyList()
+                        onRulesChanged()
+                    }
+                ) { Text("Clear all") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showBlockedElements = false }
+                ) { Text("Done") }
+            }
+        )
+    }
+
+    if (showBlockImport) {
+        FrostDialog(
+            onDismissRequest = { showBlockImport = false },
+            title = { Text("Import block list") },
+            text = {
+                Column {
+                    Text(
+                        "Paste exported rules (net / cos lines). " +
+                            "Cosmetic rules are checked before import; " +
+                            "unsafe ones are dropped.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = blockImportText,
+                        onValueChange = { blockImportText = it },
+                        label = { Text("Rules") },
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(top = 8.dp),
+                        minLines = 4
+                    )
+                    if (blockImportResult.isNotEmpty()) {
+                        Text(
+                            blockImportResult,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val curNet = UserBlockRules.parseNet(
+                        store.setting(UserBlockRules.NET_KEY, "")
+                    )
+                    val curCos = UserBlockRules.parseCosmetic(
+                        store.setting(UserBlockRules.COSMETIC_KEY, "")
+                    )
+                    val newNet = UserBlockRules.parseNet(blockImportText)
+                    val newCos = UserBlockRules.parseCosmetic(blockImportText)
+                    val mergedNet = (curNet + newNet).distinct()
+                    val mergedCos = (curCos + newCos).distinct()
+                    store.putSetting(
+                        UserBlockRules.NET_KEY,
+                        UserBlockRules.serializeNet(mergedNet)
+                    )
+                    store.putSetting(
+                        UserBlockRules.COSMETIC_KEY,
+                        UserBlockRules.serializeCosmetic(mergedCos)
+                    )
+                    FilterEngine.userNetRules = mergedNet
+                    FilterEngine.userCosmeticRules = mergedCos
+                    onRulesChanged()
+                    val lines = blockImportText.lines()
+                        .count { it.isNotBlank() }
+                    val skipped = lines - newNet.size - newCos.size
+                    blockImportResult =
+                        "Imported ${newNet.size + newCos.size} rules" +
+                            if (skipped > 0) ", $skipped lines skipped"
+                            else ""
+                }) { Text("Import") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBlockImport = false }) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 }

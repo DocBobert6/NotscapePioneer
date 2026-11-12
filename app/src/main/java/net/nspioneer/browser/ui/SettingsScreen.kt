@@ -1433,7 +1433,8 @@ fun SettingsScreen(
             BlockingSettingsContent(
                 store = store,
                 uBlockState = engine.uBlockState.value,
-                onUninstallUBlock = { engine.uninstallUBlock() }
+                onUninstallUBlock = { engine.uninstallUBlock() },
+                onRulesChanged = { engine.syncUserRules() }
             )
 
             GroupTitle("Bookmarks")
