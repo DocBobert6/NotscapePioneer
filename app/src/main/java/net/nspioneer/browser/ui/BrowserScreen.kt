@@ -92,6 +92,7 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -183,6 +184,7 @@ import net.nspioneer.browser.engine.Fullscreen
 import net.nspioneer.browser.engine.GeckoEngine
 import net.nspioneer.browser.engine.LongPressTarget
 import net.nspioneer.browser.engine.PermPrompt
+import net.nspioneer.browser.engine.PopupChoice
 import net.nspioneer.browser.engine.UserBlockRules
 import net.nspioneer.browser.media.Downloads
 import net.nspioneer.browser.media.MediaLog
@@ -980,6 +982,10 @@ fun BrowserScreen(
             longPressTarget != null -> { onLongPressHandled(); true }
             mediaSheetOpen -> { mediaSheetOpen = false; true }
             siteInfoOpen -> { siteInfoOpen = false; true }
+            // Four-choice popup prompt (alpha.14): back
+            // dismisses it without choosing — Deny (once) +
+            // capture, never a hang.
+            engine.pendingPopupDecision.value != null -> { engine.dismissPopupDecision(); true }
             showPopupNotice -> { showPopupNotice = false; clearPendingPopups(); true }
             customizeOpen -> { customizeOpen = false; true }
             menuOpen -> { menuOpen = false; true }
@@ -1815,8 +1821,10 @@ fun BrowserScreen(
 
         // Popup notice (Mariner BrowserScreen.kt:4280-4380):
         // blocked popups collect in the queue and a notice
-        // is shown, unless per-site blockPopups silences it.
-        if (showPopupNotice) {
+        // is shown. Suppressed while the four-choice prompt
+        // is up — the prompt takes precedence, and the notice
+        // re-shows on the next capture (alpha.14).
+        if (showPopupNotice && engine.pendingPopupDecision.value == null) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -1904,8 +1912,10 @@ fun BrowserScreen(
                             Spacer(Modifier.weight(1f))
                             TextButton(onClick = {
                                 // Blacklist the site: its popups are
-                                // blocked silently from now on (undo in
-                                // Settings, Per-site controls).
+                                // blocked from now on — their URLs
+                                // still show in the notice (alpha.14),
+                                // so he can open one if he wants.
+                                // Undo in Settings, Per-site controls.
                                 val host = engine.popupCaptureHost.value
                                 if (host.isNotBlank()) {
                                     store.putSiteSetting(
@@ -1915,6 +1925,96 @@ fun BrowserScreen(
                                 showPopupNotice = false
                                 clearPendingPopups()
                             }) { Text("Always deny") }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Popup prompt (alpha.14): a scripted popup from an
+        // unlisted site — the request is HELD until he chooses,
+        // so the window is still alive when he allows it. Same
+        // floating pattern as the notice above, same place. The
+        // prompt shows the site it came from and the target
+        // address, so he knows what he is deciding on. Four
+        // choices: Allow once, Deny once, Trust (always allow
+        // this site), Don't trust (always deny this site).
+        // Dismissing (X / back) counts as Deny once + capture.
+        engine.pendingPopupDecision.value?.let { pending ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 92.dp)
+                    .fillMaxWidth()
+            ) {
+                Surface(
+                    shape = Frost.CardShape,
+                    color = Frost.cardColor(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.OpenInNew, contentDescription = "Popup",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    if (pending.sourceHost.isNotBlank()) {
+                                        "Allow popup on ${pending.sourceHost}?"
+                                    } else {
+                                        "Allow popup?"
+                                    },
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                pending.targetUri
+                                    ?.takeIf { it.isNotBlank() && it != "about:blank" }
+                                    ?.let { targetUrl ->
+                                        Text(
+                                            targetUrl,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                            }
+                            IconButton(
+                                onClick = { engine.dismissPopupDecision() },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        Text(
+                            "Trust always allows this site's popups. " +
+                                "Don't trust always denies them.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(onClick = {
+                                engine.answerPopupDecision(PopupChoice.ALLOW_ONCE)
+                            }) { Text("Allow") }
+                            OutlinedButton(onClick = {
+                                engine.answerPopupDecision(PopupChoice.DENY_ONCE)
+                            }) { Text("Deny") }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = {
+                                engine.answerPopupDecision(PopupChoice.TRUST)
+                            }) { Text("Trust") }
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = {
+                                engine.answerPopupDecision(PopupChoice.DONT_TRUST)
+                            }) { Text("Don't trust") }
                         }
                     }
                 }

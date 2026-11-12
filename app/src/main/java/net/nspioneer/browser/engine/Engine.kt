@@ -255,6 +255,19 @@ interface Engine {
     fun takeCapturedPopups(): List<String>
     /** Clear the queue (a user dismiss). */
     fun clearCapturedPopups()
+    /** A scripted-popup request waiting on the user's choice
+     *  (alpha.14): null when none is pending. The shell renders
+     *  the four-choice prompt from this state and answers it via
+     *  [answerPopupDecision]; dismissing counts as Deny (once).
+     *  A real new tab (gesture / target=_blank) still arrives
+     *  as onTabCreated (Phase 2), not here. */
+    val pendingPopupDecision: State<PopupController.PendingPopupDecision?>
+    /** Answer the held popup prompt (Allow once / Deny once /
+     *  Trust / Don't trust). */
+    fun answerPopupDecision(choice: PopupController.PopupChoice)
+    /** Dismiss the held popup prompt without choosing: Deny
+     *  (once) + capture. */
+    fun dismissPopupDecision()
 
     // ---- Batch 4: settings the engine enforces ----
     // Web dark mode ("Auto" | "On" | "Off"): GeckoView has no

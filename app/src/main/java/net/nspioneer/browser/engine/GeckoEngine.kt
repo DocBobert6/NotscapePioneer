@@ -430,6 +430,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // every outstanding request for this session with a
         // denial before the session closes.
         permissionDelegate.rejectOutstanding(own.session)
+        // A held popup prompt from this tab must never hang
+        // either: answer it as Deny (once) before the session
+        // closes (alpha.14).
+        popupController.cancelPendingForTab(own.id)
         MediaLog.clear(own.id)
         tabs.remove(own)
         if (currentTab === own) currentTab = null
@@ -620,6 +624,15 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun clearCapturedPopups() {
         popupController.clearCaptured()
     }
+
+    // Four-choice popup prompt (alpha.14): the controller holds
+    // the unlisted site's request; the shell renders the prompt
+    // from this state and answers it here.
+    override val pendingPopupDecision: State<PopupController.PendingPopupDecision?>
+        get() = popupController.pendingDecision
+    override fun answerPopupDecision(choice: PopupController.PopupChoice) =
+        popupController.answerPending(choice)
+    override fun dismissPopupDecision() = popupController.dismissPending()
 
     // ------------------------------------------------------------------
     // Batch 4: settings the engine enforces
@@ -1399,6 +1412,21 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // onCloseWindow can close it. A gesture link matches
                 // nothing and is not a popup.
                 val isPopup = popupController.matchNewSession(uri) != null
+                if (!isPopup) {
+                    // A tapped link from a blacklisted site: deny
+                    // it like any other blocked popup (alpha.14)
+                    // — no tab is created, and the URL is
+                    // captured for the notice. Tapping a link on
+                    // a site he distrusts is not consent for its
+                    // popups to open.
+                    val sourceHost = runCatching {
+                        Uri.parse(tab.url.value).host
+                    }.getOrNull() ?: ""
+                    if (!popupController.gestureAllowed(sourceHost)) {
+                        popupController.noteGestureDenied(uri, sourceHost)
+                        return null
+                    }
+                }
                 // openSession=false: the session MUST reach Gecko
                 // unopened — Gecko opens it itself, and handing it
                 // an already-open session throws AssertionError and
