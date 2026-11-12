@@ -45,6 +45,7 @@ import net.nspioneer.browser.ui.PioneerScreen
 import net.nspioneer.browser.ui.SettingsScreen
 import net.nspioneer.browser.ui.WelcomeScreen
 import org.mozilla.geckoview.StorageController
+import java.io.File
 
 /**
  * Notscape Pioneer — Phase 2 shell.
@@ -106,8 +107,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashHandler()
         store = PioneerStore.get(this)
         engine = GeckoEngine(this)
+
+        // A previous run crashed: surface the crash line in the
+        // status panel so Copy status carries it (the app keeps
+        // no other crash record — see installCrashHandler).
+        runCatching {
+            val crashFile = File(filesDir, "crash-last.log")
+            if (crashFile.exists()) {
+                val first = crashFile.readLines().firstOrNull() ?: ""
+                if (first.isNotBlank()) engine.noteStatus("last crash: $first")
+            }
+        }
 
         // uBlock Origin: the install goes through a real dialog
         // (name + permissions, Install / Later). NEVER auto-approved.
@@ -421,6 +434,30 @@ class MainActivity : ComponentActivity() {
     // Tabs
     // ------------------------------------------------------------------
 
+    /** Catch uncaught exceptions, write them to filesDir, then
+     *  hand them to the previous handler (so the system crash
+     *  dialog still appears). Pioneer previously kept no crash
+     *  record at all — a silent close left zero evidence
+     *  (watch-wrestling.eu, 2026-11-12). Native crashes are not
+     *  caught here; they still need a logcat / bug report. */
+    private fun installCrashHandler() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                val stamp = java.text.SimpleDateFormat(
+                    "yyyy-MM-dd HH:mm:ss", java.util.Locale.US
+                ).format(java.util.Date())
+                val writer = java.io.StringWriter()
+                throwable.printStackTrace(java.io.PrintWriter(writer))
+                File(filesDir, "crash-last.log").writeText(
+                    "[$stamp] thread=${thread.name} " +
+                        "${throwable.javaClass.name}: ${throwable.message}\n$writer"
+                )
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
+    }
+
     /** The per-tab wiring every tab gets, however it was
      * created (shell or engine): history recording for
      * non-private tabs, and the long-press link menu. */
@@ -430,6 +467,14 @@ class MainActivity : ComponentActivity() {
         }
         tab.onLongPressTarget = { target ->
             longPressTarget = target
+        }
+        // A dead tab used to fail silently (the engine only logged
+        // it to the status panel); say so on screen, so a session
+        // crash is not mistaken for an app crash.
+        tab.onCrash = {
+            Toast.makeText(
+                this, "Tab crashed — tap reload to retry", Toast.LENGTH_SHORT
+            ).show()
         }
     }
 

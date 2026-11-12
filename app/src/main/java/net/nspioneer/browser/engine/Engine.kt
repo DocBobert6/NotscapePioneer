@@ -165,6 +165,9 @@ interface Engine {
     val mediaLines: SnapshotStateList<String>
     fun copyStatusText(): String    // header + status + media probe,
         // same text the spike's Copy status button produced.
+    fun noteStatus(line: String)    // append a line to the status
+        // panel (Diagnostics / Copy status); the shell uses it for
+        // launch-time notes such as a previous run's crash line.
     fun refreshStats()              // recomputes the "stats: APK … | PSS …"
         // line (cold start, PSS, APK size).
     fun close()
