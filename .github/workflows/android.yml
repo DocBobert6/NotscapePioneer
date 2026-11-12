@@ -1,6 +1,6 @@
 name: Android CI
 
-# Notscape Pioneer — Phase 2 shell parity (alpha).
+# Notscape Pioneer — Phase 3 blocking, downloads and media (alpha).
 # A push to main only builds the debug APK and uploads it as an
 # artifact. There is NO release job, NO tag publishing, and NO
 # keystore: the alpha is debug-signed only. Nothing here touches
@@ -43,6 +43,13 @@ jobs:
         # Proves the pinned STABLE GeckoView version resolves from
         # Mozilla's Maven repo before the build spends time on it.
         run: ./gradlew :app:dependencies --configuration debugRuntimeClasspath | grep -i geckoview
+
+      # Phase 3: the FilterEngine / UserBlockRules unit tests are the
+      # CI-measurable half of Gate 3 scorecard row A. They run here
+      # (JVM, android.jar stubs) before the APK build so a matcher
+      # regression fails the run, not just a local kotlinc check.
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
