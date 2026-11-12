@@ -67,6 +67,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
@@ -887,7 +889,10 @@ internal fun LazyListScope.BrowserMenuRowsContent(
  * Alpha.24: the rows live in a LazyColumn whose list state
  * is hoisted here, so the scroll position survives
  * rows-content recomposition and only visible rows are
- * composed. */
+ * composed. The sheet's drag is gated on that state: it
+ * may drag only while the list is at its top edge, so
+ * flings scroll content only and swipe-down-to-dismiss
+ * still works. */
 @Composable
 internal fun BrowserMenuSheet(
     store: PioneerStore,
@@ -913,8 +918,27 @@ internal fun BrowserMenuSheet(
     // and only visible rows are composed.
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    // alpha.24, fix 1 — the drag handoff: the sheet may
+    // drag only while the list is at its top edge. A
+    // child-side NestedScrollConnection cannot gate the
+    // sheet (the sheet's own connection is the parent and
+    // sees pre-scroll first), so the gate lives on the
+    // sheet's own gesture flag instead. derivedStateOf
+    // means this only recomposes when the at-top boolean
+    // flips, not on every scroll pixel. While the list is
+    // mid-scroll the sheet takes no motion, so a fling can
+    // no longer hand velocity to the sheet and snap back;
+    // at the top edge a downward drag still dismisses the
+    // sheet, as before.
+    val atTop by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex == 0 &&
+                listState.firstVisibleItemScrollOffset == 0
+        }
+    }
     FrostSheet(
         onDismiss = onClose,
+        draggable = atTop,
         skipPartiallyExpanded = true
     ) {
         LazyColumn(
