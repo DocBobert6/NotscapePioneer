@@ -1503,12 +1503,26 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
                 tab.isLoading.value = true
-                // A load has started: the new-session bring-up must
-                // not load the URI again (items 3 + 4). This also
-                // ends the pending state, so the loading overlay
-                // gives way to the page.
-                tab.loadStarted = true
-                tab.isNewSessionPending.value = false
+                // Alpha.23 (items 1 + 2): only a REAL load starts
+                // the tab. Gecko opens a new session on
+                // about:blank first, and that blank load must
+                // not set loadStarted or clear the pending state
+                // — onLocationChange maps about:blank to "", so
+                // the tab URL stays blank, isHome stays true, and
+                // the StartPage overlay rendered over a tab still
+                // waiting for its target URI (the start-page
+                // flash). loadStarted now means "a real
+                // (non-about:blank) load started", and the
+                // bring-up below keys its fallback on that same
+                // flag: if Gecko only got as far as about:blank
+                // within 500ms, the app loads the URI itself; if
+                // Gecko did start the real URI, the flag is set
+                // and the fallback is skipped — never a double
+                // load.
+                if (url.isNotBlank() && url != "about:blank") {
+                    tab.loadStarted = true
+                    tab.isNewSessionPending.value = false
+                }
                 tab.progress.value = 0
                 statusPanel.status("tab ${n()}: loading $url")
                 // Batch 4: a new load that is not the pending
@@ -1693,6 +1707,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
      *    the app. Correct whether or not Gecko loads it: when
      *    Gecko does load, onPageStart has already fired and the
      *    load is skipped — never a double load;
+     *    (alpha.23: "no load started" means no REAL load —
+     *    loadStarted is set only by a non-about:blank
+     *    onPageStart, so Gecko reaching only about:blank
+     *    within 500ms still triggers the app-side load);
      *  - session still not open → log it and clear the pending
      *    flag, so the tab falls back to the start page instead
      *    of a permanent spinner.
@@ -1834,10 +1852,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
          *  loads it when Gecko did not (items 3 + 4). */
         var popupTargetUri: String? = null
 
-        /** True once a load has started on this tab (onPageStart).
-         *  The new-session bring-up consults it: a started load
-         *  means Gecko loaded the URI, so the app must not load
-         *  it again. */
+        /** True once a REAL load has started on this tab
+         *  (onPageStart with a non-about:blank URL, alpha.23):
+         *  Gecko opens a new session on about:blank first, and
+         *  that blank load must not count. The new-session
+         *  bring-up consults it: a started real load means Gecko
+         *  loaded the URI, so the app must not load it again. */
         var loadStarted: Boolean = false
 
         /** Last URL onNavigate fired for (dedupe same-URL repeats). */
