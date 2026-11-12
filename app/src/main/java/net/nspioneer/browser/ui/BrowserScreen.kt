@@ -20,8 +20,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.draganddrop.dragAndDropSource
@@ -68,6 +70,7 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -1032,10 +1035,9 @@ fun BrowserScreen(
 
     /** Mariner's floating address bar (BrowserScreen.kt:3663-3995),
      *  ported: frost capsule groups, satellite circles beside
-     *  it. The download pill and vault chip are NOT here — Phase 3
-     *  / Phase 4 scope; they ride in the same column when they
-     *  land. Long-press Back/Forward opens the history sheet
-     *  (Batch 2, Mariner beta.69 #58). */
+     *  it. The download pill rides in the same column (below);
+     *  the vault chip is Phase 4. Long-press Back/Forward opens
+     *  the history sheet (Batch 2, Mariner beta.69 #58). */
     @Composable
     fun addressBar() {
         val pillShape = RoundedCornerShape(50)
@@ -1344,6 +1346,94 @@ fun BrowserScreen(
         }
     }
 
+    /** Mariner's download pill (browser/BrowserScreen.kt:3526-3567),
+     *  ported: every download, media or file, gets an in-browser
+     *  progress indicator — the only floating-UI gap in built
+     *  scope (audit 2026-11-12). Tapping it opens the manager
+     *  that holds that download: the Library for media, the
+     *  Downloads page for files. Only non-private downloads
+     *  show — a private download must not leak its title into
+     *  the chrome, on any tab. */
+    @OptIn(ExperimentalFoundationApi::class)
+    @Composable
+    fun downloadPill() {
+        val active = store.downloadsSnapshot().filter {
+            !it.isPrivate && (
+                it.status == "queued" ||
+                    it.status == "downloading" ||
+                    it.status == "paused"
+                )
+        }
+        if (active.isEmpty()) return
+        val latest = active.maxByOrNull { it.id } ?: return
+        val others = active.size - 1
+        // Live percentages for file downloads: media engines push
+        // progress themselves, but DownloadManager progress only
+        // reaches the store when something syncs it, so while a
+        // file download is active the pill syncs it every two
+        // seconds. The effect lives exactly as long as the pill
+        // does, and refresh() only writes when a status or
+        // percentage actually changed.
+        val hasFileDownload = active.any { !it.media && it.dmId >= 0 }
+        LaunchedEffect(hasFileDownload) {
+            if (!hasFileDownload) return@LaunchedEffect
+            while (true) {
+                Downloads.refresh(context, store)
+                kotlinx.coroutines.delay(2000)
+            }
+        }
+        // One standard pill, fixed width: the percentage first,
+        // then the name scrolling (marquee) when it is too long
+        // to fit.
+        Row(
+            modifier = Modifier
+                .padding(
+                    start = 12.dp,
+                    top = if (barAtBottom) 0.dp else 6.dp,
+                    bottom = if (barAtBottom) 6.dp else 0.dp
+                )
+                .width(240.dp)
+                .frostBar(RoundedCornerShape(50))
+                .clickable {
+                    onOpenScreen(
+                        if (latest.media) PioneerScreen.Library
+                        else PioneerScreen.Downloads
+                    )
+                }
+                .padding(horizontal = 10.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                Icons.Filled.Download,
+                contentDescription = "Downloads",
+                modifier = Modifier.size(15.dp),
+                tint = MaterialTheme.colorScheme.onSurface
+            )
+            if (latest.progress >= 0) {
+                Text(
+                    "${latest.progress}%",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Text(
+                latest.title,
+                maxLines = 1,
+                modifier = Modifier.weight(1f).basicMarquee(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (others > 0) {
+                Text(
+                    "+$others",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         // The engine view, full-bleed; the start page overlays
         // it while this tab is in its home state. The bar
@@ -1473,7 +1563,43 @@ fun BrowserScreen(
             enter = slideInVertically { if (barAtBottom) it else -it } + fadeIn(),
             exit = slideOutVertically { if (barAtBottom) it else -it } + fadeOut()
         ) {
-            addressBar()
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (!barAtBottom) addressBar()
+                downloadPill()
+                if (barAtBottom) addressBar()
+            }
+        }
+
+        // The pill on its own: it used to ride inside the bar
+        // above, so scrolling the page hid the bar and the
+        // download indicator with it, and a download in progress
+        // looked like it had no indicator at all. While the bar
+        // is hidden the pill renders here instead, at the same
+        // screen edge, so it stays visible until the download
+        // finishes.
+        if (barHidden && !editingAddress && !isHome &&
+            !tab.isFullscreen.value && !isAppMode
+        ) {
+            Column(
+                modifier = Modifier
+                    .align(
+                        if (barAtBottom) Alignment.BottomCenter
+                        else Alignment.TopCenter
+                    )
+                    .then(
+                        if (barAtBottom) Modifier.windowInsetsPadding(
+                            WindowInsets.navigationBars
+                        )
+                        else Modifier.windowInsetsPadding(WindowInsets.statusBars)
+                    )
+                    .padding(
+                        top = if (barAtBottom) 0.dp else 10.dp,
+                        bottom = if (barAtBottom) 10.dp else 0.dp
+                    )
+                    .fillMaxWidth()
+            ) {
+                downloadPill()
+            }
         }
 
         // App mode (Batch 4, Mariner BrowserScreen.kt:4448):
