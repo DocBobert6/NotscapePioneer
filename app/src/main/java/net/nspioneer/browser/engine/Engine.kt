@@ -114,6 +114,15 @@ interface EngineTab {
     // window.open / onNewSession (Mariner TabList.isPopupWin).
     // onCloseWindow closes only popup tabs.
     val isPopupWin: Boolean
+    // ---- Popup rebuild (alpha.13, items 4 + 7) ----
+    // True from an onNewSession creation until the first load
+    // starts (or the bring-up resolves): the shell shows a
+    // loading state for the tab instead of the start page.
+    val isNewSessionPending: State<Boolean>
+    // True once the session is open (engine-opened, or Gecko
+    // opened it after onNewSession): the shell binds the view
+    // on this signal, not on a recomposition side-effect.
+    val sessionOpened: State<Boolean>
 }
 
 interface Engine {
@@ -144,6 +153,12 @@ interface Engine {
         // this the shell keeps a dead tab whose closed session the
         // view would rebind (watch-wrestling.eu crash suspect,
         // 2026-11-12). Not fired while the engine itself is closing.
+    // The shell calls this whenever the active tab changes
+    // (switch, new tab, close): the engine records the selected
+    // tab and activates + focuses its session when open, so a
+    // new-session tab Gecko opened is brought up instead of
+    // left inert (rebuild items 4 + 7).
+    fun onTabSelected(tab: EngineTab)
     // uBlock Origin: install goes through onExtensionInstallPrompt —
     // the shell shows a real dialog (name + permissions, Install /
     // Later). NEVER auto-approve (the spike's auto-approve was

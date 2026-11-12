@@ -155,6 +155,7 @@ class MainActivity : ComponentActivity() {
             wireTab(newTab)
             tabs.add(newTab)
             activeTabIndex = tabs.lastIndex
+            engine.onTabSelected(newTab)
             persistTabSession()
         }
 
@@ -553,7 +554,10 @@ class MainActivity : ComponentActivity() {
         } else {
             tab.load(url)
         }
-        if (switchTo) activeTabIndex = tabs.lastIndex
+        if (switchTo) {
+            activeTabIndex = tabs.lastIndex
+            engine.onTabSelected(tab)
+        }
         if (persist) persistTabSession()
         return tab
     }
@@ -561,6 +565,7 @@ class MainActivity : ComponentActivity() {
     private fun switchTab(index: Int) {
         if (index !in tabs.indices) return
         activeTabIndex = index
+        engine.onTabSelected(tabs[index])
         persistTabSession()
     }
 
@@ -592,6 +597,9 @@ class MainActivity : ComponentActivity() {
         if (appModeTabId == tab.id) appModeTabId = null
         if (activeTabIndex >= tabs.size) activeTabIndex = tabs.lastIndex
         else if (idx < activeTabIndex) activeTabIndex--
+        // The newly active tab (if any) is selected: the engine
+        // activates + focuses its session (rebuild item 4).
+        if (tabs.isNotEmpty()) engine.onTabSelected(tabs[activeTabIndex])
     }
 
     /** Batch 2 (Mariner TabList.recordClosed): a closed NORMAL
@@ -625,6 +633,7 @@ class MainActivity : ComponentActivity() {
             copy.load(url)
         }
         activeTabIndex = tabs.indexOf(copy)
+        engine.onTabSelected(copy)
         persistTabSession()
     }
 

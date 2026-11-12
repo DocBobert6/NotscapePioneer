@@ -1530,6 +1530,13 @@ fun BrowserScreen(
                     // dialog. Bind only an open session, and
                     // only when it actually changed.
                     val session = tab.session
+                    // Subscribe to the session-opened signal: when
+                    // Gecko opens a new-session tab's session, this
+                    // recomposes and the bind below runs (rebuild
+                    // items 4 + 7) — session.isOpen alone is a plain
+                    // property and never triggers a recomposition.
+                    @Suppress("UNUSED_VARIABLE")
+                    val sessionOpened = tab.sessionOpened.value
                     if (session.isOpen && view.session !== session) {
                         view.setSession(session)
                     }
@@ -1582,13 +1589,36 @@ fun BrowserScreen(
                 modifier = Modifier.fillMaxSize()
             )
             if (isHome) {
-                StartPage(
-                    store = store,
-                    onOpen = { url -> openUrl(url) },
-                    onOpenSection = { screen -> onOpenScreen(screen) },
-                    contentTopPad = if (barAtBottom) 0.dp else 92.dp,
-                    contentBottomPad = if (barAtBottom) 92.dp else 0.dp
-                )
+                if (tab.isNewSessionPending.value) {
+                    // A new-session tab whose load has not started
+                    // yet: a loading state, never the start page —
+                    // the start page is what made Robert think
+                    // nothing had happened (rebuild item 4). The
+                    // pending flag clears on the first load, or
+                    // when the bring-up resolves.
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(modifier = Modifier.size(36.dp))
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "Loading…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    StartPage(
+                        store = store,
+                        onOpen = { url -> openUrl(url) },
+                        onOpenSection = { screen -> onOpenScreen(screen) },
+                        contentTopPad = if (barAtBottom) 0.dp else 92.dp,
+                        contentBottomPad = if (barAtBottom) 92.dp else 0.dp
+                    )
+                }
             }
             // Pull-to-refresh indicator (Mariner
             // BrowserScreen.kt:4168-4200): a frost circle at the

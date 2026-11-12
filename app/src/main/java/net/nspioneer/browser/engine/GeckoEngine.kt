@@ -210,6 +210,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
      * best available proxy). */
     private var currentTab: GeckoTab? = null
 
+    /** The tab the shell currently shows (rebuild items 4 + 7):
+     *  the shell reports every selection via [onTabSelected].
+     *  The new-session bring-up activates + focuses only this
+     *  tab, so a background popup tab never steals focus. */
+    private var selectedTab: GeckoTab? = null
+
     // ---- Phase 3: Engine interface members ----
     override var onExternalDownload: ((EngineTab, ExternalDownload) -> Unit)? = null
     override var onPermissionPrompt: ((PermPrompt) -> Unit)? = null
@@ -365,7 +371,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // Skipped only for onNewSession (see openSession above):
         // GeckoTab.load re-opens on demand if a load ever arrives
         // before Gecko's own open.
-        if (openSession) session.open(runtime)
+        if (openSession) {
+            session.open(runtime)
+            // The shell binds the view on this signal (items 4 + 7).
+            tab.sessionOpened.value = true
+        }
         if (desktopMode) {
             // Batch 2: desktop UA + viewport BEFORE any load or
             // restore — setDesktopMode would reload and lose the
@@ -439,6 +449,23 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // while the engine itself is closing (close() sets
         // closed first) — the shell is going away too.
         if (!closed) onTabDestroyed?.invoke(own)
+    }
+
+    /** The shell calls this whenever the active tab changes
+     *  (switch, new tab, close): record the selected tab and,
+     *  when its session is open, activate + focus it — a
+     *  new-session tab Gecko opened is inert until this runs
+     *  (rebuild items 4 + 7). A background tab is never
+     *  activated here; only the selected one. */
+    override fun onTabSelected(tab: EngineTab) {
+        val own = tab as? GeckoTab ?: return
+        selectedTab = own
+        if (own.session.isOpen) {
+            runCatching {
+                own.session.setActive(true)
+                own.session.setFocused(true)
+            }
+        }
     }
 
     override fun flushSessionStates() {
@@ -1344,9 +1371,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             ): GeckoResult<GeckoSession>? {
                 // target=_blank / window.open: the engine creates the
                 // tab itself and reports it via Engine.onTabCreated.
-                // NEVER call load here; Gecko loads the URI into the
-                // returned session. A private parent opens a private
-                // child; null would make window.open() fail.
+                // NEVER call load here — but see bringUpNewSessionTab
+                // below: the API evidence does not settle whether
+                // Gecko loads the URI into the returned session (the
+                // javadoc is silent; the alpha.12 video shows an
+                // empty tab), so the app loads it itself after
+                // Gecko's open, ONLY while the session is still
+                // blank. A private parent opens a private child;
+                // null would make window.open() fail.
                 // Popup windows: the controller matches this
                 // onNewSession against a pending allowed popup
                 // (rebuild item 1) and the new tab is marked
@@ -1361,11 +1393,19 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 val newTab = createTabInternal(
                     tab.isPrivate, isPopup, openSession = false
                 ) as GeckoTab
+                // The opener (this session) — the popunder guard's
+                // hereHost fallback for a fresh popup tab whose own
+                // URL is still blank (item 6). Every new-session
+                // tab gets one, popup or gesture link alike.
+                newTab.openerTab = tab
+                newTab.popupTargetUri = uri
+                newTab.isNewSessionPending.value = true
                 onTabCreated?.invoke(newTab)
                 statusPanel.status(
                     "tab ${n()}: window.open -> tab ${newTab.id}" +
                         if (isPopup) " (popup)" else ""
                 )
+                bringUpNewSessionTab(newTab, uri)
                 return GeckoResult.fromValue(newTab.session)
             }
         }
@@ -1387,6 +1427,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
                 tab.isLoading.value = true
+                // A load has started: the new-session bring-up must
+                // not load the URI again (items 3 + 4). This also
+                // ends the pending state, so the loading overlay
+                // gives way to the page.
+                tab.loadStarted = true
+                tab.isNewSessionPending.value = false
                 tab.progress.value = 0
                 statusPanel.status("tab ${n()}: loading $url")
                 // Batch 4: a new load that is not the pending
@@ -1549,6 +1595,63 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         MediaSessionHandler.register(session)
     }
 
+    /**
+     * Bring up a tab returned from onNewSession (rebuild items
+     * 3 + 4, alpha.13): Gecko opens the session itself, on its
+     * own thread, so the app cannot activate it or load into it
+     * synchronously. 500ms later — a generous margin for a
+     * message round-trip — check what Gecko did:
+     *  - session open → mark it opened (the shell binds the view
+     *    on that signal) and, if the tab is still selected,
+     *    activate + focus it;
+     *  - no load started and the session still blank → Gecko did
+     *    NOT load the URI (the API evidence never settled this;
+     *    the alpha.12 video shows an empty tab), so load it from
+     *    the app. Correct whether or not Gecko loads it: when
+     *    Gecko does load, onPageStart has already fired and the
+     *    load is skipped — never a double load;
+     *  - session still not open → log it and clear the pending
+     *    flag, so the tab falls back to the start page instead
+     *    of a permanent spinner.
+     * The Copy-status discriminator lines for the device test:
+     * "tab M: window.open -> tab N" (onNewSession, above), then
+     * either "tab N: loading <url>" + "load OK/FAILED" (Gecko
+     * loaded it) or "tab N: Gecko did not load the new-session
+     * URI — loading it" + the same loading lines (the app
+     * loaded it). Robert runs this check on alpha.13 (the
+     * alpha.12 check never happened).
+     */
+    private fun bringUpNewSessionTab(newTab: GeckoTab, uri: String) {
+        mainHandler.postDelayed({
+            val tab = tabs.firstOrNull { it.id == newTab.id }
+                ?: return@postDelayed
+            if (!tab.session.isOpen) {
+                statusPanel.status(
+                    "tab ${tab.id}: new-session session still not open"
+                )
+                tab.isNewSessionPending.value = false
+                return@postDelayed
+            }
+            tab.sessionOpened.value = true
+            if (selectedTab === tab) {
+                runCatching {
+                    tab.session.setActive(true)
+                    tab.session.setFocused(true)
+                }
+            }
+            if (!tab.loadStarted && tab.url.value.isBlank() &&
+                uri.isNotBlank() && uri != "about:blank"
+            ) {
+                statusPanel.status(
+                    "tab ${tab.id}: Gecko did not load the " +
+                        "new-session URI — loading it"
+                )
+                tab.loadInternal(uri, makeCurrent = selectedTab === tab)
+            }
+            tab.isNewSessionPending.value = false
+        }, 500)
+    }
+
     // ------------------------------------------------------------------
     // One tab
     // ------------------------------------------------------------------
@@ -1569,6 +1672,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         override val scrollY = mutableIntStateOf(0)
         override val findResult = mutableStateOf<FindResult?>(null)
         override val isDesktopMode = mutableStateOf(false)
+
+        /** True from an onNewSession creation until the first load
+         *  starts (or the bring-up resolves): the shell shows a
+         *  loading state for the tab instead of the start page
+         *  (rebuild item 4). */
+        override val isNewSessionPending = mutableStateOf(false)
+
+        /** True once the session is open: the shell binds the view
+         *  on this signal (rebuild items 4 + 7). Set by the engine
+         *  when it opens the session, and by the bring-up when it
+         *  observes Gecko's open. */
+        override val sessionOpened = mutableStateOf(false)
 
         // ---- Batch 2: session history + session state ----
         override val historyEntries =
@@ -1627,6 +1742,21 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             refreshTabMedia(this)
         }
 
+        /** The tab that opened this one (onNewSession's session) —
+         *  the popunder guard's hereHost fallback (item 6). Null
+         *  for shell-created tabs. */
+        var openerTab: GeckoTab? = null
+
+        /** The URI onNewSession was asked to open — the bring-up
+         *  loads it when Gecko did not (items 3 + 4). */
+        var popupTargetUri: String? = null
+
+        /** True once a load has started on this tab (onPageStart).
+         *  The new-session bring-up consults it: a started load
+         *  means Gecko loaded the URI, so the app must not load
+         *  it again. */
+        var loadStarted: Boolean = false
+
         /** Last URL onNavigate fired for (dedupe same-URL repeats). */
         var lastNavigatedUrl: String? = null
 
@@ -1653,12 +1783,28 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         var probePort: WebExtension.Port? = null
 
         override fun load(url: String) {
+            loadInternal(url, makeCurrent = true)
+        }
+
+        /** The load itself: the session must be fully open, active
+         *  and focused BEFORE the first loadUri (first-load watch
+         *  item). makeCurrent=false (new-session bring-up, items
+         *  3 + 4) skips the current-tab bookkeeping, so a
+         *  background popup tab never steals the active tab —
+         *  the bring-up activates + focuses it itself, and only
+         *  when it is still selected. */
+        internal fun loadInternal(url: String, makeCurrent: Boolean) {
             // First-load watch item: the session must be fully open,
             // active and focused BEFORE the first loadUri.
-            if (!session.isOpen) session.open(runtime)
-            session.setActive(true)
-            session.setFocused(true)
-            currentTab = this
+            if (!session.isOpen) {
+                session.open(runtime)
+                sessionOpened.value = true
+            }
+            if (makeCurrent) {
+                session.setActive(true)
+                session.setFocused(true)
+                currentTab = this
+            }
             // Batch 4: per-site JavaScript, applied before the
             // load so the page's scripts see the right value.
             val host = runCatching { Uri.parse(url).host }.getOrNull()
