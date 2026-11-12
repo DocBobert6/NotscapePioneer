@@ -95,6 +95,9 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
+    // The carried shell files use androidx.compose.material.icons.Icons
+    // (core filled set only — no icons-extended in this phase).
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
     implementation("org.mozilla.geckoview:geckoview:$geckoviewVersion")
     // Cast probe only (route discovery logging, no session launch).
