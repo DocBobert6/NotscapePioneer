@@ -1498,8 +1498,11 @@ class PioneerStore private constructor(context: Context) {
                             s.optBoolean("img", false),
                             s.optBoolean("pop", false),
                             s.optBoolean("nb", false),
-                            s.optBoolean("bp", false),
-                            s.optBoolean("c3", false)
+                            s.optBoolean("bp", false)
+                            // Old "c3" keys in stored JSON are
+                            // ignored on read: the per-site
+                            // third-party-cookies field is gone
+                            // (audit S3, no GeckoView API).
                         )
                     }
                     siteSettings.clear()
