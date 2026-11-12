@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -41,20 +42,20 @@ import net.nspioneer.browser.engine.Engine
  * there are no dead rows.
  *
  * Sections: Appearance (theme, start-page tiles, banner), Search
- * (DuckDuckGo, fixed), Privacy (tracking protection, Clear
- * history, Erase private data), Bookmarks (Import/Export HTML),
- * Extensions (uBlock Origin status + Install), About (version,
- * GeckoView version, Licences).
+ * (DuckDuckGo, fixed), Privacy (tracking protection, strict popup
+ * blocking, Clear history, Erase private data), Blocking (filter
+ * lists, custom rules, blocked counts), Bookmarks (Import/Export
+ * HTML), Extensions (uBlock Origin status + Install/Remove),
+ * About (version, GeckoView version, Licences).
  *
  * Notes:
  * - Tracking protection: the ETP level is changeable at runtime
  *   (GeckoView 71+); a change here applies at once and reloads
  *   the current tab. The row says so plainly.
- * - uBlock Remove: the Engine interface has no uninstall method,
- *   so there is no Remove button to offer. When installed the
- *   row shows the version and offers "Check again" (install
- *   re-checks first and reports the version). The missing
- *   uninstall is reported as a gap, not faked with a dead row.
+ * - uBlock Remove: Engine.uninstallUBlock() (GeckoView
+ *   WebExtensionController.uninstall, Phase 3) powers the Remove
+ *   row in Extensions and in the Blocking section; the result
+ *   comes back through uBlockState.
  * - GeckoView version is the pinned version from the app's
  *   build script (the coordinator updates it with the pin).
  */
@@ -275,6 +276,30 @@ fun SettingsScreen(
                     }
                 )
                 InsetDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Strict popup blocking",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Switch(
+                        checked = store.setting("popupStrict", "true") == "true",
+                        onCheckedChange = {
+                            store.putSetting("popupStrict", it.toString())
+                        }
+                    )
+                }
+                Text(
+                    "Blocks every popup window, including ones a tap asks for. " +
+                        "You can allow a blocked popup once, or always for a site.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+                )
+                InsetDivider()
                 ActionRow(
                     label = "Clear history",
                     supporting = "Removes all visited pages from History",
@@ -289,6 +314,12 @@ fun SettingsScreen(
                     onClick = { showErasePrivate = true }
                 )
             }
+
+            BlockingSettingsContent(
+                store = store,
+                uBlockState = engine.uBlockState.value,
+                onUninstallUBlock = { engine.uninstallUBlock() }
+            )
 
             GroupTitle("Bookmarks")
             SettingsCard {
@@ -319,12 +350,12 @@ fun SettingsScreen(
                     onClick = { engine.installUBlock() }
                 )
                 if (installed) {
-                    Text(
-                        "uBlock Origin is installed. Removing an extension is not " +
-                            "available in this phase.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp)
+                    InsetDivider()
+                    ActionRow(
+                        label = "Remove uBlock Origin",
+                        supporting = "Removes the extension from Pioneer",
+                        actionLabel = "Remove",
+                        onClick = { engine.uninstallUBlock() }
                     )
                 }
             }

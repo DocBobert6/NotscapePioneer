@@ -113,6 +113,22 @@ class ExtensionManager(
         }
     }
 
+    /** The background script's native port
+     *  (`browser.runtime.connectNative("pioneer")`): the app
+     *  pushes `rules-update` on it; the background script
+     *  never posts on it (its messages arrive via
+     *  sendNativeMessage instead). */
+    private val backgroundPortDelegate = object : WebExtension.PortDelegate {
+        override fun onPortMessage(message: Any, port: WebExtension.Port) {
+            // The background script never posts on the native
+            // port — nothing to route.
+        }
+
+        override fun onDisconnect(port: WebExtension.Port) {
+            host.onBackgroundPortDisconnected(port)
+        }
+    }
+
     private val probeMessageDelegate = object : WebExtension.MessageDelegate {
         override fun onMessage(
             nativeApp: String,
@@ -129,7 +145,57 @@ class ExtensionManager(
                 val reply = JSONObject().apply { put("factor", factor.toDouble()) }
                 return GeckoResult.fromValue(reply as Any)
             }
-            if (type != "media-probe") return null
+            // Phase 3 (Worker C wiring): the video pop-up
+            // watcher's per-site opt-out query. The reply
+            // resolves the watcher's sendNativeMessage
+            // promise; the message carries the host.
+            if (type == "video-popup-query") {
+                val off = host.videoPopupOff(message.optString("host"))
+                val reply = JSONObject().apply {
+                    put("type", "video-popup-off")
+                    put("off", off)
+                }
+                return GeckoResult.fromValue(reply as Any)
+            }
+            // Phase 3 (Worker C wiring): the watcher ▶ button
+            // was tapped / long-pressed. Routed to the tab's
+            // EngineTab callbacks; the shell (VideoPopup.handle)
+            // applies the allowCheck before playing.
+            if (type == "video-popup-tap") {
+                host.noteVideoPopupTap(sender.session, message.optString("url"))
+                return null
+            }
+            if (type == "video-popup-longpress") {
+                host.noteVideoPopupLongPress(sender.session, message.optString("url"))
+                return null
+            }
+            // Phase 3 (Worker A wiring): a `webRequest`
+            // observation from the probe background script.
+            // The sender is the background script, so
+            // sender.session is null — the engine attributes
+            // the URL by host match, falling back to the
+            // active tab (design §7). Routed into MediaLog.
+            if (type == "media-net") {
+                host.noteNetMedia(sender.session, message.optString("url"))
+                return null
+            }
+            if (type != "media-probe") {
+                // Worker A fallthrough: the blocking bridge
+                // owns `blocked`, `cosmetic-query` and
+                // `rules-request` — and returns null for types
+                // it does not own, so this is a pure chain, not
+                // a catch-all. `media-net` never reaches here:
+                // the Worker C routing above owns it (one sink,
+                // no double-feed). New §7 names (A, recorded):
+                // `blocked` (background→app cancellation report)
+                // and `rules-request` (background asks for the
+                // initial rules; the reply IS `rules-update`).
+                // `rules-update` gains `disabledHosts`,
+                // `userNet`, `trackerHosts`, `docHosts`,
+                // `builtinHosts`, `blockAds`, `blockTrackers`
+                // beside the five named keys.
+                return host.handleBlockingMessage(message, sender.session)
+            }
             val tabNumber = host.tabNumberFor(sender.session)
             val url = message.optString("url")
             val items = message.optJSONArray("items")
@@ -150,11 +216,24 @@ class ExtensionManager(
         }
 
         override fun onConnect(port: WebExtension.Port) {
-            // sender.session is the GeckoSession the content script
-            // runs in (null for a background script — the probe has
-            // none). That is how the port maps to its tab.
+            // sender.session is the GeckoSession the content
+            // script runs in — null for the background script.
+            // A null session is the BACKGROUND script's native
+            // port (`browser.runtime.connectNative("pioneer")`):
+            // it must go to the blocking bridge, NOT through
+            // the tab-port registration below, which
+            // disconnects session-less ports. If it went
+            // through the tab path, `rules-update` pushes would
+            // silently never arrive (the `rules-request` reply
+            // is only the fallback).
+            val session = port.sender?.session
+            if (session == null) {
+                port.setDelegate(backgroundPortDelegate)
+                host.onBackgroundPortConnected(port)
+                return
+            }
             port.setDelegate(probePortDelegate)
-            host.registerProbePort(port.sender?.session, port)
+            host.registerProbePort(session, port)
         }
     }
 
@@ -282,4 +361,32 @@ interface ProbeHost {
     fun noteProbeMedia(tabNumber: Int, kind: String, url: String)
     fun registerProbePort(session: GeckoSession?, port: WebExtension.Port)
     fun unregisterProbePort(port: WebExtension.Port)
+
+    /** Phase 3 (Worker A): a `media-net` webRequest
+     *  observation. [session] is null for background-script
+     *  messages — the engine attributes by host match. */
+    fun noteNetMedia(session: GeckoSession?, url: String)
+    /** Phase 3 (Worker C): the video pop-up watcher ▶ button
+     *  was tapped / long-pressed in [session]'s page. */
+    fun noteVideoPopupTap(session: GeckoSession?, url: String)
+    fun noteVideoPopupLongPress(session: GeckoSession?, url: String)
+    /** Phase 3 (Worker C): per-site pop-up-player opt-out
+     *  for [host] (`videoPopupOff:$host`). */
+    fun videoPopupOff(host: String): Boolean
+
+    /** Phase 3 (Worker A): the blocking bridge's native
+     *  messages (`blocked`, `cosmetic-query`,
+     *  `rules-request`). Returns a GeckoResult only for
+     *  messages that carry a reply; null otherwise (and for
+     *  types it does not own, so the delegate can chain). */
+    fun handleBlockingMessage(
+        message: JSONObject, senderSession: GeckoSession?
+    ): GeckoResult<Any>?
+
+    /** Phase 3 (Worker A): the background script's native
+     *  port (`sender.session == null`). NOT a tab port — the
+     *  Phase 2 registration disconnects session-less ports,
+     *  so this must never go through [registerProbePort]. */
+    fun onBackgroundPortConnected(port: WebExtension.Port)
+    fun onBackgroundPortDisconnected(port: WebExtension.Port)
 }

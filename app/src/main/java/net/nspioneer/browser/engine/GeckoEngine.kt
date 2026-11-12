@@ -1,15 +1,31 @@
 package net.nspioneer.browser.engine
 
+import android.app.Activity
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.mediarouter.media.MediaRouteSelector
 import androidx.mediarouter.media.MediaRouter
 import com.google.android.gms.cast.CastMediaControlIntent
 import com.google.android.gms.cast.framework.CastContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
+import net.nspioneer.browser.data.PioneerStore
+import net.nspioneer.browser.media.DetectedMedia
+import net.nspioneer.browser.media.MediaLog
+import net.nspioneer.browser.media.VideoPopup
 import org.json.JSONObject
 import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.ContentBlocking
@@ -46,15 +62,126 @@ import org.mozilla.geckoview.WebExtension
  * (a failed first load is logged as "load FAILED" by
  * onPageStop, exactly as the spike logged it).
  */
-class GeckoEngine(context: Context) : Engine, ProbeHost {
+class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     companion object {
         private const val CAST_RECEIVER_APP_ID = "CC1AD845" // Default Media Receiver
     }
 
     private val appContext = context.applicationContext
+    private val store = PioneerStore.get(context)
     private val statusPanel = StatusPanel(appContext)
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Phase 3 blocking bridge (Worker A): owns the app side
+     *  of the probe's blocking messages (`blocked`,
+     *  `cosmetic-query`, `rules-request` / `rules-update`) and
+     *  the background script's native port. The engine is its
+     *  [BlockingHost]. */
+    private val blockingObserver = BlockingObserver(this).also {
+        // Chain the filter-lists status line onto the
+        // lists-changed push: BlockingObserver.init claims
+        // FilterEngine.onListsChanged for the rules-update
+        // push; the Settings status text refreshes here when
+        // the new set lands.
+        val prev = FilterEngine.onListsChanged
+        FilterEngine.onListsChanged = { prev?.invoke(); refreshFilterListsState() }
+    }
+
+    private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    init {
+        // blockAds / blockTrackers live in the store and are
+        // toggled by BlockingSettings (which never touches the
+        // engine), so the engine watches the settings and
+        // re-pushes the rule set (syncBlockingFlags) when
+        // either flips. The first emission is the current
+        // value — skipped: the background script already reads
+        // the flags fresh from the rules-request reply / the
+        // port-connect push.
+        engineScope.launch {
+            snapshotFlow {
+                store.setting("blockAds", "true") to
+                    store.setting("blockTrackers", "true")
+            }.distinctUntilChanged().drop(1).collect {
+                blockingObserver.syncBlockingFlags()
+            }
+        }
+    }
+
+    /** The Activity hosting this engine, for fullscreen
+     *  system-bars handling (Fullscreen.kt). Null when the
+     *  engine was built with a non-activity context. */
+    private val activity: Activity? = context as? Activity
+
+    /** Phase 3 delegates (Worker B). Lazy so they can
+     *  close over [runtime], which is created just below. */
+    private val permissionDelegate: PioneerPermissionDelegate by lazy {
+        PioneerPermissionDelegate(
+            appContext = appContext,
+            store = store,
+            runtime = runtime,
+            deliverPrompt = { prompt -> onPermissionPrompt?.invoke(prompt) },
+            checkOs = { resources, onResult ->
+                osGrantHandler?.invoke(resources, onResult)
+                    ?: onResult(resources.filter { res ->
+                        val perm = when (res) {
+                            "camera" -> android.Manifest.permission.CAMERA
+                            "microphone" -> android.Manifest.permission.RECORD_AUDIO
+                            else -> android.Manifest.permission.ACCESS_FINE_LOCATION
+                        }
+                        androidx.core.content.ContextCompat.checkSelfPermission(
+                            appContext, perm
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    })
+            },
+        )
+    }
+    private val promptDelegate: PioneerPromptDelegate by lazy {
+        PioneerPromptDelegate(
+            appContext = appContext,
+            store = store,
+            deliverFilePrompt = { type, mimeTypes, capture, onResult ->
+                onFilePrompt?.invoke(type, mimeTypes, capture, onResult)
+            },
+            deliverPopupPrompt = { targetUri ->
+                onPopupPrompt?.invoke(targetUri)
+            },
+            pageHost = {
+                currentTab?.url?.value?.let { u ->
+                    runCatching { Uri.parse(u).host }.getOrNull() ?: ""
+                } ?: ""
+            },
+            onPopupAllowed = { expectPopupSession = true },
+        )
+    }
+
+    /**
+     * OS-permission gate for stored-allow permission
+     * decisions. The shell (BrowserScreen) sets this to its
+     * RequestMultiplePermissions launcher (Mariner's
+     * grantWithOsCheck); when unset, only already-granted
+     * OS permissions are reported. Not part of the Engine
+     * interface — the interface's PermPrompt flow covers
+     * the dialog path, and this hook covers the stored-
+     * decision path that also needs the OS check.
+     */
+    var osGrantHandler: ((resources: List<String>, onResult: (List<String>) -> Unit) -> Unit)? = null
+
+    /** Set when a popup was allowed (onPopupPrompt ALLOW):
+     *  the next onNewSession tab is a popup window
+     *  (isPopupWin=true). Consumed by onNewSession. */
+    private var expectPopupSession: Boolean = false
+
+    /**
+     * Popunder-guard captures (strict popup blocker, §8.9):
+     * gesture-less main-frame hops to a $document-blocked
+     * host, denied in onLoadRequest. The shell merges these
+     * into its popup notice queue (BrowserScreen owns the
+     * notice UI; the engine owns the detection).
+     */
+    val popunderCaptures: SnapshotStateList<String> = mutableStateListOf()
+    val popunderPageHost = mutableStateOf("")
 
     private val runtime: GeckoRuntime = createRuntime().also {
         statusPanel.status("runtime: created (ETP Strict)")
@@ -77,6 +204,26 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
      * which tab the shell shows; a tab that just navigated is the
      * best available proxy). */
     private var currentTab: GeckoTab? = null
+
+    // ---- Phase 3: Engine interface members ----
+    override var onExternalDownload: ((EngineTab, ExternalDownload) -> Unit)? = null
+    override var onPermissionPrompt: ((PermPrompt) -> Unit)? = null
+    override var onFilePrompt: ((String, List<String>, Int,
+        (List<android.net.Uri>?) -> Unit) -> Unit)? = null
+    override var onPopupPrompt: ((String?) -> Unit)? = null
+    private val _filterListsState =
+        mutableStateOf(blockingObserver.filterListsStateText())
+    override val filterListsState: State<String> get() = _filterListsState
+
+    /** Refresh the filter-lists status line from the blocking
+     *  bridge (Worker A: `filterListsState` ←
+     *  `filterListsStateText()`). Posted to the main thread:
+     *  the lists-changed push can fire off it. */
+    private fun refreshFilterListsState() {
+        mainHandler.post {
+            _filterListsState.value = blockingObserver.filterListsStateText()
+        }
+    }
 
     override var onTabCreated: ((EngineTab) -> Unit)? = null
     override var onExtensionInstallPrompt: ((String, List<String>, (Boolean) -> Unit) -> Unit)? = null
@@ -118,7 +265,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
     // Tabs
     // ------------------------------------------------------------------
 
-    override fun createTab(isPrivate: Boolean): EngineTab {
+    override fun createTab(isPrivate: Boolean): EngineTab =
+        createTabInternal(isPrivate, isPopupWin = false)
+
+    /** Internal tab creation: popup windows (window.open /
+     *  onNewSession after an allowed onPopupPrompt) are
+     *  marked isPopupWin=true (Mariner TabList.isPopupWin). */
+    private fun createTabInternal(isPrivate: Boolean, isPopupWin: Boolean): EngineTab {
         val session = if (isPrivate) {
             GeckoSession(
                 GeckoSessionSettings.Builder().usePrivateMode(true).build()
@@ -126,7 +279,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
         } else {
             GeckoSession()
         }
-        val tab = GeckoTab(nextTabId++, isPrivate, session)
+        val tab = GeckoTab(nextTabId++, isPrivate, session, isPopupWin)
         attachDelegates(tab)
         // The session is fully open before any load can be issued
         // (first-load watch item: the spike loaded immediately after
@@ -139,6 +292,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
 
     override fun destroyTab(tab: EngineTab) {
         val own = tab as? GeckoTab ?: return
+        // A pending permission request must never hang: answer
+        // every outstanding request for this session with a
+        // denial before the session closes.
+        permissionDelegate.rejectOutstanding(own.session)
+        MediaLog.clear(own.id)
         tabs.remove(own)
         if (currentTab === own) currentTab = null
         own.probePort?.let { runCatching { it.disconnect() } }
@@ -149,6 +307,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
     override fun close() {
         if (closed) return
         closed = true
+        engineScope.cancel()
         castCallback?.let { runCatching { mediaRouter?.removeCallback(it) } }
         castCallback = null
         tabs.toList().forEach { destroyTab(it) }
@@ -188,9 +347,185 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
     override fun copyStatusText(): String =
         statusPanel.copyStatusText(castRoutes.value)
 
+    // ------------------------------------------------------------------
+    // Phase 3: blocking / downloads / permissions / popups
+    // ------------------------------------------------------------------
+
+    override fun setBlockingEnabled(host: String, enabled: Boolean) {
+        val clean = host.lowercase().trimEnd('.')
+        if (clean.isBlank()) return
+        // 1. The store flag (SiteSetting "nb") — the source of
+        //    truth the site-info row reads.
+        val current = store.siteSetting(clean)
+        store.putSiteSetting(current.copy(disableBlocking = !enabled))
+        // 2. ETP exception via StorageController
+        //    (PERMISSION_TRACKING VALUE_ALLOW; re-enabling uses
+        //    VALUE_DENY — Gecko rejects VALUE_PROMPT here).
+        permissionDelegate.setTrackingException(clean, disabled = !enabled)
+        // 3. Mariner-lists bypass in the probe: the observer
+        //    re-reads the per-site exception set from the store
+        //    (BlockingHost.disabledHosts) and pushes the updated
+        //    rules to the background script. Cosmetics consult
+        //    FilterEngine.isDisabledForPage at query time, so the
+        //    bypass applies there too.
+        blockingObserver.updateDisabledHosts()
+        statusPanel.status(
+            "blocking: $clean ${if (enabled) "enabled" else "disabled"} " +
+                "(ETP + lists + cosmetics; uBlock NOT toggled — see design §10.1)"
+        )
+    }
+
+    override fun refreshFilterLists() {
+        _filterListsState.value = "updating…"
+        statusPanel.status("filter lists: updating…")
+        // The push to the background script happens from
+        // FilterEngine.onListsChanged when the new set lands;
+        // the status line refreshes through the chained
+        // callback (see blockingObserver).
+        blockingObserver.refreshFilterLists(appContext)
+    }
+
+    override fun uninstallUBlock() {
+        try {
+            runtime.webExtensionController.list().accept(
+                { installed ->
+                    val existing = installed?.firstOrNull {
+                        it.id == "uBlock0@raymondhill.net"
+                    }
+                    if (existing == null) {
+                        extensions.uBlockState.value = "not installed"
+                        statusPanel.status("uBlock: uninstall — not installed")
+                        return@accept
+                    }
+                    runtime.webExtensionController.uninstall(existing).accept(
+                        {
+                            extensions.uBlockState.value = "not installed"
+                            statusPanel.status("uBlock: uninstalled")
+                        },
+                        { e ->
+                            extensions.uBlockState.value =
+                                "failed: ${e?.javaClass?.simpleName}: ${e?.message}"
+                            statusPanel.status("uBlock: uninstall FAILED: ${e?.message}")
+                        },
+                    )
+                },
+                { e ->
+                    extensions.uBlockState.value = "failed: ${e?.message}"
+                    statusPanel.status("uBlock: uninstall list failed: ${e?.message}")
+                },
+            )
+        } catch (e: Throwable) {
+            extensions.uBlockState.value = "failed: ${e.javaClass.simpleName}: ${e.message}"
+        }
+    }
+
+    override fun answerPermissionPrompt(prompt: PermPrompt, allow: Boolean) {
+        permissionDelegate.answer(prompt, allow)
+    }
+
+    override fun answerPopupPrompt(allow: Boolean) {
+        promptDelegate.answerPopup(allow)
+    }
+
+    /** Parse an ExternalDownload from a WebResponse's headers.
+     *  WebResponse extends WebMessage, NOT WebResponseInfo — it
+     *  has NO filename/contentLength/contentType fields; those
+     *  come from headers, and the v160 content-disposition
+     *  validation is absent on 159, so the raw server value is
+     *  parsed and sanitised here (Downloads.resolveFileName
+     *  applies the final sanitise). */
+    internal fun externalDownloadFrom(
+        response: org.mozilla.geckoview.WebResponse,
+    ): ExternalDownload {
+        val headers = response.headers
+        fun header(name: String): String? =
+            headers.entries.firstOrNull {
+                it.key.equals(name, ignoreCase = true)
+            }?.value
+        val contentType = header("Content-Type")
+            ?.substringBefore(';')?.trim()?.takeIf { it.isNotBlank() }
+        val contentLength = header("Content-Length")?.trim()?.toLongOrNull() ?: -1L
+        val suggestedName = parseContentDisposition(header("Content-Disposition"))
+            ?: Uri.parse(response.uri).lastPathSegment
+        return ExternalDownload(
+            url = response.uri,
+            contentType = contentType,
+            contentLength = contentLength,
+            suggestedName = suggestedName,
+            statusCode = response.statusCode,
+            isSecure = response.isSecure,
+        )
+    }
+
+    /** Parse filename from a Content-Disposition header:
+     *  RFC 5987 filename*=UTF-8''… first, then a quoted or
+     *  bare filename=…. Returns null when there is none. */
+    internal fun parseContentDisposition(header: String?): String? {
+        if (header.isNullOrBlank()) return null
+        val encoded = Regex(
+            """filename\*\s*=\s*UTF-8''([^;\s]+)""", RegexOption.IGNORE_CASE
+        ).find(header)?.groupValues?.getOrNull(1)
+        if (!encoded.isNullOrBlank()) {
+            return runCatching {
+                java.net.URLDecoder.decode(encoded, "UTF-8")
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+        }
+        val plain = Regex(
+            """filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;\s]+)""",
+            RegexOption.IGNORE_CASE
+        ).find(header)
+        val name = plain?.groupValues?.firstOrNull { it.isNotBlank() && !it.startsWith("filename") }
+            ?: plain?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+            ?: plain?.groupValues?.getOrNull(2)?.takeIf { it.isNotBlank() }
+        return name?.trim()?.takeIf { it.isNotBlank() }
+    }
+
     override fun refreshStats() = statusPanel.refreshStats()
 
     // ------------------------------------------------------------------
+    // BlockingHost (blocking bridge -> engine, Worker A)
+    // ------------------------------------------------------------------
+
+    /** Engine tab id for the tab currently on [pageHost], or
+     *  -1 when no tab — or more than one tab — is on it.
+     *  Ambiguity drops the observation; the host must return -1
+     *  when two tabs share the host. */
+    override fun tabIdForPageHost(pageHost: String): Int {
+        val wanted = pageHost.lowercase()
+        val matches = tabs.filter { t ->
+            runCatching { Uri.parse(t.url.value).host }
+                .getOrNull()?.lowercase() == wanted
+        }
+        return if (matches.size == 1) matches[0].id else -1
+    }
+
+    /** A media URL the probe observed on [tabId], for the
+     *  engine's media log. The net half sink
+     *  (MediaLog.inspect derives kind itself). In practice the
+     *  delegate routes `media-net` through noteNetMedia first
+     *  (Worker C), so this only fires if the observer is ever
+     *  called directly. */
+    override fun onMediaObserved(tabId: Int, url: String, kind: String) {
+        MediaLog.inspect(tabId, url)
+        tabs.firstOrNull { it.id == tabId }?.let { refreshTabMedia(it) }
+    }
+
+    /** Every host whose `SiteSetting.disableBlocking` is on. */
+    override fun disabledHosts(): Set<String> = store.disabledBlockingHosts()
+
+    /** Mariner-list ad blocking on (`blockAds`, default true). */
+    override fun blockAdsEnabled(): Boolean =
+        store.setting("blockAds", "true") == "true"
+
+    /** Mariner-list tracker blocking on (`blockTrackers`,
+     *  default true). */
+    override fun blockTrackersEnabled(): Boolean =
+        store.setting("blockTrackers", "true") == "true"
+
+    override fun noteStatus(line: String) {
+        statusPanel.status(line)
+    }
+
     // ProbeHost (probe extension -> engine)
     // ------------------------------------------------------------------
 
@@ -204,6 +539,94 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
 
     override fun noteProbeMedia(tabNumber: Int, kind: String, url: String) {
         statusPanel.noteMedia(tabNumber, kind, url)
+        // Worker C wiring: the DOM half feeds MediaLog as
+        // well as the status panel. MediaLog is keyed by
+        // EngineTab.id (not the 1-based tab number), so the
+        // tab is resolved from the tabs list.
+        val tab = tabs.getOrNull(tabNumber - 1)
+        if (tab != null) {
+            MediaLog.noteDomItem(tab.id, kind, url)
+            refreshTabMedia(tab)
+        }
+    }
+
+    override fun noteNetMedia(session: GeckoSession?, url: String) {
+        // Background-script observations arrive with a null
+        // session: attribute to the tab whose current host
+        // matches the URL's host, falling back to the active
+        // tab (design §7). Unattributable observations are
+        // dropped, never guessed — but a host match or the
+        // active tab always attributes here, so a drop only
+        // happens with no tabs at all.
+        val urlHost = runCatching { Uri.parse(url).host }.getOrNull() ?: ""
+        val tab = tabs.firstOrNull { it.session === session }
+            ?: tabs.firstOrNull { t ->
+                urlHost.isNotBlank() &&
+                    runCatching { Uri.parse(t.url.value).host }.getOrNull() == urlHost
+            }
+            ?: currentTab
+            ?: return
+        MediaLog.inspect(tab.id, url)
+        refreshTabMedia(tab)
+    }
+
+    override fun noteVideoPopupTap(session: GeckoSession?, url: String) {
+        tabs.firstOrNull { it.session === session }?.onVideoPopupTap?.invoke(url)
+    }
+
+    override fun noteVideoPopupLongPress(session: GeckoSession?, url: String) {
+        tabs.firstOrNull { it.session === session }?.onVideoPopupLongPress?.invoke(url)
+    }
+
+    override fun videoPopupOff(host: String): Boolean =
+        VideoPopup.isOff(store, host)
+
+    /** Worker A fallthrough: the blocking bridge owns
+     *  `blocked`, `cosmetic-query` and `rules-request` (and
+     *  returns null for types it does not own, so this is a
+     *  pure chain). `media-net` never reaches here — the
+     *  Worker C routing above owns it, one sink, no
+     *  double-feed. */
+    override fun handleBlockingMessage(
+        message: JSONObject, senderSession: GeckoSession?
+    ): GeckoResult<Any>? =
+        blockingObserver.handleNativeMessage(message, senderSession)
+
+    /** The background script's native port
+     *  (`sender.session == null`): NOT a tab port — the
+     *  bridge stores it and pushes the rule set at once. */
+    override fun onBackgroundPortConnected(port: WebExtension.Port) {
+        blockingObserver.onBackgroundPortConnected(port)
+    }
+
+    override fun onBackgroundPortDisconnected(port: WebExtension.Port) {
+        blockingObserver.onBackgroundPortDisconnected(port)
+    }
+
+    /** Refresh one tab's EngineTab.detectedMedia from
+     *  MediaLog (the merged dom + net + session list). */
+    private fun refreshTabMedia(tab: GeckoTab) {
+        val merged = MediaLog.forTab(tab.id)
+        mainHandler.post { tab.detectedMediaState.value = merged }
+    }
+
+    /** Merge one now-playing entry (MediaSession, source
+     *  "session") into a tab's log. Set as
+     *  MediaSessionHandler.onNowPlaying before registering
+     *  each session (Worker C call order). */
+    private fun noteSessionMedia(session: GeckoSession, media: DetectedMedia) {
+        val tab = tabs.firstOrNull { it.session === session } ?: return
+        // A session entry has no stream URL (url == ""): it
+        // is a now-playing pointer, never offered to the
+        // player. It is recorded in the tab state only when
+        // it carries a label; MediaLog has no URL key for it.
+        if (media.label.isBlank()) return
+        mainHandler.post {
+            val current = tab.detectedMediaState.value
+            if (current.none { it.source == "session" && it.label == media.label }) {
+                tab.detectedMediaState.value = current + media
+            }
+        }
     }
 
     override fun registerProbePort(session: GeckoSession?, port: WebExtension.Port) {
@@ -304,6 +727,34 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
         val session = tab.session
         fun n() = tabNumberFor(session)
 
+        // ETP telemetry (Worker A): a ContentBlocking
+        // onContentBlocked event feeds the same per-tab
+        // counters as the Mariner lists (noteContentBlocked).
+        // ETP itself is not the blocker — uBlock + Mariner's
+        // lists are — so this never runs a separate count.
+        // Mapping: ad/analytics lists count as ads; anything
+        // else tracked (social, fingerprinting, cryptomining,
+        // …) counts as a tracker; a block with no
+        // anti-tracking category (e.g. safe browsing) is other.
+        session.setContentBlockingDelegate(object : ContentBlocking.Delegate {
+            override fun onContentBlocked(
+                session: GeckoSession,
+                event: ContentBlocking.BlockEvent,
+            ) {
+                if (!event.isBlocking()) return
+                val own = tabs.firstOrNull { it.session === session } ?: return
+                val at = event.antiTrackingCategory
+                val category = when {
+                    at and (ContentBlocking.AntiTracking.AD or
+                        ContentBlocking.AntiTracking.ANALYTIC) != 0 ->
+                        FilterEngine.CAT_ADS
+                    at == 0 -> FilterEngine.CAT_OTHER
+                    else -> FilterEngine.CAT_TRACKER
+                }
+                blockingObserver.noteContentBlocked(own.id, category)
+            }
+        })
+
         session.navigationDelegate = object : GeckoSession.NavigationDelegate {
             override fun onLocationChange(
                 session: GeckoSession,
@@ -332,6 +783,43 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
                 if (isMediaUrl(request.uri)) {
                     statusPanel.noteMedia(n(), "nav", request.uri)
                 }
+                // Strict popup blocker — popunder guard (Mariner
+                // BrowserScreen.kt:2695+, adapted to GeckoView):
+                // a gesture-less main-frame hop to a different
+                // host covered by FilterEngine.isDocumentBlocked
+                // is captured as a blocked popup instead of
+                // loading. onLoadRequest fires before each
+                // top-level page load (GeckoView doc), so this
+                // is Mariner's shouldOverrideUrlLoading point.
+                // Typed addresses / app loads (isDirectNavigation)
+                // and tapped links (hasUserGesture) never pass
+                // through here; redirects to a blocked host are
+                // caught exactly as Mariner catches them.
+                if (request.target ==
+                    GeckoSession.NavigationDelegate.TARGET_WINDOW_CURRENT &&
+                    !request.hasUserGesture && !request.isDirectNavigation
+                ) {
+                    val u = request.uri
+                    if ((u.startsWith("http://") || u.startsWith("https://"))) {
+                        val targetHost = runCatching { Uri.parse(u).host }.getOrNull() ?: ""
+                        val hereHost = runCatching {
+                            Uri.parse(tab.url.value).host
+                        }.getOrNull() ?: ""
+                        if (targetHost.isNotBlank() && hereHost.isNotBlank() &&
+                            targetHost != hereHost &&
+                            FilterEngine.isDocumentBlocked(u, hereHost)
+                        ) {
+                            if (u !in popunderCaptures && popunderCaptures.size < 5) {
+                                popunderCaptures.add(u)
+                            }
+                            popunderPageHost.value = hereHost
+                            statusPanel.status(
+                                "tab ${n()}: popunder blocked: $u"
+                            )
+                            return GeckoResult.fromValue(AllowOrDeny.DENY)
+                        }
+                    }
+                }
                 return null // allow
             }
 
@@ -352,9 +840,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
                 // NEVER call load here; Gecko loads the URI into the
                 // returned session. A private parent opens a private
                 // child; null would make window.open() fail.
-                val newTab = createTab(tab.isPrivate) as GeckoTab
+                // Popup windows: when an allowed onPopupPrompt armed
+                // expectPopupSession, the new tab is marked
+                // isPopupWin=true (Mariner TabList.isPopupWin) so
+                // onCloseWindow can close it.
+                val isPopup = expectPopupSession
+                expectPopupSession = false
+                val newTab = createTabInternal(tab.isPrivate, isPopup) as GeckoTab
                 onTabCreated?.invoke(newTab)
-                statusPanel.status("tab ${n()}: window.open -> tab ${newTab.id}")
+                statusPanel.status(
+                    "tab ${n()}: window.open -> tab ${newTab.id}" +
+                        if (isPopup) " (popup)" else ""
+                )
                 return GeckoResult.fromValue(newTab.session)
             }
         }
@@ -389,6 +886,47 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
 
             override fun onFullScreen(session: GeckoSession, fullScreen: Boolean) {
                 statusPanel.status("tab ${n()}: fullscreen ${if (fullScreen) "ON" else "OFF"}")
+                // §8.6: the page's fullscreen element stays
+                // inside the GeckoView — the app only changes
+                // the chrome around it. The shell hides the
+                // browser chrome from isFullscreen; Fullscreen.kt
+                // hides / restores the system bars.
+                tab.isFullscreenState.value = fullScreen
+                val act = activity
+                if (act != null) {
+                    if (fullScreen) Fullscreen.enter(act) else Fullscreen.exit(act)
+                }
+            }
+
+            override fun onExternalResponse(
+                session: GeckoSession,
+                response: org.mozilla.geckoview.WebResponse,
+            ) {
+                // Downloads are an app-side stack, not an engine
+                // feature: onExternalResponse only REPORTS the
+                // download. The engine NEVER shows UI — the shell
+                // shows Mariner's confirm dialog and calls
+                // Downloads.start. The response body MUST be
+                // closed even when ignored, or the connection
+                // stays open until GC (API doc §1a).
+                runCatching { response.body?.close() }
+                val download = externalDownloadFrom(response)
+                statusPanel.status(
+                    "tab ${n()}: external response: ${download.url} " +
+                        "(${download.contentType ?: "?"}, ${download.contentLength})"
+                )
+                onExternalDownload?.invoke(tab, download)
+            }
+
+            override fun onCloseRequest(session: GeckoSession) {
+                // window.close() from an allowed popup: honour
+                // it by closing its tab (Mariner onCloseWindow),
+                // or the opener hangs waiting on a dead window.
+                // Only popup tabs close this way.
+                if (tab.isPopupWin) {
+                    statusPanel.status("tab ${n()}: popup close requested")
+                    destroyTab(tab)
+                }
             }
 
             override fun onCrash(session: GeckoSession) {
@@ -408,44 +946,21 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
             }
         }
 
-        // Spike posture: grant what the engine needs to measure (DRM
-        // media keys, autoplay, persistent storage); deny the rest.
-        // No silent camera/mic/location — denied outright here.
-        session.permissionDelegate = object : GeckoSession.PermissionDelegate {
-            override fun onAndroidPermissionsRequest(
-                session: GeckoSession,
-                permissions: Array<String>?,
-                callback: GeckoSession.PermissionDelegate.Callback,
-            ) {
-                callback.reject()
-            }
+        // Phase 3: the engine's own permission / prompt
+        // delegates replace the spike's inline posture (which
+        // denied camera/mic/location outright and granted DRM /
+        // autoplay / storage silently). See
+        // PermissionDelegate.kt / PromptDelegate.kt.
+        session.permissionDelegate = permissionDelegate
+        session.promptDelegate = promptDelegate
 
-            override fun onContentPermissionRequest(
-                session: GeckoSession,
-                request: GeckoSession.PermissionDelegate.ContentPermission,
-            ): GeckoResult<Int>? {
-                val allow = when (request.permission) {
-                    GeckoSession.PermissionDelegate.PERMISSION_MEDIA_KEY_SYSTEM_ACCESS,
-                    GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE,
-                    GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE,
-                    GeckoSession.PermissionDelegate.PERMISSION_PERSISTENT_STORAGE ->
-                        GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
-                    else ->
-                        GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY
-                }
-                return GeckoResult.fromValue(allow)
-            }
-
-            override fun onMediaPermissionRequest(
-                session: GeckoSession,
-                uri: String,
-                video: Array<GeckoSession.PermissionDelegate.MediaSource>?,
-                audio: Array<GeckoSession.PermissionDelegate.MediaSource>?,
-                callback: GeckoSession.PermissionDelegate.MediaCallback,
-            ) {
-                callback.reject() // no camera/mic, ever
-            }
-        }
+        // Phase 3 (Worker C call order): set the now-playing
+        // sink FIRST, then register once per tab session, on
+        // the UI thread (setMediaSessionDelegate became
+        // @UiThread in v154). attachDelegates runs on the UI
+        // thread (createTab is called from the shell).
+        MediaSessionHandler.onNowPlaying = { s, media -> noteSessionMedia(s, media) }
+        MediaSessionHandler.register(session)
     }
 
     // ------------------------------------------------------------------
@@ -456,6 +971,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
         override val id: Int,
         override val isPrivate: Boolean,
         override val session: GeckoSession,
+        override val isPopupWin: Boolean = false,
     ) : EngineTab {
 
         override val url = mutableStateOf("")
@@ -470,6 +986,41 @@ class GeckoEngine(context: Context) : Engine, ProbeHost {
         override var onNavigate: ((String, String) -> Unit)? = null
         override var onLongPressLink: ((String) -> Unit)? = null
         override var onCrash: (() -> Unit)? = null
+
+        // ---- Phase 3: media / fullscreen / popups ----
+        internal val detectedMediaState = mutableStateOf<List<DetectedMedia>>(emptyList())
+        override val detectedMedia: State<List<DetectedMedia>> get() = detectedMediaState
+        override var onVideoPopupTap: ((String) -> Unit)? = null
+        override var onVideoPopupLongPress: ((String) -> Unit)? = null
+        internal val isFullscreenState = mutableStateOf(false)
+        override val isFullscreen: State<Boolean> get() = isFullscreenState
+
+        override fun runMediaScan() {
+            // Ask the probe for a fresh DOM scan now. The
+            // probe content script receives app→page messages
+            // on its native port (the "zoom" channel); a
+            // "media-scan" port message is posted here and
+            // the probe re-reports via `media-probe`.
+            // NOTE (integration): probe.js currently handles
+            // only "zoom" on the port — the "media-scan"
+            // handler is a 3-line addition in C's probe.js;
+            // until it lands, the scan re-runs on the next
+            // page load / phase report, and the sheet reads
+            // the already-merged MediaLog list.
+            val port = probePort
+            if (port != null) {
+                runCatching {
+                    port.postMessage(
+                        JSONObject().apply { put("type", "media-scan") }
+                    )
+                }.onFailure { e ->
+                    statusPanel.status("tab $id: media-scan post failed: ${e.message}")
+                }
+            }
+            // Refresh from the merged log either way, so the
+            // sheet never shows a stale list after a tap.
+            refreshTabMedia(this)
+        }
 
         /** Last URL onNavigate fired for (dedupe same-URL repeats). */
         var lastNavigatedUrl: String? = null

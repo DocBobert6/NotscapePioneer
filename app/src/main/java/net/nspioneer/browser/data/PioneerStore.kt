@@ -60,6 +60,52 @@ data class TabSnapshot(
     val desktopMode: Boolean = false
 )
 
+// ---- Phase 3: downloads (Mariner Store.kt:23-47, ported verbatim) ----
+data class DownloadRecord(
+    val id: Long, val title: String, val url: String, val fileName: String,
+    var dmId: Long, var status: String, val addedAt: Long,
+    // True for media downloads (the offline library); plain file/image
+    // downloads go to the Downloads folder and stay out of the library.
+    val media: Boolean = false,
+    // Download progress 0–100, or -1 when unknown.
+    var progress: Int = -1,
+    // Where a finished download actually lives: a MediaStore content://
+    // URI for public downloads on modern Android, or an absolute path
+    // as a fallback. "" while the legacy location (setting-based file
+    // path) is the only record.
+    var contentUri: String = "",
+    // True when the download started from a private tab: the record and
+    // its file are wiped with the private profile and never shown in the
+    // Downloads or Offline lists.
+    val isPrivate: Boolean = false,
+) {
+    // Transient size/speed detail, in the class body so it stays out of
+    // equals, copy and the persisted document. -1 means unknown.
+    var bytesDownloaded: Long = -1
+    var totalBytes: Long = -1
+    var speedBps: Long = -1
+}
+
+/** The private-downloads gate (Mariner Store.kt:180, ported
+ *  verbatim). Private downloads stay hidden until the user
+ *  explicitly confirms, in this session only. */
+class PrivateDownloadsGate internal constructor() {
+    private val unlockedState = mutableStateOf(false)
+    /** True once the user confirms, this session only. */
+    val unlocked: Boolean by unlockedState
+    fun confirm() { unlockedState.value = true }
+    fun hide() { unlockedState.value = false }
+}
+
+/** The media download for [url], if any — the match behind
+ *  each playlist row's download / offline state. Media only:
+ *  a plain file download of the same URL is not an offline
+ *  copy of the video. (Mariner Store.kt:192.) */
+fun findMediaDownload(
+    downloads: List<DownloadRecord>, url: String
+): DownloadRecord? =
+    downloads.firstOrNull { it.media && it.url == url }
+
 /** Parent path of [path] ("" for a top-level folder).
  *  Copied from Mariner Store.kt: `folderParent`. */
 fun folderParent(path: String): String =
@@ -137,6 +183,7 @@ class PioneerStore private constructor(context: Context) {
     private val siteSettingsFile = File(storeDir, "site-settings.json")
     private val settingsFile = File(storeDir, "settings.json")
     private val sessionFile = File(storeDir, "tab-session.json")
+    private val downloadsFile = File(storeDir, "downloads.json")
 
     private val lock = Any()
 
@@ -154,7 +201,7 @@ class PioneerStore private constructor(context: Context) {
 
     /** Which files have unsaved changes. Guarded by [lock]. */
     private enum class Part {
-        BOOKMARKS, FOLDERS, HISTORY, FAVOURITES, SITE_SETTINGS, SETTINGS, SESSION
+        BOOKMARKS, FOLDERS, HISTORY, FAVOURITES, SITE_SETTINGS, SETTINGS, SESSION, DOWNLOADS
     }
     private val dirty: EnumSet<Part> = EnumSet.noneOf(Part::class.java)
 
@@ -169,6 +216,15 @@ class PioneerStore private constructor(context: Context) {
     val settings: MutableMap<String, String> = mutableStateMapOf()
     val tabSession: MutableList<TabSnapshot> = mutableStateListOf()
     var tabSessionActive: Int = 0
+
+    // ---- Phase 3: downloads (Mariner Store.kt:23-47, ported verbatim) ----
+    val downloads: SnapshotStateList<DownloadRecord> = mutableStateListOf()
+
+    /** Bumped by progress-only download writes, so the
+     *  Downloads / Offline screens recompose on a tick
+     *  without bumping the global [revision] (Mariner
+     *  `downloadProgressRev`, audit P-M5). */
+    var downloadProgressRev by mutableStateOf(0)
 
     /** Per-site settings live in a plain map (internal only —
      *  the shell reads them through [siteSetting]); the
@@ -451,6 +507,18 @@ class PioneerStore private constructor(context: Context) {
     fun siteSetting(host: String): SiteSetting =
         synchronized(lock) { siteSettings[host] ?: SiteSetting(host) }
 
+    /** Hosts whose `SiteSetting.disableBlocking` is on — the
+     *  per-site exception set the blocking bridge
+     *  (`BlockingHost.disabledHosts`) pushes to the probe
+     *  background script in `rules-update`. */
+    fun disabledBlockingHosts(): Set<String> =
+        synchronized(lock) {
+            siteSettings.values
+                .filter { it.disableBlocking }
+                .map { it.host }
+                .toSet()
+        }
+
     fun putSiteSetting(setting: SiteSetting) {
         synchronized(lock) {
             siteSettings[setting.host] = setting
@@ -485,6 +553,213 @@ class PioneerStore private constructor(context: Context) {
         if (desktop) putSetting("sitedesktop:$host", "true")
         else removeSetting("sitedesktop:$host")
     }
+
+    // ---------- Phase 3: downloads ----------
+    // Storage: JSON file `downloads.json` under
+    // `filesDir/pioneer-store/` (PHASE3-DESIGN.md §6).
+
+    fun downloadsSnapshot(): List<DownloadRecord> =
+        synchronized(lock) { downloads.toList() }
+
+    /** Mirrors Mariner `addDownload`: newest first, with the
+     *  same retention cap — terminal records older than 90
+     *  days go, the list never keeps more than 500 entries;
+     *  active downloads are never pruned and files on disk
+     *  are never touched — only records. A pruned record
+     *  leaves a `dltombstone:<id>` setting with its file
+     *  name, so the file can still be removed deliberately. */
+    fun addDownload(rec: DownloadRecord) {
+        synchronized(lock) {
+            downloads.add(0, rec)
+            val cutoff = System.currentTimeMillis() - 90L * 24 * 3600 * 1000
+            val terminal = setOf("complete", "failed", "cancelled")
+            val pruned = downloads.filter {
+                it.status in terminal && it.addedAt < cutoff
+            }
+            if (pruned.isNotEmpty()) {
+                downloads.removeAll(pruned.toSet())
+                pruned.forEach {
+                    settings.remove("dlerror:${it.id}")
+                    settings.remove("dljob:${it.id}")
+                    settings["dltombstone:${it.id}"] = it.fileName
+                }
+                mutated(Part.SETTINGS)
+            }
+            if (downloads.size > 500) {
+                val excess = downloads.filter { it.status in terminal }
+                    .takeLast(downloads.size - 500)
+                if (excess.isNotEmpty()) {
+                    downloads.removeAll(excess.toSet())
+                    excess.forEach {
+                        settings.remove("dlerror:${it.id}")
+                        settings.remove("dljob:${it.id}")
+                        settings["dltombstone:${it.id}"] = it.fileName
+                    }
+                    mutated(Part.SETTINGS)
+                }
+            }
+            mutated(Part.DOWNLOADS)
+        }
+    }
+
+    /** Persist [rec]'s current fields, matched by id.
+     *  The record object itself is mutated in place by
+     *  the download engines (status / progress / dmId /
+     *  contentUri are `var`s on the record); this call
+     *  only writes the change to disk. */
+    fun updateDownload(rec: DownloadRecord) {
+        synchronized(lock) {
+            if (downloads.any { it.id == rec.id }) mutated(Part.DOWNLOADS)
+        }
+    }
+
+    /** Mariner-shaped status update used by the download
+     *  engines: set status / dmId / progress on the record
+     *  for [id] and persist. A structural change (status
+     *  or dmId) saves the file and bumps [revision]; a
+     *  progress-only change only bumps [downloadProgressRev].
+     *  (Extra beyond the §6 contract text — the contract's
+     *  `updateDownload(rec)` cannot express a progress tick
+     *  without the caller mutating the record first, and the
+     *  engines tick from worker threads.) */
+    fun updateDownloadState(
+        id: Long, status: String, dmId: Long? = null, progress: Int? = null
+    ) {
+        synchronized(lock) {
+            val rec = downloads.firstOrNull { it.id == id } ?: return
+            var structural = false
+            if (rec.status != status) structural = true
+            if (dmId != null && rec.dmId != dmId) structural = true
+            rec.status = status
+            if (dmId != null) rec.dmId = dmId
+            if (progress != null && rec.progress != progress) {
+                rec.progress = progress
+                downloadProgressRev++
+            }
+            if (structural) mutated(Part.DOWNLOADS)
+        }
+    }
+
+    /** Progress-only update (Mariner `updateDownloadProgress`):
+     *  engines tick per percent; only 5% steps reach the
+     *  store (0 and 100 are multiples of 5, so the start and
+     *  the finish still land). Never resurrects a paused,
+     *  cancelled or finished record: the tick is a no-op
+     *  unless the record is currently downloading/queued.
+     *  (Extra beyond the §6 contract text, same reason as
+     *  [updateDownloadState].) */
+    fun updateDownloadProgress(id: Long, progress: Int) {
+        if (progress % 5 != 0) return
+        synchronized(lock) {
+            val current = downloads.firstOrNull { it.id == id }?.status
+            if (current != "downloading" && current != "queued") return
+            updateDownloadState(id, current, progress = progress)
+        }
+    }
+
+    /** Transient byte/speed detail for a download — never
+     *  persisted. Bumps only [downloadProgressRev], and only
+     *  when values move. (Extra beyond the §6 contract text;
+     *  Mariner `updateDownloadBytes`.) */
+    fun updateDownloadBytes(
+        id: Long, downloaded: Long, total: Long, speedBps: Long
+    ) {
+        synchronized(lock) {
+            val rec = downloads.firstOrNull { it.id == id } ?: return
+            if (rec.bytesDownloaded == downloaded &&
+                rec.totalBytes == total && rec.speedBps == speedBps
+            ) return
+            rec.bytesDownloaded = downloaded
+            rec.totalBytes = total
+            rec.speedBps = speedBps
+            downloadProgressRev++
+        }
+    }
+
+    /** Rename a download's file (e.g. an HLS join that turned
+     *  out to be an MP4, not the .ts the record was created
+     *  with). Replaces the record so the new file name is
+     *  persisted. (Extra beyond the §6 contract text;
+     *  Mariner `updateDownloadFileName`.) */
+    fun updateDownloadFileName(id: Long, name: String) {
+        synchronized(lock) {
+            val i = downloads.indexOfFirst { it.id == id }
+            if (i >= 0) {
+                val r = downloads[i]
+                downloads[i] = DownloadRecord(
+                    r.id, r.title, r.url, name, r.dmId, r.status, r.addedAt,
+                    r.media, r.progress, r.contentUri, r.isPrivate
+                )
+                mutated(Part.DOWNLOADS)
+            }
+        }
+    }
+
+    /** Record where a finished download actually lives
+     *  (MediaStore content:// URI or absolute path).
+     *  (Extra beyond the §6 contract text;
+     *  Mariner `updateDownloadUri`.) */
+    fun updateDownloadUri(id: Long, uri: String) {
+        synchronized(lock) {
+            downloads.firstOrNull { it.id == id }?.let { it.contentUri = uri }
+            mutated(Part.DOWNLOADS)
+        }
+    }
+
+    /** Record only — files stay (Mariner rule: multi-select
+     *  delete removes records, never files). */
+    fun removeDownload(id: Long) {
+        synchronized(lock) {
+            if (downloads.removeAll { it.id == id }) mutated(Part.DOWNLOADS)
+        }
+    }
+
+    /** "Clear completed, keep files": records only — files
+     *  on disk are never touched. */
+    fun clearCompletedDownloads(media: Boolean) {
+        synchronized(lock) {
+            val gone = downloads.filter { it.status == "complete" && it.media == media }
+            if (gone.isEmpty()) return
+            gone.forEach {
+                downloads.remove(it)
+                settings.remove("dldowngrade:${it.id}")
+            }
+            mutated(Part.DOWNLOADS, Part.SETTINGS)
+        }
+    }
+
+    // ---------- Phase 3: site permissions + autoplay ----------
+    // (Mariner Store.kt:1135-1149.) Decision strings:
+    // "allow" | "deny" | "ask" (unset). Stored as
+    // setting("siteperm:$host:$resource"). The engine ALSO
+    // mirrors content decisions into Gecko's
+    // StorageController; this store is the source of truth
+    // for what Settings shows, because
+    // StorageController.getPermissions is unreliable in
+    // private mode (bug 1723280).
+    fun sitePermission(host: String, resource: String): String =
+        setting("siteperm:$host:$resource", "ask")
+
+    fun putSitePermission(host: String, resource: String, decision: String) {
+        putSetting("siteperm:$host:$resource", decision)
+    }
+
+    // Autoplay: "" (unset → global) | "allow" | "block" | "muted".
+    // Stored as setting("siteautoplay:$host").
+    fun siteAutoplay(host: String): String =
+        setting("siteautoplay:$host", "")
+
+    fun putSiteAutoplay(host: String, mode: String) {
+        if (mode.isBlank()) removeSetting("siteautoplay:$host")
+        else putSetting("siteautoplay:$host", mode)
+    }
+
+    // ---------- Phase 3: private-downloads gate ----------
+    // (Mariner LibraryScreens.kt:2219+.) Private downloads
+    // stay hidden until the user explicitly confirms, in
+    // this session only — the gate starts locked on every
+    // launch and is never persisted.
+    val privateDownloadsGate: PrivateDownloadsGate = PrivateDownloadsGate()
 
     // ---------- tab session ----------
 
@@ -590,6 +865,7 @@ class PioneerStore private constructor(context: Context) {
         Part.SITE_SETTINGS -> siteSettingsFile
         Part.SETTINGS -> settingsFile
         Part.SESSION -> sessionFile
+        Part.DOWNLOADS -> downloadsFile
     }
 
     /** Crash-safe save, copied from Mariner `writeAtomic`:
@@ -626,7 +902,30 @@ class PioneerStore private constructor(context: Context) {
         loadSiteSettings()
         loadSettings()
         loadSession()
+        loadDownloads()
         revision++
+    }
+
+    private fun loadDownloads() {
+        val text = readText(downloadsFile) ?: return
+        runCatching {
+            val arr = JSONObject(text).optJSONArray("downloads") ?: return
+            val items = (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val url = o.optString("url")
+                if (url.isBlank()) return@mapNotNull null
+                DownloadRecord(
+                    o.optLong("id"), o.optString("title"), url,
+                    o.optString("fileName"), o.optLong("dmId", -1),
+                    o.optString("status", "failed"), o.optLong("t"),
+                    o.optBoolean("media", false),
+                    o.optInt("progress", -1),
+                    o.optString("contentUri", ""),
+                    o.optBoolean("isPrivate", false)
+                )
+            }
+            downloads.addAll(items)
+        }.onFailure { Log.w(TAG, "load downloads: ${it.javaClass.simpleName}") }
     }
 
     private fun readText(file: File): String? =
@@ -823,6 +1122,22 @@ class PioneerStore private constructor(context: Context) {
                     }
                 }
             ).toString()
+        Part.DOWNLOADS -> JSONObject().put(
+            "downloads",
+            JSONArray().apply {
+                downloads.forEach {
+                    put(
+                        JSONObject().put("id", it.id).put("title", it.title)
+                            .put("url", it.url).put("fileName", it.fileName)
+                            .put("dmId", it.dmId).put("status", it.status)
+                            .put("t", it.addedAt).put("media", it.media)
+                            .put("progress", it.progress)
+                            .put("contentUri", it.contentUri)
+                            .put("isPrivate", it.isPrivate)
+                    )
+                }
+            }
+        ).toString()
     }
 
     /** Mirrors Mariner `newId`: millisecond time plus a

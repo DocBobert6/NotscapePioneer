@@ -1,10 +1,31 @@
-/* Pioneer Probe — Phase 2 content script.
+/* Pioneer Probe — Phase 2 content script, extended in Phase 3.
  *
  * Runs on every page (document_idle, plus re-scans at +2s and +6s for
  * lazy-loaded players). Reports media element / resource URLs and, on
  * DRM-ish pages only, Widevine EME availability to the app via native
  * messaging. It also applies per-site text zoom on the app's native
- * messages (see the zoom block below) — that is its only page change.
+ * messages (see the zoom block below) — that is its only page change
+ * besides the video pop-up button (Phase 3, below).
+ *
+ * Media scan (Mariner MediaDetect.JS, carried over): video/audio
+ * currentSrc/src + <source>, a[href] media links (label = link text
+ * <= 80 chars), same-origin iframe recursion, cross-origin player
+ * iframes (> 200px wide, src matching player|video|embed|stream|
+ * watch) as kind "page", og:video / twitter:player:stream meta.
+ * Embed-page URLs are reclassified to kind "page" by the app
+ * (MediaLog) and are never offered to the player. Performance
+ * resource entries are also reported (direct media the DOM
+ * scan cannot see).
+ *
+ * Video pop-up watcher (Mariner VideoPopup.WATCHER_JS, adapted):
+ * top frame only, largest playing <video>, one 40px button at its
+ * top-right corner. Tap / long-press report as native messages
+ * (video-popup-tap / video-popup-longpress, design §7) instead of
+ * Mariner's notscapeVideoPopup JS bridge, which GeckoView has no
+ * equivalent for. The per-site opt-out (videoPopupOff:$host) is
+ * asked of the app once per page load (video-popup-query); the
+ * watcher hides while the video is fullscreen, paused, or out of
+ * the viewport, and never pauses / mutes / seeks the page video.
  */
 (function () {
   "use strict";
@@ -48,34 +69,70 @@
       var zoomPort = browser.runtime.connectNative("pioneer");
       zoomPort.onMessage.addListener(function (msg) {
         if (msg && msg.type === "zoom") applyZoom(msg.factor);
+        // Integration (Phase 3): runMediaScan() posts
+        // {"type":"media-scan"} — re-run the DOM scan now and
+        // re-report via media-probe.
+        if (msg && msg.type === "media-scan") report("scan");
       });
     }
   } catch (e) { /* live zoom push unavailable; zoom-query still applies */ }
 
   function collect() {
-    var items = [];
+    var out = [];
     var seen = {};
-    function add(url, kind) {
-      if (!url || seen[url]) return;
-      seen[url] = true;
-      items.push({ kind: kind, url: url });
+    function add(u, kind, label) {
+      if (!u) return;
+      try { u = new URL(u, document.baseURI).href; } catch (e) { return; }
+      if (u.indexOf("blob:") === 0) return;
+      if (seen[u]) return;
+      seen[u] = 1;
+      out.push({ url: u, kind: kind, label: label || "" });
     }
-    var media = document.querySelectorAll("video, audio");
-    for (var i = 0; i < media.length; i++) {
-      var el = media[i];
-      if (el.currentSrc) add(el.currentSrc, el.tagName.toLowerCase());
-      var sources = el.querySelectorAll("source");
-      for (var j = 0; j < sources.length; j++) {
-        if (sources[j].src) add(sources[j].src, "source");
-      }
+    function scan(doc) {
+      try {
+        doc.querySelectorAll("video").forEach(function (v) {
+          add(v.currentSrc || v.src, "video", "video on page");
+          v.querySelectorAll("source").forEach(function (s) { add(s.src, "video", ""); });
+        });
+        doc.querySelectorAll("audio").forEach(function (a) {
+          add(a.currentSrc || a.src, "audio", "audio on page");
+          a.querySelectorAll("source").forEach(function (s) { add(s.src, "audio", ""); });
+        });
+        doc.querySelectorAll("a[href]").forEach(function (a) {
+          var h = a.href || "";
+          if (/\.(mp4|webm|mkv|mov|m3u8|mpd|mp3|m4a|ogg|opus|flac|wav)(\?|#|$)/i.test(h)) {
+            add(h, /\.(mp3|m4a|ogg|opus|flac|wav)(\?|#|$)/i.test(h) ? "audio" : "video", (a.textContent || "").trim().slice(0, 80));
+          }
+        });
+        doc.querySelectorAll("iframe").forEach(function (f) {
+          var src = f.src || "";
+          try {
+            var inner = f.contentDocument;
+            if (inner) { scan(inner); return; }
+          } catch (e) { /* cross-origin: fall through to the player check */ }
+          if (src && (f.offsetWidth || 0) > 200 && /player|video|embed|stream|watch/i.test(src)) {
+            add(src, "page", "embedded player");
+          }
+        });
+      } catch (e) { /* a locked-down subtree must not kill the scan */ }
+    }
+    scan(document);
+    var og = document.querySelector('meta[property="og:video"], meta[property="og:video:url"], meta[name="twitter:player:stream"]');
+    if (og) {
+      var ogu = og.getAttribute("content") || "";
+      if (/\.(mp4|webm|mkv|mov|m3u8|mpd|mp3|m4a)(\?|#|$)/i.test(ogu)) add(ogu, "video", "featured");
+      else if (ogu) add(ogu, "page", "featured video");
     }
     try {
       var resources = performance.getEntriesByType("resource");
       for (var k = 0; k < resources.length; k++) {
-        if (MEDIA_RE.test(resources[k].name)) add(resources[k].name, "resource");
+        if (MEDIA_RE.test(resources[k].name)) {
+          var name = resources[k].name;
+          add(name, /\.(mp3|m4a|aac|ogg|oga|wav)(\?|#|$)/i.test(name) ? "audio" : "video", "");
+        }
       }
     } catch (e) { /* performance API unavailable */ }
-    return items;
+    return out;
   }
 
   function emeProbe() {
@@ -109,6 +166,124 @@
     });
   }
 
+  /* ---- Video pop-up watcher (Phase 3) ---- */
+  function installVideoPopup() {
+    try {
+      if (window.top !== window) return;
+      if (window.__nsVideoPopupInstalled) return;
+      window.__nsVideoPopupInstalled = true;
+      window.__nsVideoPopupOff = false;
+      // Per-site opt-out, asked once per page load. The app
+      // answers {type:"video-popup-off", off: bool}; until it
+      // answers the button is allowed (default off = false).
+      try {
+        browser.runtime.sendNativeMessage("pioneer", {
+          type: "video-popup-query",
+          host: location.hostname || ""
+        }).then(function (reply) {
+          if (reply && typeof reply.off === "boolean") {
+            window.__nsVideoPopupOff = reply.off;
+            place();
+          }
+        }).catch(function () { /* opt-out unknown — button stays */ });
+      } catch (e) { /* native bridge not ready */ }
+      var btn = null;
+      var curUrl = null;
+      var longPressTimer = null;
+      var lastLongPressAt = 0;
+      function sendTap(url) {
+        try {
+          browser.runtime.sendNativeMessage("pioneer", { type: "video-popup-tap", url: url });
+        } catch (e) { /* native bridge not ready */ }
+      }
+      function sendLongPress(url) {
+        lastLongPressAt = Date.now();
+        try {
+          browser.runtime.sendNativeMessage("pioneer", { type: "video-popup-longpress", url: url });
+        } catch (e) { /* native bridge not ready */ }
+      }
+      function pick() {
+        if (window.__nsVideoPopupOff) return null;
+        if (document.fullscreenElement) return null;
+        var vids = document.querySelectorAll("video");
+        var best = null;
+        var bestArea = 0;
+        for (var i = 0; i < vids.length; i++) {
+          var v = vids[i];
+          try {
+            if (v.paused || v.currentTime <= 0 || v.readyState < 2) continue;
+            var src = v.currentSrc || v.src || "";
+            if (!src || src.indexOf("blob:") === 0) continue;
+            var r = v.getBoundingClientRect();
+            if (r.width < 160 || r.height < 90) continue;
+            if (r.bottom <= 0 || r.top >= window.innerHeight ||
+                r.right <= 0 || r.left >= window.innerWidth) continue;
+            var area = r.width * r.height;
+            if (area > bestArea) { bestArea = area; best = { r: r, src: src }; }
+          } catch (e) { /* one bad element must not kill the pick */ }
+        }
+        return best;
+      }
+      function place() {
+        try {
+          var found = pick();
+          if (!found) { if (btn) btn.style.display = "none"; return; }
+          if (!btn) {
+            btn = document.createElement("div");
+            btn.id = "notscape-video-popup";
+            btn.textContent = "\u25B6";
+            btn.style.cssText = "position:fixed;z-index:2147483647;width:40px;height:40px;" +
+              "border-radius:20px;background:rgba(0,0,0,0.65);color:#fff;" +
+              "font-size:18px;line-height:40px;text-align:center;" +
+              "pointer-events:auto;cursor:pointer;user-select:none;" +
+              "-webkit-user-select:none;touch-action:manipulation;display:none;";
+            btn.addEventListener("click", function (e) {
+              e.stopPropagation(); e.preventDefault();
+              // A long-press already reported for this press
+              // must not also fire a tap.
+              if (Date.now() - lastLongPressAt < 1000) return;
+              if (curUrl) sendTap(curUrl);
+            });
+            btn.addEventListener("pointerdown", function () {
+              if (longPressTimer) clearTimeout(longPressTimer);
+              longPressTimer = setTimeout(function () {
+                longPressTimer = null;
+                if (curUrl) sendLongPress(curUrl);
+              }, 500);
+            });
+            ["pointerup", "pointercancel", "pointerleave"].forEach(function (ev) {
+              btn.addEventListener(ev, function () {
+                if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+              });
+            });
+            btn.addEventListener("contextmenu", function (e) {
+              e.stopPropagation(); e.preventDefault();
+              if (Date.now() - lastLongPressAt < 1000) return;
+              if (curUrl) sendLongPress(curUrl);
+            });
+            document.documentElement.appendChild(btn);
+          }
+          curUrl = found.src;
+          var top = Math.max(8, found.r.top + 8);
+          var left = Math.min(window.innerWidth - 48, found.r.right - 48);
+          btn.style.top = top + "px";
+          btn.style.left = left + "px";
+          btn.style.display = "block";
+        } catch (e) { /* placement is best-effort */ }
+      }
+      document.addEventListener("play", place, true);
+      document.addEventListener("playing", place, true);
+      document.addEventListener("pause", place, true);
+      document.addEventListener("ended", place, true);
+      window.addEventListener("scroll", place, true);
+      window.addEventListener("resize", place);
+      document.addEventListener("fullscreenchange", place);
+      setInterval(place, 1000);
+      place();
+    } catch (e) { /* a locked-down page simply never shows the button */ }
+  }
+
+  installVideoPopup();
   report("idle");
   queryZoom();
   setTimeout(function () { report("t+2s"); }, 2000);

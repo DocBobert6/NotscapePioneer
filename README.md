@@ -8,17 +8,20 @@ Gecko makes possible.
 
 Local-only and private, stated positively. No account, no sync.
 
-## Status: Phase 2 shell parity (alpha)
+## Status: Phase 3 blocking, downloads and media (alpha)
 
 Gate 1 passed on Robert's Pixel 10a (uBlock installs + blocks, Widevine
 plays, Cast finds 8 routes, cold start 1491ms). Phase 2 is a browser
 Robert can genuinely browse with: tabs, navigation, history, find,
 per-site zoom, private tabs, start page, bookmarks, the full menu and
-Customize. No media, no reader, no vault fill yet — those arrive with
-their phases.
+Customize. Phase 3 adds the motivating features: uBlock Origin plus
+Mariner's seven filter lists and per-site exceptions, strict popup
+blocking, the full downloads stack, media detection with the pop-up
+player, fullscreen video, permissions and the file chooser. No reader,
+no vault fill yet — those arrive with Phase 4.
 
 - Package: `net.nspioneer.browser`
-- Version: `0.1.0-alpha.3` (versionCode 3), debug-signed only
+- Version: `0.1.0-alpha.4` (versionCode 4), debug-signed only
 - Engine: GeckoView **159.0.20261102144711** (stable, Firefox 159) —
   pinned, never nightly or beta. arm64-v8a only, minSdk 26.
   Toolchain: AGP 9.4.1 / Kotlin 2.3.21 / Gradle 9.8.1 / compileSdk 36

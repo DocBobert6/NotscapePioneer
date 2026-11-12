@@ -34,8 +34,10 @@ import net.nspioneer.browser.engine.GeckoEngine
 import net.nspioneer.browser.ui.BookmarksScreen
 import net.nspioneer.browser.ui.BrowserScreen
 import net.nspioneer.browser.ui.DiagnosticsScreen
+import net.nspioneer.browser.ui.DownloadsScreen
 import net.nspioneer.browser.ui.FavoritesScreen
 import net.nspioneer.browser.ui.HistoryScreen
+import net.nspioneer.browser.ui.LibraryScreen
 import net.nspioneer.browser.ui.LicencesScreen
 import net.nspioneer.browser.ui.NotscapeTheme
 import net.nspioneer.browser.ui.PioneerScreen
@@ -185,6 +187,15 @@ class MainActivity : ComponentActivity() {
                             onOpenUrl = { url -> openUrlInActiveTab(url) }
                         )
                         PioneerScreen.Favorites -> FavoritesScreen(
+                            store = store,
+                            onBack = { screen = PioneerScreen.Browser },
+                            onOpenUrl = { url -> openUrlInActiveTab(url) }
+                        )
+                        PioneerScreen.Downloads -> DownloadsScreen(
+                            store = store,
+                            onBack = { screen = PioneerScreen.Browser }
+                        )
+                        PioneerScreen.Library -> LibraryScreen(
                             store = store,
                             onBack = { screen = PioneerScreen.Browser },
                             onOpenUrl = { url -> openUrlInActiveTab(url) }

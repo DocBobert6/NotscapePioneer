@@ -24,8 +24,8 @@ android {
         applicationId = "net.nspioneer.browser"
         minSdk = 26 // GeckoView floor: Android 8.0 (API 26) or later.
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.0-alpha.3"
+        versionCode = 4
+        versionName = "0.1.0-alpha.4"
         // arm64-v8a only, matching Mariner's ABI decision.
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -98,8 +98,26 @@ dependencies {
     // The carried shell files use androidx.compose.material.icons.Icons
     // (core filled set only — no icons-extended in this phase).
     implementation("androidx.compose.material:material-icons-core")
+    // Phase 3 (C): the player's Replay5/10/30, Forward5/10/30 and
+    // automirrored QueueMusic glyphs live in icons-extended.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
     implementation("org.mozilla.geckoview:geckoview:$geckoviewVersion")
+    // Phase 3 downloads (§8.4): Media3 1.9.4, exactly as Mariner
+    // (exoplayer + HLS/DASH + UI + common + session for the
+    // player, transformer for DASH/merge remux).
+    implementation("androidx.media3:media3-exoplayer:1.9.4")
+    implementation("androidx.media3:media3-exoplayer-hls:1.9.4")
+    implementation("androidx.media3:media3-exoplayer-dash:1.9.4")
+    implementation("androidx.media3:media3-ui:1.9.4")
+    implementation("androidx.media3:media3-common:1.9.4")
+    implementation("androidx.media3:media3-session:1.9.4")
+    implementation("androidx.media3:media3-transformer:1.9.4")
+    // Phase 3 downloads: WorkManager for the HLS / DASH /
+    // segmented / merge workers (foreground dataSync).
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
+    // Phase 3 (Worker A): FilterEngineTest / UserBlockRulesTest.
+    testImplementation("junit:junit:4.13.2")
     // Cast probe only (route discovery logging, no session launch).
     // Same versions as Mariner.
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")

@@ -1,5 +1,8 @@
 package net.nspioneer.browser.ui
 
+import android.app.DownloadManager
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -25,14 +28,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
@@ -42,6 +55,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,22 +66,34 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.nspioneer.browser.data.Bookmark
+import net.nspioneer.browser.data.DownloadRecord
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.folderChild
 import net.nspioneer.browser.data.folderChildren
 import net.nspioneer.browser.data.folderName
 import net.nspioneer.browser.data.folderParent
 import net.nspioneer.browser.data.isFolderSegment
+import net.nspioneer.browser.media.Downloads
+import net.nspioneer.browser.media.PlayerActivity
+import net.nspioneer.browser.media.downloadNotificationsEnabled
+import net.nspioneer.browser.media.openAppNotificationSettings
+import net.nspioneer.browser.media.rememberAskDownloadNotifPermission
 
 /**
  * Library screens carried from Mariner's LibraryScreens.kt:
- * Bookmarks, History and Favorites only. Playlists, Downloads
- * and Reading List are dropped — their phases have not arrived.
+ * Bookmarks, History, Favorites, Downloads and the Offline
+ * library. Playlists and Reading List are dropped — their
+ * phases have not arrived.
  *
  * Adapted points:
  * - PioneerStore (no Room/AppStore), folder helpers from the
@@ -81,6 +108,16 @@ import net.nspioneer.browser.data.isFolderSegment
  * - GroupTitle / SettingsCard / InsetDivider are carried here
  *   from Mariner's SettingsScreen.kt (they are shared kit
  *   pieces, not settings logic).
+ * - Downloads / Offline library (Mariner LibraryScreens.kt
+ *   1261-2639, §8.4): the two screens share one row
+ *   ([DownloadRow]) instead of Mariner's duplicated row
+ *   code; behaviour, strings and order are identical.
+ *   Mariner's games zip-import button and the saved-pages
+ *   (offlinePages) section are DROPPED — no games in
+ *   Phase 3, no saved pages in Pioneer. Pioneer has no
+ *   R.string download strings, so the two literals are
+ *   written out: "Retrying…" and
+ *   "Couldn't delete that download."
  */
 
 @Composable
@@ -1117,5 +1154,742 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                 }
             }
         }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Downloads + Offline library (§8.4)                                  */
+/* ------------------------------------------------------------------ */
+
+/** Audit F12: only drop the record when both removals
+ *  actually worked. Returns true when the record was
+ *  removed. */
+private fun deleteDownloadRecord(
+    context: Context, store: PioneerStore, rec: DownloadRecord
+): Boolean {
+    val dmOk = if (rec.dmId >= 0) {
+        runCatching {
+            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            dm.remove(rec.dmId)
+        }.isSuccess
+    } else true
+    val wiped = Downloads.deleteLocal(context, store, rec)
+    return if (dmOk && wiped) {
+        Downloads.clearJobBundle(store, rec.id)
+        store.removeDownload(rec.id)
+        Downloads.deleteEngineStaging(context, store, rec)
+        true
+    } else {
+        false
+    }
+}
+
+private fun deleteDownloadFailedToast(context: Context) {
+    Toast.makeText(
+        context, "Couldn't delete that download.",
+        Toast.LENGTH_LONG
+    ).show()
+}
+
+/** The one download row, shared by DownloadsScreen and
+ *  LibraryScreen (Mariner duplicates this row in both
+ *  screens; behaviour, strings and order are identical
+ *  here). [showPlay] is the Offline library's play-offline
+ *  button, [showOpen] the Downloads screen's open-in-app
+ *  button, [showExport] the library's save-a-copy button.
+ *  [showStatusDetail] hides the error / downgrade lines on
+ *  the private list, matching Mariner's private rows. */
+@Composable
+private fun DownloadRow(
+    rec: DownloadRecord,
+    store: PioneerStore,
+    selecting: Boolean,
+    selected: Boolean,
+    onToggleSelect: () -> Unit,
+    showPlay: Boolean,
+    showOpen: Boolean,
+    showExport: Boolean,
+    showStatusDetail: Boolean = true,
+    onExport: ((DownloadRecord) -> Unit)? = null,
+    askDownloadNotif: () -> Unit,
+) {
+    val context = LocalContext.current
+    val source = Downloads.localSource(context, store, rec)
+    val active = rec.status == "queued" || rec.status == "downloading" ||
+        rec.status == "paused"
+    KitGroupedRow(
+        leading = {
+            if (selecting) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onToggleSelect() }
+                )
+            } else {
+                Icon(
+                    Icons.Filled.Download,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        title = {
+            Text(
+                rec.title, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyLarge
+            )
+        },
+        supporting = {
+            Column {
+                // Audit P-m13: a download still in progress
+                // after a failed attempt is a retry in
+                // flight, not a fresh download.
+                val dlErrFirst = store.setting("dlerror:${rec.id}", "")
+                val statusText = when {
+                    Downloads.isWaitingForWifi(context, store) &&
+                        (rec.status == "downloading" || rec.status == "queued") ->
+                        "Waiting for Wi-Fi"
+                    rec.status == "downloading" && dlErrFirst.isNotBlank() ->
+                        "Retrying…"
+                    else -> rec.status
+                }
+                Text(
+                    "${statusText}${if (active && rec.progress >= 0) " • ${rec.progress}%" else ""} • ${rec.fileName}",
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                // Beta.64 #30: size / speed / ETA.
+                Downloads.progressDetailLine(rec)?.let { detail ->
+                    Text(
+                        detail,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (showStatusDetail) {
+                    val dlErr = store.setting("dlerror:${rec.id}", "")
+                    if (dlErr.isNotBlank() &&
+                        (rec.status == "failed" || active)
+                    ) {
+                        Text(
+                            dlErr,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    // Audit D-p4: a downgraded job kept
+                    // going under the system downloader
+                    // — say so instead of implying the
+                    // segmented gate still applies.
+                    if (store.setting("dldowngrade:${rec.id}", "") == "1") {
+                        Text(
+                            "Continued via system downloader",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                if (active) {
+                    LinearProgressIndicator(
+                        progress = { if (rec.progress >= 0) rec.progress / 100f else 0f },
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                    )
+                }
+            }
+        },
+        trailing = {
+            Row {
+                if (rec.status == "downloading" &&
+                    Downloads.isResumableEngine(Downloads.engineFor(store, rec))
+                ) {
+                    IconButton(onClick = { Downloads.pause(context, store, rec) }) {
+                        Icon(Icons.Filled.Pause, contentDescription = "Pause download")
+                    }
+                }
+                if (rec.status == "paused" &&
+                    Downloads.isResumableEngine(Downloads.engineFor(store, rec))
+                ) {
+                    IconButton(onClick = { Downloads.resume(context, store, rec) }) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = "Resume download")
+                    }
+                }
+                if (active) {
+                    IconButton(onClick = { Downloads.cancel(context, store, rec) }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Cancel download")
+                    }
+                }
+                if (showPlay && rec.status == "complete" && source != null) {
+                    IconButton(onClick = {
+                        PlayerActivity.launch(context, source, rec.title)
+                    }) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = "Play offline")
+                    }
+                }
+                if (showOpen && rec.status == "complete" && source != null) {
+                    IconButton(onClick = {
+                        val intent = Downloads.openIntent(context, store, rec)
+                        val opened = intent != null && runCatching {
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                        }.isSuccess
+                        if (!opened) {
+                            Toast.makeText(
+                                context, "No app can open this file",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }) {
+                        Icon(Icons.Filled.OpenInNew, contentDescription = "Open download")
+                    }
+                }
+                if (rec.status == "complete" && source != null) {
+                    IconButton(onClick = {
+                        Downloads.shareIntent(context, store, rec)
+                            ?.let { intent ->
+                                context.startActivity(
+                                    Intent.createChooser(
+                                        intent, "Share download"
+                                    ).addFlags(
+                                        Intent.FLAG_ACTIVITY_NEW_TASK
+                                    )
+                                )
+                            }
+                    }) {
+                        Icon(
+                            Icons.Filled.Share,
+                            contentDescription = "Share download"
+                        )
+                    }
+                    if (showExport) {
+                        IconButton(onClick = { onExport?.invoke(rec) }) {
+                            Icon(
+                                Icons.Filled.SaveAlt,
+                                contentDescription = "Save a copy"
+                            )
+                        }
+                    }
+                }
+                if (rec.status == "failed") {
+                    IconButton(onClick = {
+                        // Audit D-M1: retry re-enqueues
+                        // through the saved job bundle —
+                        // merges re-run with both side
+                        // URLs, location and rename are
+                        // preserved. Only a missing
+                        // bundle falls back to
+                        // delete-and-restart.
+                        askDownloadNotif()
+                        if (Downloads.retry(context, store, rec)) {
+                            Toast.makeText(
+                                context, "Download restarted",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            deleteDownloadFailedToast(context)
+                        }
+                    }) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = "Retry download"
+                        )
+                    }
+                }
+                IconButton(onClick = {
+                    if (!deleteDownloadRecord(context, store, rec)) {
+                        deleteDownloadFailedToast(context)
+                    }
+                }) {
+                    Icon(Icons.Filled.Delete, contentDescription = "Delete download")
+                }
+            }
+        },
+    )
+}
+
+/** The Offline library: media downloads only. Ordinary
+ *  file and image downloads live in the phone's Downloads
+ *  folder and on the Downloads page. (Mariner
+ *  LibraryScreens.kt:1261.) */
+@Composable
+fun LibraryScreen(
+    store: PioneerStore,
+    onBack: () -> Unit,
+    onOpenUrl: (String) -> Unit = {},
+) {
+    val rev = store.revision
+    // Audit P-M5: progress ticks bump this, not the global revision.
+    val progressRev = store.downloadProgressRev
+    val context = LocalContext.current
+    // One-time download notification ask (2026-10-26); no-ops once asked or granted.
+    val askDownloadNotif = rememberAskDownloadNotifPermission(store)
+    var downloadQuery by remember { mutableStateOf("") }
+    // Audit P-m7: multi-select delete on this screen.
+    var dlSelecting by remember { mutableStateOf(false) }
+    var dlSelected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val dlScreenMedia = true
+    // Beta.64 #21: sort the offline library.
+    var mediaSort by remember { mutableStateOf("newest") }
+    var exportTarget by remember {
+        mutableStateOf<DownloadRecord?>(null)
+    }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("*/*")
+    ) { uri ->
+        val rec = exportTarget
+        exportTarget = null
+        if (uri != null && rec != null) {
+            Thread { Downloads.copyExport(context, store, rec, uri) }.start()
+        }
+    }
+    LaunchedEffect(Unit) {
+        Downloads.refresh(context, store)
+    }
+    SubScreen("Offline library", onBack) {
+        var refreshing by remember { mutableStateOf(false) }
+        val refreshScope = rememberCoroutineScope()
+        OutlinedTextField(
+            value = downloadQuery,
+            onValueChange = { downloadQuery = it },
+            label = { Text("Search downloads") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = {
+                dlSelecting = !dlSelecting
+                if (!dlSelecting) dlSelected = emptySet()
+            }) { Text(if (dlSelecting) "Done" else "Select") }
+            if (dlSelected.isNotEmpty()) {
+                // Records only, files stay — same rule
+                // as "Clear completed" (audit P-p4).
+                TextButton(onClick = {
+                    store.downloadsSnapshot()
+                        .filter { it.id in dlSelected && it.media == dlScreenMedia }
+                        .forEach { rec ->
+                            Downloads.deleteEngineStaging(context, store, rec)
+                            Downloads.clearJobBundle(store, rec.id)
+                            store.removeDownload(rec.id)
+                        }
+                    dlSelected = emptySet()
+                    dlSelecting = false
+                }) { Text("Delete records (${dlSelected.size})") }
+            }
+            TextButton(onClick = {
+                mediaSort = when (mediaSort) {
+                    "newest" -> "oldest"
+                    "oldest" -> "title"
+                    else -> "newest"
+                }
+            }) {
+                Text(
+                    when (mediaSort) {
+                        "oldest" -> "Sort: oldest"
+                        "title" -> "Sort: title"
+                        else -> "Sort: newest"
+                    }
+                )
+            }
+            Spacer(Modifier.weight(1f))
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Spacer(Modifier.weight(1f))
+            if (refreshing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            TextButton(
+                enabled = !refreshing,
+                onClick = {
+                    refreshScope.launch {
+                        refreshing = true
+                        withContext(Dispatchers.IO) {
+                            Downloads.refresh(context, store)
+                        }
+                        refreshing = false
+                    }
+                }
+            ) { Text(if (refreshing) "Refreshing…" else "Refresh status") }
+            // Audit P-p4: records only — files stay.
+            if (store.downloadsSnapshot().any { it.media && it.status == "complete" }) {
+                TextButton(onClick = { Downloads.clearCompletedRecords(store, true) }) {
+                    Text("Clear completed")
+                }
+            }
+        }
+        // The offline library is for media downloads only; ordinary file
+        // and image downloads live in the phone's Downloads folder
+        // and on the Downloads page.
+        val mediaDownloads = store.downloadsSnapshot().filter { rec ->
+            rec.media && !rec.isPrivate &&
+                (downloadQuery.isBlank() ||
+                    rec.title.contains(downloadQuery, ignoreCase = true) ||
+                    rec.fileName.contains(downloadQuery, ignoreCase = true))
+        }.let { list ->
+            // Beta.64 #21: sort the offline library.
+            when (mediaSort) {
+                "oldest" -> list.sortedBy { it.addedAt }
+                "title" -> list.sortedBy { it.title.lowercase() }
+                else -> list.sortedByDescending { it.addedAt }
+            }
+        }
+        if (mediaDownloads.isEmpty()) {
+            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Text(
+                    if (downloadQuery.isNotBlank()) "No downloads match your search." else "Nothing downloaded yet. Use “Media on this page” in the browser and tap download.",
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
+        if (mediaDownloads.isNotEmpty()) {
+            LazyColumn {
+                item {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    ) {
+                        GroupTitle("Downloads")
+                        SettingsCard {
+                            mediaDownloads.forEachIndexed { i, rec ->
+                                if (i > 0) InsetDivider()
+                                DownloadRow(
+                                    rec = rec,
+                                    store = store,
+                                    selecting = dlSelecting,
+                                    selected = rec.id in dlSelected,
+                                    onToggleSelect = {
+                                        dlSelected =
+                                            if (rec.id in dlSelected) dlSelected - rec.id
+                                            else dlSelected + rec.id
+                                    },
+                                    showPlay = true,
+                                    showOpen = false,
+                                    showExport = true,
+                                    onExport = { target ->
+                                        exportTarget = target
+                                        exportLauncher.launch(target.fileName)
+                                    },
+                                    askDownloadNotif = askDownloadNotif,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(24.dp))
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** Ordinary file and image downloads. Media downloads
+ *  live in the Offline library. (Mariner
+ *  LibraryScreens.kt:1677.) The games zip-import button
+ *  is dropped — no games in Phase 3. */
+@Composable
+fun DownloadsScreen(
+    store: PioneerStore,
+    onBack: () -> Unit,
+) {
+    val rev = store.revision
+    // Audit P-M5: progress ticks bump this, not the global revision.
+    val progressRev = store.downloadProgressRev
+    val context = LocalContext.current
+    // One-time download notification ask (2026-10-26); no-ops once asked or granted.
+    val askDownloadNotif = rememberAskDownloadNotifPermission(store)
+    var downloadQuery by remember { mutableStateOf("") }
+    // Beta.64 #20: the private-downloads confirm dialog.
+    var showPrivateConfirm by remember { mutableStateOf(false) }
+    // Audit P-m7: multi-select delete on this screen.
+    var dlSelecting by remember { mutableStateOf(false) }
+    var dlSelected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val dlScreenMedia = false
+    // Beta.64 #21: sort file downloads (and the private
+    // list below, same order).
+    var fileSort by remember { mutableStateOf("newest") }
+    LaunchedEffect(Unit) {
+        Downloads.refresh(context, store)
+    }
+    SubScreen("Downloads", onBack) {
+        var refreshing by remember { mutableStateOf(false) }
+        val refreshScope = rememberCoroutineScope()
+        OutlinedTextField(
+            value = downloadQuery,
+            onValueChange = { downloadQuery = it },
+            label = { Text("Search downloads") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = {
+                dlSelecting = !dlSelecting
+                if (!dlSelecting) dlSelected = emptySet()
+            }) { Text(if (dlSelecting) "Done" else "Select") }
+            if (dlSelected.isNotEmpty()) {
+                // Records only, files stay — same rule
+                // as "Clear completed" (audit P-p4).
+                TextButton(onClick = {
+                    store.downloadsSnapshot()
+                        .filter { it.id in dlSelected && it.media == dlScreenMedia }
+                        .forEach { rec ->
+                            Downloads.deleteEngineStaging(context, store, rec)
+                            Downloads.clearJobBundle(store, rec.id)
+                            store.removeDownload(rec.id)
+                        }
+                    dlSelected = emptySet()
+                    dlSelecting = false
+                }) { Text("Delete records (${dlSelected.size})") }
+            }
+            TextButton(onClick = {
+                fileSort = when (fileSort) {
+                    "newest" -> "oldest"
+                    "oldest" -> "title"
+                    else -> "newest"
+                }
+            }) {
+                Text(
+                    when (fileSort) {
+                        "oldest" -> "Sort: oldest"
+                        "title" -> "Sort: title"
+                        else -> "Sort: newest"
+                    }
+                )
+            }
+            Spacer(Modifier.weight(1f))
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Spacer(Modifier.weight(1f))
+            if (refreshing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            TextButton(
+                enabled = !refreshing,
+                onClick = {
+                    refreshScope.launch {
+                        refreshing = true
+                        withContext(Dispatchers.IO) {
+                            Downloads.refresh(context, store)
+                        }
+                        refreshing = false
+                    }
+                }
+            ) { Text(if (refreshing) "Refreshing…" else "Refresh status") }
+            // Audit P-p4: records only — files stay.
+            if (store.downloadsSnapshot().any { !it.media && it.status == "complete" }) {
+                TextButton(onClick = { Downloads.clearCompletedRecords(store, false) }) {
+                    Text("Clear completed")
+                }
+            }
+            // Audit D-m12: remove files pruned records left behind.
+            if (Downloads.prunedFiles(store).isNotEmpty()) {
+                TextButton(onClick = { Downloads.clearPrunedFiles(context, store) }) {
+                    Text("Clear leftover files")
+                }
+            }
+        }
+        // Download notifications are off (2026-10-26): worker
+        // downloads announce completion as an ordinary
+        // notification, which needs the permission — the
+        // row below is the recovery path for a denial.
+        // notifTick re-checks when returning from Settings.
+        var notifTick by remember { mutableStateOf(0) }
+        val notifLifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(notifLifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    notifTick++
+                }
+            }
+            notifLifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                notifLifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
+        val notifOff = remember(notifTick) {
+            android.os.Build.VERSION.SDK_INT >= 33 &&
+                !downloadNotificationsEnabled(context)
+        }
+        if (notifOff) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Download notifications are off",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                TextButton(onClick = { openAppNotificationSettings(context) }) {
+                    Text("Enable")
+                }
+            }
+        }
+        // The Downloads page is for ordinary file and
+        // image downloads only; media downloads live
+        // in the Offline library.
+        val fileDownloads = store.downloadsSnapshot().filter { rec ->
+            !rec.media && !rec.isPrivate &&
+                (downloadQuery.isBlank() ||
+                    rec.title.contains(downloadQuery, ignoreCase = true) ||
+                    rec.fileName.contains(downloadQuery, ignoreCase = true))
+        }.let { list ->
+            // Beta.64 #21: sort file downloads.
+            when (fileSort) {
+                "oldest" -> list.sortedBy { it.addedAt }
+                "title" -> list.sortedBy { it.title.lowercase() }
+                else -> list.sortedByDescending { it.addedAt }
+            }
+        }
+        // Beta.64 #20: private file downloads, shown only
+        // behind the confirm gate below.
+        val privateDownloads = store.downloadsSnapshot().filter { rec ->
+            !rec.media && rec.isPrivate &&
+                (downloadQuery.isBlank() ||
+                    rec.title.contains(downloadQuery, ignoreCase = true) ||
+                    rec.fileName.contains(downloadQuery, ignoreCase = true))
+        }.let { list ->
+            // Beta.64 #21: same order as the file list.
+            when (fileSort) {
+                "oldest" -> list.sortedBy { it.addedAt }
+                "title" -> list.sortedBy { it.title.lowercase() }
+                else -> list.sortedByDescending { it.addedAt }
+            }
+        }
+        if (fileDownloads.isEmpty() && privateDownloads.isEmpty()) {
+            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Text(
+                    if (downloadQuery.isNotBlank()) "No downloads match your search." else "Nothing downloaded yet. Files and images you download from the browser will appear here.",
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
+        if (fileDownloads.isNotEmpty() || privateDownloads.isNotEmpty()) {
+            LazyColumn {
+                item {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    ) {
+                        GroupTitle("Downloads")
+                        SettingsCard {
+                            fileDownloads.forEachIndexed { i, rec ->
+                                if (i > 0) InsetDivider()
+                                DownloadRow(
+                                    rec = rec,
+                                    store = store,
+                                    selecting = dlSelecting,
+                                    selected = rec.id in dlSelected,
+                                    onToggleSelect = {
+                                        dlSelected =
+                                            if (rec.id in dlSelected) dlSelected - rec.id
+                                            else dlSelected + rec.id
+                                    },
+                                    showPlay = false,
+                                    showOpen = true,
+                                    showExport = false,
+                                    askDownloadNotif = askDownloadNotif,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(24.dp))
+                    }
+                }
+                if (privateDownloads.isNotEmpty()) {
+                    item {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        ) {
+                            GroupTitle("Private downloads")
+                            if (!store.privateDownloadsGate.unlocked) {
+                                // Beta.64 #20: private content
+                                // stays hidden until the user
+                                // explicitly confirms, this
+                                // session only.
+                                PanelCard {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth()
+                                            .padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "Private downloads are hidden",
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(onClick = { showPrivateConfirm = true }) {
+                                            Text("Show")
+                                        }
+                                    }
+                                }
+                            } else {
+                                SettingsCard {
+                                    privateDownloads.forEachIndexed { i, rec ->
+                                        if (i > 0) InsetDivider()
+                                        DownloadRow(
+                                            rec = rec,
+                                            store = store,
+                                            selecting = false,
+                                            selected = false,
+                                            onToggleSelect = {},
+                                            showPlay = false,
+                                            showOpen = true,
+                                            showExport = false,
+                                            showStatusDetail = false,
+                                            askDownloadNotif = askDownloadNotif,
+                                        )
+                                    }
+                                }
+                                TextButton(onClick = { store.privateDownloadsGate.hide() }) {
+                                    Text("Hide private downloads")
+                                }
+                            }
+                            Spacer(Modifier.height(24.dp))
+                        }
+                    }
+                }
+            }
+        }
+        if (showPrivateConfirm) {
+            FrostDialog(
+                onDismissRequest = { showPrivateConfirm = false },
+                title = { Text("Show private downloads?") },
+                text = {
+                    Text("Private downloads are hidden by default. Showing them lists files downloaded in private tabs, until you hide them again.")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        store.privateDownloadsGate.confirm()
+                        showPrivateConfirm = false
+                    }) { Text("Show") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showPrivateConfirm = false }) { Text("Cancel") }
+                }
+            )
+        }
+        Spacer(Modifier.height(8.dp))
     }
 }

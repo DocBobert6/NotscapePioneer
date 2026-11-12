@@ -2,6 +2,9 @@ package net.nspioneer.browser.engine
 import androidx.compose.runtime.State
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import org.mozilla.geckoview.GeckoSession
+import net.nspioneer.browser.media.DetectedMedia  // defined in C's
+    // MediaLog.kt (design §5, with the `source` field) — do NOT
+    // redefine it here, or integration gets a duplicate.
 
 data class FindResult(val ordinal: Int, val count: Int, val found: Boolean)
 
@@ -52,6 +55,24 @@ interface EngineTab {
         // a long-press/context hook; otherwise leave null (researcher
         // decides — see PHASE2-GECKOVIEW-API.md).
     var onCrash: (() -> Unit)?
+
+    // ---- Phase 3: media detection ----
+    val detectedMedia: State<List<DetectedMedia>>
+    fun runMediaScan()  // ask the probe for a fresh DOM scan now
+        // (toolbar button / long-press path). The background
+        // webRequest observer feeds detectedMedia continuously;
+        // runMediaScan only re-runs the DOM half.
+    var onVideoPopupTap: ((url: String) -> Unit)?
+    var onVideoPopupLongPress: ((url: String) -> Unit)?
+    // ---- Phase 3: fullscreen ----
+    val isFullscreen: State<Boolean>  // true while a page is in
+        // fullscreen (ContentDelegate.onFullScreen). The SHELL hides
+        // the browser chrome; Fullscreen.kt hides the system bars.
+    // ---- Phase 3: popup windows (strict popup blocker) ----
+    // True when this tab is a popup window opened by
+    // window.open / onNewSession (Mariner TabList.isPopupWin).
+    // onCloseWindow closes only popup tabs.
+    val isPopupWin: Boolean
 }
 
 interface Engine {
@@ -84,4 +105,71 @@ interface Engine {
     fun refreshStats()              // recomputes the "stats: APK … | PSS …"
         // line (cold start, PSS, APK size).
     fun close()
+
+    // ---- Phase 3: blocking ----
+    // Per-site exception state for ONE host. disableBlocking is the
+    // PioneerStore SiteSetting flag (JSON key "nb", already exists);
+    // setBlockingEnabled applies it to every layer at once: ETP exception
+    // via StorageController.setPermission(PERMISSION_TRACKING, VALUE_ALLOW),
+    // Mariner-lists bypass in the probe, and the cosmetic bypass. uBlock
+    // Origin is NOT toggled by this call — the app cannot toggle a
+    // per-site exception inside uBlock; see PHASE3-DESIGN.md §10 (known
+    // gap). Do not pretend otherwise in the UI: the site-info row says
+    // what it disables.
+    fun setBlockingEnabled(host: String, enabled: Boolean)
+    fun refreshFilterLists()              // re-download + re-parse the 7 lists
+                                          // (FilterEngine.refreshAsync equivalent)
+    val filterListsState: State<String>   // "7 lists • N rules • updated …" |
+                                          // "updating…" | "failed: …" — for Settings
+    fun uninstallUBlock()                 // WebExtensionController.uninstall;
+                                          // uBlockState reports the result
+    // ---- Phase 3: downloads ----
+    // The engine reports an unhandleable response; the SHELL shows Mariner's
+    // confirm dialog and calls Downloads.start. The engine NEVER shows UI.
+    var onExternalDownload: ((tab: EngineTab, download: ExternalDownload) -> Unit)?
+    // ---- Phase 3: permissions + file chooser ----
+    // Mariner's PermPrompt, ported verbatim in shape (BrowserScreen.kt:430+).
+    // onGrant receives the resources actually granted (after the OS check);
+    // onDeny is called when the user dismisses or denies. The ENGINE builds
+    // the prompt; the SHELL shows Mariner's dialog and calls back.
+    var onPermissionPrompt: ((prompt: PermPrompt) -> Unit)?   // on Engine
+    // The SHELL calls this after the user answers Mariner's dialog; the
+    // ENGINE persists the decision (PioneerStore + StorageController) and
+    // completes the Gecko request. Do not answer the Gecko request from the
+    // SHELL — the request object lives in the engine.
+    fun answerPermissionPrompt(prompt: PermPrompt, allow: Boolean)
+    // File chooser. type is "single" | "multiple" | "folder". mimeTypes is
+    // the input's accept list (may be empty). capture is 0 NONE / 1 ANY /
+    // 2 USER / 3 ENVIRONMENT. onResult(null) means cancelled / failed —
+    // the engine then answers the Gecko prompt with null. The SHELL must
+    // cancel any pending callback with null FIRST (Mariner rule, §8.7) —
+    // the engine enforces it by completing the previous prompt with null
+    // before delivering a new one.
+    var onFilePrompt: ((type: String, mimeTypes: List<String>, capture: Int,
+                        onResult: (uris: List<android.net.Uri>?) -> Unit) -> Unit)?
+    // Popup request (no user gesture). targetUri may be null. The SHELL
+    // applies Mariner's popupStrict model (§8.8) and answers via
+    // answerPopupPrompt. A real new tab (gesture / target=_blank) still
+    // arrives as onTabCreated (Phase 2), not here.
+    var onPopupPrompt: ((targetUri: String?) -> Unit)?        // on Engine
+    fun answerPopupPrompt(allow: Boolean)
 }
+
+// ---- Phase 3: downloads ----
+data class ExternalDownload(
+    val url: String,
+    val contentType: String?,         // from response headers, may be null
+    val contentLength: Long,          // -1 when unknown
+    val suggestedName: String?,       // parsed Content-Disposition, may be null
+    val statusCode: Int,
+    val isSecure: Boolean,
+)
+
+// ---- Phase 3: permissions + file chooser ----
+data class PermPrompt(
+    val origin: String,
+    val host: String,
+    val resources: List<String>,      // "camera" | "microphone" | "geolocation"
+    val onGrant: (granted: List<String>) -> Unit,
+    val onDeny: () -> Unit,
+)

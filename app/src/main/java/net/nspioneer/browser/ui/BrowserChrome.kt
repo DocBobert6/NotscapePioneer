@@ -34,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
@@ -345,6 +346,8 @@ internal object BrowserMenuRows {
         "bookmarks" to "Bookmarks",
         "favoritesManager" to "Favorites",
         "history" to "History",
+        "downloads" to "Downloads",
+        "offlineLibrary" to "Offline library",
         "installUBlock" to "Install uBlock Origin",
         "copyStatus" to "Copy status",
         "diagnostics" to "Diagnostics",
@@ -365,7 +368,7 @@ internal object BrowserMenuRows {
     }
     fun sectionOf(id: String): MenuSection = when (id) {
         "newTab", "newPrivateTab" -> MenuSection.TABS
-        "bookmarks", "favoritesManager", "history" -> MenuSection.LIBRARY
+        "bookmarks", "favoritesManager", "history", "downloads", "offlineLibrary" -> MenuSection.LIBRARY
         "settings", "licences", "copyStatus", "diagnostics" -> MenuSection.SETTINGS
         else -> MenuSection.PAGE
     }
@@ -677,6 +680,12 @@ internal fun BrowserMenuRowsContent(
         },
         MenuSlot("history", shows("history")) {
             MenuRowVisible(store, "history", "History", null) { onDismiss(); onOpenScreen(PioneerScreen.History) }
+        },
+        MenuSlot("downloads", shows("downloads")) {
+            MenuRowVisible(store, "downloads", "Downloads", Icons.Filled.Download) { onDismiss(); onOpenScreen(PioneerScreen.Downloads) }
+        },
+        MenuSlot("offlineLibrary", shows("offlineLibrary")) {
+            MenuRowVisible(store, "offlineLibrary", "Offline library", Icons.Filled.Download) { onDismiss(); onOpenScreen(PioneerScreen.Library) }
         },
         MenuSlot("installUBlock", shows("installUBlock", !uBlockInstalled)) {
             MenuRowVisible(store, "installUBlock", "Install uBlock Origin", null) {

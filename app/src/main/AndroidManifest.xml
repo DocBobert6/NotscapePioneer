@@ -3,10 +3,19 @@
      GeckoView browser: tabs, history, bookmarks, start page,
      menu + Customize. Debug-signed only; no release key
      exists for this app. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Site permissions are gated behind the per-site prompt —
+         declaring them here does not grant anything by itself. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="false"
@@ -34,6 +43,32 @@
                 <data android:scheme="https" />
             </intent-filter>
         </activity>
+
+        <!-- The offline media player (§8.5). -->
+        <activity
+            android:name=".media.PlayerActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+            android:exported="false"
+            android:supportsPictureInPicture="true"
+            android:theme="@style/Theme.Pioneer" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- WorkManager's foreground service, typed for data
+             transfer so download jobs can run in the foreground
+             under Android 14+ rules. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
 
         <!-- Cast probe only: Default Media Receiver, discovery logging.
              No Cast session is ever launched by the spike. -->

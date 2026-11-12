@@ -4,5 +4,5 @@ package net.nspioneer.browser.ui
  * sub-screens MainActivity navigates to. Library screens open a URL
  * by returning to Browser and loading it in the active tab. */
 enum class PioneerScreen {
-    Browser, Bookmarks, History, Favorites, Settings, Licences, Diagnostics
+    Browser, Bookmarks, History, Favorites, Downloads, Library, Settings, Licences, Diagnostics
 }
