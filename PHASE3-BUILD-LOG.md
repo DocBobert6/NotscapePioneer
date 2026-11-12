@@ -255,6 +255,91 @@ a SAF `content://` pick; permissions on permission.site; popups
 same wallpaper; in-page fullscreen. Copy status from Diagnostics for
 results. Cold start and PSS from the Diagnostics screen.
 
+## Row F follow-up — 0.1.0-alpha.9 (2026-11-12)
+
+Row F is now **PASS (unit behaviour)**. Two commits, both on top of
+Batch 4 tip `cccf7933` (0.1.0-alpha.8):
+
+- `a38375c1` "Row F: download unit tests (0.1.0-alpha.9)" — the tests
+  + Robolectric dep + version bump (code 9).
+- `ccdae4bd` "Row F fix: sanitize unicode expectation …" — one
+  expectation was wrong in the test, not in production
+  (`sanitize("café au lait")` is `"caf__au_lait"`, not
+  `"caf_au_lait"`: 'é' and the space each become `_`).
+
+CI: run 43171105304 on `ccdae4bd`, **success** (the `a38375c1`
+run 43170667918 went red on that single expectation, 86 tests
+completed / 1 failed; the fix run is green). `testDebugUnitTest`
+ran 86 tests, 0 failures: 33 pre-existing (FilterEngine 17,
+UserBlockRules 10, IcoDecoder 6) + **53 new download tests**
+(DownloadsTest 40, DownloadsStoreTest 13).
+
+What the new tests cover (`media/Downloads.kt`, no production
+code changed, no behaviour changed):
+
+- Pure, plain-JVM (`DownloadsTest`): `contentRangeTotal`
+  (standard 206, suffix-range response, open-ended, `*`,
+  missing/malformed, whitespace, negative total passed
+  through); `encodeJobBundle`/`decodeJobBundle` round-trip
+  (special chars, unicode, empty values, blank input, pairs
+  without `=`, duplicate keys last-wins; malformed `%`
+  propagates `IllegalArgumentException` — documented
+  contract); `sanitize`, `dedupFileName`,
+  `applyFileNameOverride`, `cookieForRequest` (host-scoped
+  snapshot vs live cookie), `notificationIdFor` (30-bit fold
+  + done bit), `shouldQueue`, notice texts (private titles
+  hidden), `isResumableEngine`, `formatBytes`/`formatSpeed`/
+  `formatEta`, `progressDetailLine`, `renameOrCopy`,
+  cancel/pause flags, `sleepChecked` (0 ms + prompt throw
+  on cancel).
+- Store-backed (`DownloadsStoreTest`, Robolectric 4.14.1,
+  runtime SDK pinned to 35): `engineFor` (default `dm`,
+  bundle engine, missing key), `locationFor` (bundle wins,
+  private → `app`, setting fallback, blank bundle value),
+  job-bundle save/read/update/clear round-trip through the
+  store, `activeDownloadCount`, `nextDownloadId` collision
+  avoidance, `pause` (resumable-only) and
+  `writeTerminalIfNotPaused` respecting a pause.
+- Robolectric was needed because a plain JVM test cannot
+  build a `PioneerStore` (constructor reads
+  `context.filesDir` and builds a `Handler(Looper.
+  getMainLooper())` — both throw on the android.jar stubs),
+  and the store is not an interface and its constructor is
+  private, so no fake was possible without touching
+  production code. `isIncludeAndroidResources = true` was
+  added to the test options for the Robolectric run.
+
+Proved untestable as specified (evidence, not gaps to hide):
+
+- `media/DownloadWorkers.kt`: nothing pure in it. The shared
+  `runDownloadWorker` is a private `CoroutineWorker`
+  extension needing WorkManager + a real record; the four
+  workers are thin `doWork()` wrappers over
+  `Downloads.run*Job`, which need network and files. No
+  unit test was forced onto them.
+- Network/service paths (`probeSegmented`, `routeNewDownload`
+  / `promoteQueued`, `finishDownload`, the HLS/DASH/segmented
+  /merge jobs themselves) stay device/network-verified
+  (scorecard row G), as before.
+
+Verified APK (run 43171105304, artifact 13922173046
+`pioneer-alpha-apk`, zip 121,564,695 bytes — exact match,
+real zip): **APK 221,977,198 bytes**, SHA-256
+`0c64d6311421ad9228cb730b48d6784c79327ebca81716ff553293e06956b121`,
+package `net.nspioneer.browser`, versionName
+`0.1.0-alpha.9`, versionCode 9, minSdk 26, targetSdk 36,
+launcher `MainActivity`, **arm64-v8a only**, `libxul.so` +
+`assets/omni.ja` present. Local copy:
+`artifacts/alpha9/app-debug.apk`.
+- Signing note: the APK carries an APK Signature Scheme **v2**
+  block (id `0x7109871a`, verified by parsing the signing
+  block) but no v1 jar-signature files — androguard's
+  `get_signatures()` (v1) reads empty. minSdk 26 means every
+  target device verifies v2, so this does not affect
+  installability; it differs from the alpha.4 log's
+  "debug-signed (v1+v2)" and is a toolchain default, not a
+  change made here (no signing config was touched).
+
 ## Open / follow-up (not Phase 3 scope)
 
 - Row F download unit tests (defined, small).
