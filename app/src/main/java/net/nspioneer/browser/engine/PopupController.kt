@@ -11,18 +11,17 @@ import net.nspioneer.browser.data.PioneerStore
 
 /** Strict-popup decision (Mariner's model, §8.8): allowed when strict is
  *  off, or when the site is whitelisted per-site. A blacklisted site's
- *  popup is denied without asking and its URL is captured for Open
- *  once / Open all — the notice is how he sees what was blocked
- *  (alpha.14: no more silent blacklist, which was the original
- *  "blocked with no notice" complaint). An unlisted site is ASK:
- *  the request is held for his choice, never answered by default.
- *  Pure — unit-tested (PopupControllerTest). */
-enum class PopupVerdict { ALLOW, ASK, DENY_CAPTURE }
+ *  popup is denied silently, without asking — no tab, no capture, no
+ *  notice (alpha.21: Robert's decision, restoring alpha.13's
+ *  DENY_SILENT; alpha.14's capture + notice was the interim). An
+ *  unlisted site is ASK: the request is held for his choice, never
+ *  answered by default. Pure — unit-tested (PopupControllerTest). */
+enum class PopupVerdict { ALLOW, ASK, DENY_SILENT }
 
 fun decidePopup(strict: Boolean, allowPopups: Boolean, blockPopups: Boolean): PopupVerdict =
     when {
         !strict || allowPopups -> PopupVerdict.ALLOW
-        blockPopups -> PopupVerdict.DENY_CAPTURE
+        blockPopups -> PopupVerdict.DENY_SILENT
         else -> PopupVerdict.ASK
     }
 
@@ -55,10 +54,10 @@ fun answerEffect(choice: PopupChoice): PopupAnswerEffect = when (choice) {
 /** A gesture link (target=_blank, no popup prompt) is blocked
  *  only when the strict decision for its source site denies —
  *  the same verdict as the prompt path, so a blacklisted site's
- *  tapped links are denied + captured like its popups. Pure —
+ *  tapped links are denied silently like its popups. Pure —
  *  unit-tested (PopupControllerTest). */
 fun isGestureBlocked(strict: Boolean, allowPopups: Boolean, blockPopups: Boolean): Boolean =
-    decidePopup(strict, allowPopups, blockPopups) == PopupVerdict.DENY_CAPTURE
+    decidePopup(strict, allowPopups, blockPopups) == PopupVerdict.DENY_SILENT
 
 /** Cross-site test for a tapped link (alpha.20): true when the
  *  target host differs from the source tab's host. Blank hosts
@@ -200,10 +199,13 @@ class PopupController(
                     status("popup allowed: ${target ?: "(no target)"} (tab ${source?.id ?: "?"})")
                     result.complete(prompt.confirm(AllowOrDeny.ALLOW))
                 }
-                PopupVerdict.DENY_CAPTURE -> {
-                    status("popup blocked: ${target ?: "(no target)"} (tab ${source?.id ?: "?"})")
+                PopupVerdict.DENY_SILENT -> {
+                    // Alpha.21: blacklisted — denied silently.
+                    // No capture, so no notice; the status line
+                    // is diagnostics only (Copy status), so the
+                    // denial is still traceable on device.
+                    status("popup blocked: ${target ?: "(no target)"} (tab ${source?.id ?: "?"}) — blacklisted, silent")
                     result.complete(prompt.confirm(AllowOrDeny.DENY))
-                    capture(target, host)
                 }
                 PopupVerdict.ASK -> {
                     // A second request while one is pending
@@ -244,9 +246,8 @@ class PopupController(
      * SOURCE tab's host (alpha.20). Whitelisted / blacklisted /
      * strict-off sites are decided synchronously: an allowed
      * link's tab is created at once (the factory runs here); a
-     * blacklisted link is denied with no tab, exactly as
-     * alpha.14's gesture path (notice + capture — the silent
-     * change is alpha.21, not this build). An UNLISTED site's
+     * blacklisted link is denied silently with no tab (alpha.21
+     * — no capture, no notice). An UNLISTED site's
      * link is HELD for the user's choice: the returned
      * GeckoResult is intentionally uncompleted, and the shell's
      * four-choice prompt answers it via [answerPending]. A
@@ -272,7 +273,7 @@ class PopupController(
                     result.complete(runCatching { createTab() }.getOrNull())
                     return result
                 }
-                PopupVerdict.DENY_CAPTURE -> {
+                PopupVerdict.DENY_SILENT -> {
                     noteGestureDenied(targetUri ?: "", host)
                     return null
                 }
@@ -402,8 +403,9 @@ class PopupController(
     /** Should a gesture link (target=_blank) from [host] open?
      *  False when the strict decision for that site denies
      *  (blacklisted) — the same verdict as the prompt path. The
-     *  engine denies it (no tab) and captures the URL via
-     *  [noteGestureDenied]. */
+     *  engine denies it (no tab) and logs it via
+     *  [noteGestureDenied]; nothing is captured, so no notice
+     *  appears (alpha.21). */
     fun gestureAllowed(host: String): Boolean {
         val site = if (host.isBlank()) null else store.siteSetting(host)
         return !isGestureBlocked(
@@ -413,11 +415,11 @@ class PopupController(
         )
     }
 
-    /** A gesture link from a blacklisted site: deny it like any
-     *  other blocked popup — capture the URL for the notice. */
+    /** A gesture link from a blacklisted site: deny it silently
+     *  (alpha.21) — no tab, no capture, no notice. The status
+     *  line is diagnostics only (Copy status). */
     fun noteGestureDenied(url: String, host: String) {
-        status("popup blocked: $url (gesture link on $host — blacklisted)")
-        capture(url, host)
+        status("popup blocked: $url (gesture link on $host — blacklisted, silent)")
     }
 
     /**

@@ -1471,9 +1471,8 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                         ) { createNewSessionTab(tab, uri, isPopup = false) }
                     }
                     // A tapped link from a blacklisted site: deny
-                    // it like any other blocked popup (alpha.14)
-                    // — no tab is created, and the URL is
-                    // captured for the notice. Tapping a link on
+                    // it silently (alpha.21) — no tab is created,
+                    // no capture, no notice. Tapping a link on
                     // a site he distrusts is not consent for its
                     // popups to open.
                     if (!popupController.gestureAllowed(sourceHost)) {

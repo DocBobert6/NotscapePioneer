@@ -48,12 +48,12 @@ class PopupControllerTest {
         )
     }
 
-    @Test fun decide_strictOn_blacklisted_deniesAndCaptures() {
-        // Alpha.14: a blacklisted site's popup is denied
-        // without asking and its URL is captured for the
-        // notice — no more silent blacklist.
+    @Test fun decide_strictOn_blacklisted_deniesSilently() {
+        // Alpha.21 (Robert's decision, restoring alpha.13):
+        // a blacklisted site's popup is denied silently,
+        // without asking — no capture, no notice.
         assertEquals(
-            PopupVerdict.DENY_CAPTURE,
+            PopupVerdict.DENY_SILENT,
             decidePopup(strict = true, allowPopups = false, blockPopups = true)
         )
     }
