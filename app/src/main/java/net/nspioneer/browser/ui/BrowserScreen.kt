@@ -1966,7 +1966,13 @@ fun BrowserScreen(
                             Spacer(Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    if (pending.sourceHost.isNotBlank()) {
+                                    if (pending.isGestureLink) {
+                                        if (pending.sourceHost.isNotBlank()) {
+                                            "Open link on ${pending.sourceHost}?"
+                                        } else {
+                                            "Open link in a new tab?"
+                                        }
+                                    } else if (pending.sourceHost.isNotBlank()) {
                                         "Allow popup on ${pending.sourceHost}?"
                                     } else {
                                         "Allow popup?"
@@ -1993,8 +1999,13 @@ fun BrowserScreen(
                             }
                         }
                         Text(
-                            "Trust always allows this site's popups. " +
-                                "Don't trust always denies them.",
+                            if (pending.isGestureLink) {
+                                "Trust always allows links from this site. " +
+                                    "Don't trust always denies them."
+                            } else {
+                                "Trust always allows this site's popups. " +
+                                    "Don't trust always denies them."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp)
