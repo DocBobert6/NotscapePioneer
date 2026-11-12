@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -33,24 +33,33 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import net.nspioneer.browser.R
 import net.nspioneer.browser.data.PioneerStore
 
 /**
  * Mariner's theme, carried to Pioneer so Pioneer looks like
  * Mariner: the iOS-26 semantic colours, the SF type scale, the
  * concentric-radius shape ladder, the solid-frost recipe.
- * Adapted: Pioneer ships no bundled brand fonts (no res/font
- * in this app), so the wordmark faces are the platform default;
- * the interface-font setting does not exist in Phase 2, so the
- * UI font is always the platform default.
+ * The banner typefaces are Mariner's Phase G pairing, carried
+ * verbatim: Cormorant Garamond Bold carries the wordmark;
+ * Montserrat carries the letterspaced line and the subtitle.
+ * Both are OFL-licensed. The interface-font setting does not
+ * exist in Phase 2, so the UI font is always the platform
+ * default.
  */
-val WordmarkFontFamily: FontFamily = FontFamily.Default
-val SmallCapsFontFamily: FontFamily = FontFamily.Default
+val WordmarkFontFamily = FontFamily(
+    Font(R.font.cormorant_bold)
+)
+val SmallCapsFontFamily = FontFamily(
+    Font(R.font.montserrat_regular, FontWeight.Normal),
+    Font(R.font.montserrat_semibold, FontWeight.SemiBold)
+)
 
 val IosInk = Color(0xFF1C1C1E)
 val IosInkDark = Color(0xFFF2F2F7)
@@ -235,7 +244,7 @@ fun AppHeader(
             ) {
                 IconButton(onClick = onBack) {
                     Icon(
-                        Icons.Filled.ArrowBack,
+                        Icons.Filled.ChevronLeft,
                         contentDescription = "Back",
                         modifier = Modifier.size(28.dp)
                     )

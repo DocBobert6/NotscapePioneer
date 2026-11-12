@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -36,6 +35,7 @@ import net.nspioneer.browser.ui.BrowserScreen
 import net.nspioneer.browser.ui.DiagnosticsScreen
 import net.nspioneer.browser.ui.DownloadsScreen
 import net.nspioneer.browser.ui.FavoritesScreen
+import net.nspioneer.browser.ui.FrostDialog
 import net.nspioneer.browser.ui.HistoryScreen
 import net.nspioneer.browser.ui.LibraryScreen
 import net.nspioneer.browser.ui.LicencesScreen
@@ -236,8 +236,10 @@ class MainActivity : ComponentActivity() {
 
                     // The uBlock install prompt: a real dialog, never
                     // auto-approved. Install grants, Later declines.
+                    // Batch 3: a FrostDialog, like every other dialog
+                    // in the app — not a plain AlertDialog.
                     uBlockPrompt?.let { prompt ->
-                        AlertDialog(
+                        FrostDialog(
                             onDismissRequest = {
                                 prompt.decide(false)
                                 uBlockPrompt = null

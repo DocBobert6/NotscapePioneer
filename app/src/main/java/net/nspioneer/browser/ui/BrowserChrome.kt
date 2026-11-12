@@ -34,18 +34,20 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -89,9 +91,11 @@ import net.nspioneer.browser.engine.EngineTab
  *   Offline library, Save as PDF, Save offline, Screenshot, Scan
  *   QR, Add to home screen, Block an element, Site blocking,
  *   Global ad blocking (uBlock Origin is the blocker in Pioneer).
- * - Desktop site is omitted in Phase 2: no GeckoView user-agent
- *   override has been confirmed by the researcher, so the row
- *   cannot do anything real. Recorded as a known gap.
+ * - Desktop site is a real row: it flips the GeckoView
+ *   user-agent + viewport to desktop via EngineTab.setDesktopMode
+ *   and stores the choice per site; the choice is restored on
+ *   relaunch. (The Phase 2 comment claiming it was omitted was
+ *   stale — the row was implemented in Phase 2.)
  * - Zoom is a real control card in the menu (per-site text zoom
  *   from the store, applied via EngineTab.setTextZoom), not a row.
  */
@@ -124,6 +128,7 @@ internal fun BoxScope.FindBar(
     findText: String,
     findCount: Int,
     findOrdinal: Int,
+    findFound: Boolean,
     onFindTextChange: (String) -> Unit,
     onFindNext: (Boolean) -> Unit,
     onClose: () -> Unit
@@ -220,10 +225,17 @@ internal fun BoxScope.FindBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            if (findCount > 0) {
-                "${findOrdinal + 1} / $findCount"
-            } else {
-                "0 / 0"
+            // Batch 3: GeckoView reports an unknown match total
+            // as -1 (FinderResult.total), and the old code rendered
+            // that as "0 / 0" even when matches exist. An unknown
+            // total renders count-only / "…" instead; "0 / 0" is
+            // reserved for a finished search with no matches (and
+            // for a finder error, which also reports found=false).
+            when {
+                findCount > 0 -> "${findOrdinal + 1} / $findCount"
+                findCount == -1 && findFound && findOrdinal >= 0 -> "${findOrdinal + 1} / …"
+                findCount == -1 && findFound -> "…"
+                else -> "0 / 0"
             },
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurface,
@@ -616,7 +628,7 @@ internal fun BrowserMenuRowsContent(
             }
         },
         MenuSlot("copyPageUrl", shows("copyPageUrl", hasPage)) {
-            MenuRowVisible(store, "copyPageUrl", "Copy page URL", null) {
+            MenuRowVisible(store, "copyPageUrl", "Copy page URL", Icons.Filled.ContentCopy) {
                 onDismiss()
                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("link", url))
@@ -624,7 +636,7 @@ internal fun BrowserMenuRowsContent(
             }
         },
         MenuSlot("openOtherBrowser", shows("openOtherBrowser", hasPage)) {
-            MenuRowVisible(store, "openOtherBrowser", "Open in other browser", null, isPrivate = isPrivate) {
+            MenuRowVisible(store, "openOtherBrowser", "Open in other browser", Icons.Filled.OpenInBrowser, isPrivate = isPrivate) {
                 onDismiss()
                 runCatching {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -777,7 +789,7 @@ internal fun BrowserMenuRowsContent(
     }
     GroupedCard {
         Column(modifier = Modifier.padding(vertical = 6.dp)) {
-            MenuRow("Customize menu", Icons.Filled.Edit) {
+            MenuRow("Customize menu", Icons.Filled.Tune) {
                 onDismiss(); onCustomize()
             }
         }

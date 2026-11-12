@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -200,6 +201,47 @@ fun SettingsScreen(
                     selected = themeMode == "dark",
                     onClick = { store.putSetting("themeMode", "dark") }
                 )
+                InsetDivider()
+                // Batch 3: Material You (Mariner SettingsScreen.kt
+                // ~894-910). The System theme does NOT yield the
+                // dynamic palette — NotscapeTheme only uses
+                // dynamicLight/DarkColorScheme when themeMode starts
+                // with "materialyou" — so these rows are the only
+                // way to select it. The parent row selects the
+                // dynamic palette following the system; its three
+                // variants sit inline beneath it.
+                ChoiceRow(
+                    label = "Material You",
+                    selected = themeMode.startsWith("materialyou"),
+                    onClick = { store.putSetting("themeMode", "materialyou") }
+                )
+                if (themeMode.startsWith("materialyou")) {
+                    listOf(
+                        Triple("Follow system", "materialyou", themeMode == "materialyou"),
+                        Triple("Light", "materialyou-light", themeMode == "materialyou-light"),
+                        Triple("Dark", "materialyou-dark", themeMode == "materialyou-dark")
+                    ).forEach { (label, value, active) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                                .clickable { store.putSetting("themeMode", value) }
+                                .padding(vertical = 7.dp)
+                        ) {
+                            Spacer(Modifier.width(44.dp))
+                            Text(
+                                label, modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            if (active) {
+                                Icon(
+                                    Icons.Filled.Check, contentDescription = "Selected",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+                }
                 InsetDivider()
                 // Batch 1: address bar position (Mariner
                 // SettingsScreen.kt:927-934), default Bottom.

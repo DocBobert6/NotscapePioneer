@@ -14,8 +14,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.EnumSet
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 /**
@@ -485,6 +489,21 @@ class PioneerStore private constructor(context: Context) {
         }
     }
 
+    /** Mirrors Mariner `restoreHistory` (undo): the exact
+     *  objects, ids and order are kept, then the list is
+     *  sorted newest-first. Batch 3: history undo used to
+     *  re-add via [addHistory], which minted a new id and a
+     *  fresh timestamp and so moved the entry. */
+    fun restoreHistory(items: List<HistoryEntry>) {
+        synchronized(lock) {
+            for (h in items) {
+                if (history.none { it.id == h.id }) history.add(h)
+            }
+            history.sortByDescending { it.visitedAt }
+            mutated(Part.HISTORY)
+        }
+    }
+
     /** Mirrors Mariner `clearHistoryOlderThan`: 0 clears
      *  everything, like [clearHistory]. */
     fun clearHistoryOlderThan(cutoffMs: Long) {
@@ -833,12 +852,28 @@ class PioneerStore private constructor(context: Context) {
 
     // ---------- favicons ----------
 
-    /** Phase 2: no favicon fetching. Returns the cached
-     *  file only — the same `favicons/<host.hashCode()>.png`
-     *  location Mariner's `loadFavicon` reads, so a later
-     *  phase that captures favicons can reuse it — and
-     *  null otherwise, so start-page tiles fall back to the
-     *  title letter as Mariner already does. */
+    // In-memory favicon cache, so a host fetched once is never
+    // fetched again in this process (Mariner's engineFaviconCache).
+    private val faviconMemoryCache = ConcurrentHashMap<String, Bitmap>()
+
+    /** Mirrors Mariner `saveFavicon`: persist one host's icon,
+     *  scaled to 96x96, as `favicons/<host.hashCode()>.png`. */
+    fun saveFavicon(host: String, bitmap: Bitmap) {
+        if (host.isBlank()) return
+        runCatching {
+            val scaled = Bitmap.createScaledBitmap(bitmap, 96, 96, true)
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.PNG, 100, out)
+            File(File(filesDir, "favicons"), host.hashCode().toString() + ".png")
+                .apply { parentFile?.mkdirs() }
+                .writeBytes(out.toByteArray())
+            if (scaled != bitmap) scaled.recycle()
+        }
+    }
+
+    /** Returns the cached file only — the same
+     *  `favicons/<host.hashCode()>.png` location Mariner's
+     *  `loadFavicon` reads. */
     fun loadFavicon(host: String): Bitmap? {
         if (host.isBlank()) return null
         val file = File(File(filesDir, "favicons"), host.hashCode().toString() + ".png")
@@ -846,6 +881,59 @@ class PioneerStore private constructor(context: Context) {
         return runCatching {
             BitmapFactory.decodeFile(file.absolutePath)
         }.getOrNull()
+    }
+
+    /** Batch 3: fetch a host's favicon and cache it (memory +
+     *  disk), mirroring Mariner's `loadEngineFavicon`
+     *  (SettingsScreen.kt): one GET of `https://<host>/favicon.ico`
+     *  with short timeouts, decoded, then saved via
+     *  [saveFavicon] so [loadFavicon] finds it next time.
+     *  GeckoView supplies no favicon path (Bug 1770989, still
+     *  open), so fetching is the only way tiles and rows ever
+     *  show a real icon. A real ICO container decodes via
+     *  [IcoDecoder] — `BitmapFactory` alone returns null for
+     *  ICO bytes. Blocking: call from Dispatchers.IO. Returns
+     *  null on any failure, so callers fall back to the generic
+     *  icon. */
+    fun fetchFavicon(host: String): Bitmap? {
+        if (host.isBlank()) return null
+        faviconMemoryCache[host]?.let { return it }
+        loadFavicon(host)?.let {
+            faviconMemoryCache[host] = it
+            return it
+        }
+        val fetched = runCatching {
+            val conn = URL("https://$host/favicon.ico")
+                .openConnection() as HttpURLConnection
+            conn.connectTimeout = 6000
+            conn.readTimeout = 6000
+            conn.setRequestProperty(
+                "User-Agent", "Mozilla/5.0 (Linux; Android 14)"
+            )
+            conn.inputStream.use { stream ->
+                decodeFaviconBytes(stream.readBytes())
+            }
+        }.getOrNull()
+        if (fetched != null) {
+            faviconMemoryCache[host] = fetched
+            saveFavicon(host, fetched)
+        }
+        return fetched
+    }
+
+    /** Decode fetched favicon bytes: a PNG/JPEG/WebP decodes
+     *  directly; a real ICO container decodes via [IcoDecoder]
+     *  (largest entry — PNG-embedded entries go back through
+     *  `BitmapFactory`, BMP entries become a Bitmap here). */
+    private fun decodeFaviconBytes(bytes: ByteArray): Bitmap? {
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { return it }
+        val entry = extractLargestIcoEntry(bytes) ?: return null
+        BitmapFactory.decodeByteArray(entry, 0, entry.size)?.let { return it }
+        val decoded = parseIcoBmp(entry) ?: return null
+        return Bitmap.createBitmap(
+            decoded.pixels, decoded.width, decoded.height,
+            Bitmap.Config.ARGB_8888
+        )
     }
 
     // ---------- bookmark HTML ----------

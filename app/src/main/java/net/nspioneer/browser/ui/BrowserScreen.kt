@@ -1352,6 +1352,7 @@ fun BrowserScreen(
                 findText = findText,
                 findCount = result?.count ?: 0,
                 findOrdinal = result?.ordinal ?: 0,
+                findFound = result?.found ?: false,
                 onFindTextChange = { text ->
                     findText = text
                     tab.find(text)

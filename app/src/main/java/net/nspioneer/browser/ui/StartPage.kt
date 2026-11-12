@@ -1,6 +1,5 @@
 package net.nspioneer.browser.ui
 
-import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
@@ -26,9 +25,12 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -59,24 +61,20 @@ import net.nspioneer.browser.data.PioneerStore
  * Mariner — here they are gone outright), Continue watching,
  * Continue reading, Shortcuts pins, custom-photo wallpaper.
  * Wallpaper follows the theme (light/dark colours only — no
- * custom photo in Phase 2). Favicons are letter tiles in
- * Phase 2: the store returns null unless a cached file exists,
- * and no favicon is ever fetched for a tile.
+ * custom photo in Phase 2). Favicons are fetched in Batch 3:
+ * tiles use [rememberSiteFavicon], which fetches
+ * `https://<host>/favicon.ico` once and caches it; the fallback
+ * is Mariner's generic Public icon, never a letter tile.
  */
 
 /**
- * A site tile icon: the persisted favicon for the host when one
- * was saved, else the title's initial letter in the kit's tinted
- * circle. Favicons are local-only.
+ * A site tile icon: the fetched favicon for the host, else
+ * Mariner's generic Public icon in the kit's tinted circle.
+ * Batch 3: letter tiles are gone — see [rememberSiteFavicon].
  */
 @Composable
-private fun TileIcon(store: PioneerStore, url: String, title: String) {
-    val host = remember(url) {
-        runCatching { Uri.parse(url).host }.getOrNull() ?: ""
-    }
-    val fav: Bitmap? = remember(host) {
-        if (host.isBlank()) null else store.loadFavicon(host)
-    }
+private fun TileIcon(store: PioneerStore, url: String) {
+    val fav = rememberSiteFavicon(store, url)
     Box(
         modifier = Modifier.size(52.dp).clip(CircleShape)
             .background(
@@ -92,10 +90,11 @@ private fun TileIcon(store: PioneerStore, url: String, title: String) {
                     .clip(RoundedCornerShape(10.dp))
             )
         } else {
-            Text(
-                title.trim().firstOrNull()?.uppercase() ?: "?",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary
+            Icon(
+                Icons.Filled.Public,
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -228,7 +227,7 @@ fun StartPage(
                                             onLongClick = { favMenuFor = fav.id }
                                         )
                                     ) {
-                                        TileIcon(store, fav.url, fav.title)
+                                        TileIcon(store, fav.url)
                                         Spacer(Modifier.height(4.dp))
                                         Text(
                                             fav.title, maxLines = 1,
@@ -278,7 +277,7 @@ fun StartPage(
                                             onLongClick = { frequentMenuFor = host }
                                         )
                                     ) {
-                                        TileIcon(store, entry.url, entry.title.ifBlank { entry.url })
+                                        TileIcon(store, entry.url)
                                         Spacer(Modifier.height(4.dp))
                                         Text(
                                             host, maxLines = 1,
@@ -324,7 +323,7 @@ fun StartPage(
                                     modifier = Modifier.padding(12.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    TileIcon(store, b.url, b.title)
+                                    TileIcon(store, b.url)
                                     Spacer(Modifier.width(12.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(

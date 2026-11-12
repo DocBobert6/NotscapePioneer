@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Share
@@ -98,13 +99,16 @@ import net.nspioneer.browser.media.rememberAskDownloadNotifPermission
  * Adapted points:
  * - PioneerStore (no Room/AppStore), folder helpers from the
  *   data package, export via store.exportBookmarksHtml().
- * - No material-icons-extended dependency in Pioneer: the
- *   favicon fallback is a letter tile, not the Public icon.
- * - History undo: the Phase 2 store API has no restoreHistory,
- *   so an undone delete re-adds the entries via addHistory
- *   (new id, fresh timestamp) instead of restoring them
- *   exactly. Bookmark undo still restores exactly via
- *   restoreBookmarks, which the API does provide.
+ * - Favicons are fetched, not letter tiles (Batch 3): rows
+ *   use [rememberSiteFavicon], which fetches
+ *   `https://<host>/favicon.ico` once and caches it; the
+ *   fallback is Mariner's generic Public icon. (GeckoView
+ *   supplies no favicon path, Bug 1770989.)
+ * - History undo restores exactly via
+ *   [PioneerStore.restoreHistory] (Batch 3, mirroring
+ *   Mariner): the deleted entries come back with their
+ *   original ids and timestamps. Bookmark undo already did
+ *   this via restoreBookmarks.
  * - GroupTitle / SettingsCard / InsetDivider are carried here
  *   from Mariner's SettingsScreen.kt (they are shared kit
  *   pieces, not settings logic).
@@ -308,30 +312,12 @@ internal fun dayLabel(visitedAt: Long): String {
     ).format(java.util.Date(visitedAt))
 }
 
-/** A letter tile for a bookmark/history/favourite row when no
- * favicon is cached: the title's initial in the kit's tinted
- * circle. Favicons are letter tiles in Phase 2 (no fetching). */
+/** A row's site icon: the fetched favicon for the host, else
+ *  Mariner's generic Public icon. Batch 3: letter tiles are
+ *  gone — see [rememberSiteFavicon]. */
 @Composable
-private fun LetterTile(letter: String) {
-    Box(
-        modifier = Modifier.size(20.dp).background(
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-            CircleShape
-        ),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            letter.uppercase().take(1),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary
-        )
-    }
-}
-
-@Composable
-private fun RowFavicon(store: PioneerStore, url: String, title: String) {
-    val host = runCatching { Uri.parse(url).host }.getOrNull()
-    val fav = host?.let { remember(it) { store.loadFavicon(it) } }
+private fun RowFavicon(store: PioneerStore, url: String) {
+    val fav = rememberSiteFavicon(store, url)
     if (fav != null) {
         Image(
             bitmap = fav.asImageBitmap(),
@@ -339,7 +325,12 @@ private fun RowFavicon(store: PioneerStore, url: String, title: String) {
             modifier = Modifier.size(20.dp)
         )
     } else {
-        LetterTile(title.trim().firstOrNull()?.toString() ?: "?")
+        Icon(
+            Icons.Filled.Public,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -576,7 +567,7 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                                                 }
                                             )
                                         } else {
-                                            RowFavicon(store, b.url, b.title)
+                                            RowFavicon(store, b.url)
                                         }
                                     },
                                     title = {
@@ -884,12 +875,11 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
     var showClearHistory by remember { mutableStateOf(false) }
     val historySnackHost = remember { SnackbarHostState() }
     val historySnackScope = rememberCoroutineScope()
-    // Undo for history re-adds the entries via addHistory: the
-    // Phase 2 store API has no restoreHistory, so an undone
-    // delete comes back with a new id and a fresh timestamp
-    // instead of its original visit time.
+    // Undo for history restores the deleted entries exactly
+    // (Batch 3, mirroring Mariner's restoreHistory): the same
+    // ids and timestamps, so the ordering does not change.
     fun undoDelete(deleted: List<net.nspioneer.browser.data.HistoryEntry>) {
-        deleted.forEach { store.addHistory(it.title, it.url) }
+        store.restoreHistory(deleted)
     }
     SubScreen("History", onBack) {
         OutlinedTextField(
@@ -994,7 +984,7 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
                                                         }
                                                     )
                                                 } else {
-                                                    RowFavicon(store, h.url, h.title)
+                                                    RowFavicon(store, h.url)
                                                 }
                                             },
                                             trailing = {
@@ -1118,12 +1108,7 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                         KitGroupedRow(
                             onClick = { onOpenUrl(f.url) },
                             leading = {
-                                val host = runCatching {
-                                    Uri.parse(f.url).host
-                                }.getOrNull()
-                                val fav = host?.let {
-                                    remember(it) { store.loadFavicon(it) }
-                                }
+                                val fav = rememberSiteFavicon(store, f.url)
                                 if (fav != null) {
                                     Image(
                                         bitmap = fav.asImageBitmap(),
