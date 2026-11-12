@@ -1,48 +1,72 @@
 package net.nspioneer.browser.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.speech.RecognizerIntent
+import android.view.MotionEvent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.OpenInBrowser
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -50,11 +74,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,14 +87,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.net.URLEncoder
@@ -179,7 +219,53 @@ fun BrowserScreen(
     var findOpen by remember { mutableStateOf(false) }
     var findText by remember { mutableStateOf("") }
     var editingAddress by remember { mutableStateOf(false) }
-    var addressText by remember(tab.id) { mutableStateOf(if (isHome) "" else tabUrl) }
+    // Mariner's field value (BrowserScreen.kt:3830): a
+    // TextFieldValue so focusing the pill selects the whole
+    // URL, and a mic result lands selected too.
+    var fieldValue by remember(tab.id) {
+        mutableStateOf(TextFieldValue(if (isHome) "" else tabUrl))
+    }
+
+    // ---- Batch 1: floating address bar ----
+    // Reading revision subscribes this screen to store
+    // mutations, so a barPosition change in Settings
+    // moves the bar the moment the user comes back.
+    @Suppress("UNUSED_VARIABLE")
+    val storeRev = store.revision
+    val barAtBottom = store.setting("barPosition", "bottom") != "top"
+    // Scroll-hide (Mariner BrowserScreen.kt:2604-2607):
+    // down past 80px hides the bar, any up-scroll shows
+    // it. The bar never hides while typing or on the
+    // start page (the AnimatedVisibility condition).
+    var barHidden by remember { mutableStateOf(false) }
+    var lastScrollY by remember { mutableIntStateOf(0) }
+    // Pull-to-refresh (Mariner BrowserScreen.kt:2200-2246):
+    // measured on the GeckoView itself; pullOffsetPx
+    // drives the frost indicator.
+    var pullRefreshing by remember { mutableStateOf(false) }
+    var pullOffsetPx by remember { mutableFloatStateOf(0f) }
+    val pullTriggerPx = with(LocalDensity.current) { 84.dp.toPx() }
+    var pullStartX by remember { mutableFloatStateOf(0f) }
+    var pullStartY by remember { mutableFloatStateOf(0f) }
+    var pullTracking by remember { mutableStateOf(false) }
+    // Voice input (Mariner BrowserScreen.kt:3870-3911):
+    // the mic result waits here until the bar takes
+    // focus, then lands in the field, selected.
+    var micPending by remember { mutableStateOf<String?>(null) }
+    val barFocusRequester = remember { FocusRequester() }
+    val speechLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val heard = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+            if (!heard.isNullOrBlank()) {
+                micPending = heard
+                barFocusRequester.requestFocus()
+            }
+        }
+    }
 
     // A tab that navigates away from blank leaves its home state.
     LaunchedEffect(tabUrl) {
@@ -208,7 +294,30 @@ fun BrowserScreen(
     // The address field follows the tab while the user is not
     // editing it.
     LaunchedEffect(tabUrl, isHome) {
-        if (!editingAddress) addressText = if (isHome) "" else tabUrl
+        if (!editingAddress) {
+            fieldValue = TextFieldValue(if (isHome) "" else tabUrl)
+        }
+    }
+    // Scroll-hide: the engine's ScrollDelegate feeds
+    // tab.scrollY; Mariner's thresholds, verbatim
+    // (BrowserScreen.kt:2604-2607). A tab switch resets
+    // the reference point and shows the bar again.
+    LaunchedEffect(tab.id) {
+        lastScrollY = tab.scrollY.value
+        barHidden = false
+    }
+    LaunchedEffect(tab.scrollY.value) {
+        val y = tab.scrollY.value
+        when {
+            y > lastScrollY + 6 && y > 80 -> barHidden = true
+            y < lastScrollY - 6 -> barHidden = false
+        }
+        lastScrollY = y
+    }
+    // A finished load ends a pull-to-refresh (Mariner
+    // BrowserScreen.kt:3172).
+    LaunchedEffect(tab.progress.value) {
+        if (tab.progress.value >= 100) pullRefreshing = false
     }
 
     fun openUrl(url: String) {
@@ -235,10 +344,10 @@ fun BrowserScreen(
         context.startActivity(Intent.createChooser(intent, "Share page"))
     }
 
-    val suggestions = remember(addressText, editingAddress, store.revision) {
+    val suggestions = remember(fieldValue.text, editingAddress, store.revision) {
         if (!editingAddress) emptyList()
         else {
-            val q = addressText.trim()
+            val q = fieldValue.text.trim()
             if (q.isBlank()) emptyList()
             else {
                 val bookmarkHits = store.bookmarks.filter {
@@ -605,102 +714,421 @@ fun BrowserScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Address bar.
-            Row(
-                modifier = Modifier.fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedButton(
-                    onClick = { tabSwitcherOpen = true },
-                    modifier = Modifier.padding(end = 6.dp)
-                ) {
-                    Text("${tabs.size}")
+    /** Mariner's floating address bar (BrowserScreen.kt:3663-3995),
+     *  ported: frost capsule groups, satellite circles beside
+     *  it. The download pill and vault chip are NOT here — Phase 3
+     *  / Phase 4 scope; they ride in the same column when they
+     *  land. Long-press Back/Forward history is NOT here either:
+     *  Mariner opens a history sheet (audit §1 #13), a separate
+     *  sheet outside Batch 1 — taps navigate, long-press does
+     *  nothing yet. */
+    @Composable
+    fun addressBar() {
+        val pillShape = RoundedCornerShape(50)
+        val contentColor = MaterialTheme.colorScheme.onSurface
+        val frost = Modifier.frostBar(pillShape)
+        var dragTotal by remember { mutableStateOf(0f) }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (tab.canGoBack.value || tab.canGoForward.value) {
+                Row(modifier = frost) {
+                    if (tab.canGoBack.value) {
+                        Box(
+                            modifier = Modifier.size(44.dp)
+                                .clickable { tab.goBack() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Filled.ChevronLeft, contentDescription = "Back", tint = contentColor, modifier = Modifier.size(24.dp))
+                        }
+                    }
+                    if (tab.canGoForward.value) {
+                        Box(
+                            modifier = Modifier.size(44.dp)
+                                .clickable { tab.goForward() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Filled.ChevronRight, contentDescription = "Forward", tint = contentColor, modifier = Modifier.size(24.dp))
+                        }
+                    }
                 }
-                TextField(
-                    value = addressText,
-                    onValueChange = { addressText = it },
-                    modifier = Modifier.weight(1f)
-                        .onFocusChanged { editingAddress = it.isFocused },
-                    singleLine = true,
-                    placeholder = { Text("Search or enter address") },
-                    leadingIcon = {
-                        if (tab.isPrivate) {
-                            Icon(Icons.Filled.Lock, contentDescription = "Private tab")
-                        } else {
-                            Icon(Icons.Filled.Search, contentDescription = null)
+            }
+            Box(
+                modifier = Modifier.weight(1f).then(frost)
+                    .pointerInput(tabs.size, tab.id) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { dragTotal = 0f },
+                            onHorizontalDrag = { _, amount -> dragTotal += amount },
+                            onDragEnd = {
+                                // Swiping the pill moves within the
+                                // current tab class only (normal ↔
+                                // normal, private ↔ private).
+                                val siblings = tabs.filter { it.isPrivate == tab.isPrivate }
+                                val idx = siblings.indexOfFirst { it.id == tab.id }
+                                val target = when {
+                                    dragTotal < -90f && idx in 0 until siblings.size - 1 -> siblings[idx + 1]
+                                    dragTotal > 90f && idx > 0 -> siblings[idx - 1]
+                                    else -> null
+                                }
+                                if (target != null) {
+                                    val targetIdx = tabs.indexOf(target)
+                                    if (targetIdx >= 0) onSwitchTab(targetIdx)
+                                }
+                                dragTotal = 0f
+                            },
+                            onDragCancel = { dragTotal = 0f }
+                        )
+                    }
+            ) {
+                // Loading progress fills the pill itself, in the
+                // theme's ink (Mariner BrowserScreen.kt:3741).
+                val progress = tab.progress.value
+                if (progress in 1..99) {
+                    Box(modifier = Modifier.matchParentSize().clip(pillShape)) {
+                        Box(
+                            modifier = Modifier.fillMaxHeight()
+                                .fillMaxWidth(progress / 100f)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        0f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.30f),
+                                        0.7f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.30f),
+                                        1f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0f)
+                                    )
+                                )
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (!editingAddress) {
+                        // Home: the start page is a home state per
+                        // tab in Pioneer (no homePage setting);
+                        // long-press opens it in a new tab.
+                        Box(
+                            modifier = Modifier.size(34.dp)
+                                .combinedClickable(
+                                    onClick = { homeTabIds.add(tab.id) },
+                                    onLongClick = { onNewTab(false) }
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Filled.Home, contentDescription = "Home", tint = contentColor, modifier = Modifier.size(19.dp))
                         }
-                    },
-                    trailingIcon = {
-                        if (addressText.isNotEmpty()) {
-                            IconButton(onClick = {
-                                addressText = ""
-                            }) {
-                                Icon(Icons.Filled.Close, contentDescription = "Clear")
+                    }
+                    if (tab.isPrivate) {
+                        Icon(
+                            Icons.Filled.Lock, contentDescription = "Private tab",
+                            tint = contentColor, modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(3.dp))
+                    }
+                    // The lock opens the site-information sheet
+                    // (Mariner BrowserScreen.kt:3799-3812).
+                    IconButton(
+                        onClick = { siteInfoOpen = true },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            if (tabUrl.startsWith("https://")) Icons.Filled.Lock
+                            else Icons.Filled.LockOpen,
+                            contentDescription = "Site information",
+                            tint = contentColor, modifier = Modifier.size(19.dp)
+                        )
+                    }
+                    BasicTextField(
+                        value = fieldValue,
+                        onValueChange = { fieldValue = it },
+                        modifier = Modifier.weight(1f).focusRequester(barFocusRequester).onFocusChanged { st ->
+                            if (st.isFocused && !editingAddress) {
+                                editingAddress = true
+                                val pending = micPending
+                                micPending = null
+                                fieldValue = if (pending != null) {
+                                    TextFieldValue(
+                                        pending,
+                                        TextRange(0, pending.length)
+                                    )
+                                } else {
+                                    TextFieldValue(
+                                        tabUrl,
+                                        TextRange(0, tabUrl.length)
+                                    )
+                                }
+                            } else if (!st.isFocused && editingAddress) {
+                                editingAddress = false
+                                fieldValue = TextFieldValue(if (isHome) "" else tabUrl)
                             }
+                        },
+                        singleLine = true,
+                        textStyle = TextStyle(
+                            color = contentColor,
+                            fontSize = 16.sp,
+                            // Unfocused text starts at the beginning
+                            // of the address: a centered long URL
+                            // would show its middle, cut at both ends.
+                            textAlign = TextAlign.Start
+                        ),
+                        cursorBrush = SolidColor(contentColor),
+                        keyboardOptions = KeyboardOptions(
+                            imeAction = ImeAction.Go,
+                            keyboardType = KeyboardType.Uri,
+                            autoCorrectEnabled = false,
+                            capitalization = KeyboardCapitalization.None
+                        ),
+                        keyboardActions = KeyboardActions(onGo = {
+                            goAddress(fieldValue.text)
+                        }),
+                        decorationBox = { inner ->
+                            if (fieldValue.text.isEmpty()) {
+                                Text(
+                                    "Search or enter address",
+                                    color = contentColor.copy(alpha = 0.55f),
+                                    fontSize = 16.sp, maxLines = 1,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            inner()
                         }
-                    },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(onGo = { goAddress(addressText) })
-                )
-                // Media on this page (§8.3): next to the menu
-                // button, only when the tab is not the start
-                // page and the probe has seen media. Tap runs
-                // a fresh scan and opens the sheet; long-press
-                // plays the first video.
+                    )
+                    IconButton(
+                        onClick = {
+                            val intent = Intent(
+                                RecognizerIntent.ACTION_RECOGNIZE_SPEECH
+                            ).apply {
+                                putExtra(
+                                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                )
+                                putExtra(
+                                    RecognizerIntent.EXTRA_PROMPT,
+                                    "Speak a search or address"
+                                )
+                            }
+                            runCatching { speechLauncher.launch(intent) }
+                                .onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "Voice search is not available on this device",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                        },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Mic, contentDescription = "Voice search",
+                            tint = contentColor, modifier = Modifier.size(19.dp)
+                        )
+                    }
+                    if (editingAddress && fieldValue.text.isNotEmpty()) {
+                        IconButton(
+                            onClick = { fieldValue = TextFieldValue("") },
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Icon(Icons.Filled.Close, contentDescription = "Clear", tint = contentColor, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+            if (editingAddress) {
+                TextButton(onClick = { focusManager.clearFocus() }) { Text("Cancel") }
+            } else {
+                // While a page is loading, the bar offers Stop
+                // next to the tab count; it hides the moment
+                // nothing is loading (progress 100 or idle).
+                if (tab.progress.value in 1..99) {
+                    Box(
+                        modifier = Modifier.size(44.dp).then(frost)
+                            .clickable { tab.stop() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.Close, contentDescription = "Stop loading",
+                            tint = contentColor, modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier.size(44.dp).then(frost)
+                        .combinedClickable(
+                            onClick = { tabSwitcherOpen = true },
+                            // Long-press opens a new tab without
+                            // opening the switcher.
+                            onLongClick = { onNewTab(tab.isPrivate) }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = contentColor.copy(alpha = 0.14f),
+                        modifier = Modifier.size(25.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                "${tabs.count { it.isPrivate == tab.isPrivate }}",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = contentColor
+                            )
+                        }
+                    }
+                }
+                // Media on this page (§8.3): the Phase 3
+                // MediaToolbarButton, already a 44dp frost
+                // circle in Mariner's shape.
                 if (!isHome && MediaLog.forTab(tab.id).isNotEmpty()) {
                     MediaToolbarButton(
                         onClick = { openMediaSheet() },
                         onLongClick = { playFirstVideo() }
                     )
                 }
-                // Site information (Mariner BrowserScreen.kt:3800):
-                // the lock opens the per-site sheet.
-                IconButton(onClick = { siteInfoOpen = true }) {
-                    Icon(
-                        if (tabUrl.startsWith("https://")) Icons.Filled.Lock
-                        else Icons.Filled.LockOpen,
-                        contentDescription = "Site information"
-                    )
-                }
-                IconButton(onClick = { menuOpen = true }) {
-                    Icon(Icons.Filled.Menu, contentDescription = "Menu")
+                Box(
+                    modifier = Modifier.size(44.dp).then(frost)
+                        .combinedClickable(
+                            onClick = { menuOpen = true },
+                            // Long-press jumps straight to Settings.
+                            onLongClick = { onOpenScreen(PioneerScreen.Settings) }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.MoreHoriz, contentDescription = "Menu", tint = contentColor, modifier = Modifier.size(22.dp))
                 }
             }
-            if (tab.isLoading.value) {
-                LinearProgressIndicator(
-                    progress = { (tab.progress.value.coerceIn(0, 100)) / 100f },
-                    modifier = Modifier.fillMaxWidth()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // The engine view, full-bleed; the start page overlays
+        // it while this tab is in its home state. The bar
+        // floats over both (below).
+        Box(modifier = Modifier.fillMaxSize()) {
+            AndroidView(
+                factory = { ctx -> GeckoView(ctx) },
+                update = { view ->
+                    view.setSession(tab.session)
+                    // Pull-to-refresh (Mariner
+                    // BrowserScreen.kt:2200-2246): this listener
+                    // only OBSERVES (always returns false): a
+                    // downward drag that starts with the page at
+                    // its very top moves the indicator, and past
+                    // the trigger it reloads. Scrolling and taps
+                    // are untouched.
+                    view.setOnTouchListener { v, e ->
+                        when (e.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                pullStartX = e.x
+                                pullStartY = e.y
+                                pullTracking = tab.scrollY.value == 0 && !pullRefreshing
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                if (pullTracking) {
+                                    if (tab.scrollY.value > 0) {
+                                        pullTracking = false
+                                        pullOffsetPx = 0f
+                                    } else {
+                                        val dy = e.y - pullStartY
+                                        val dx = kotlin.math.abs(e.x - pullStartX)
+                                        val slop = 24f * v.resources.displayMetrics.density
+                                        pullOffsetPx =
+                                            if (dy > slop && dy > dx * 1.6f) {
+                                                ((dy - slop) * 0.55f).coerceAtMost(
+                                                    pullTriggerPx * 1.5f
+                                                )
+                                            } else {
+                                                0f
+                                            }
+                                    }
+                                }
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                if (pullTracking && pullOffsetPx >= pullTriggerPx) {
+                                    pullRefreshing = true
+                                    tab.reload()
+                                }
+                                pullTracking = false
+                                pullOffsetPx = 0f
+                            }
+                        }
+                        false
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+            if (isHome) {
+                StartPage(
+                    store = store,
+                    onOpen = { url -> openUrl(url) },
+                    contentTopPad = if (barAtBottom) 0.dp else 92.dp,
+                    contentBottomPad = if (barAtBottom) 92.dp else 0.dp
                 )
             }
-            // The engine view, with the start page over it while
-            // this tab is in its home state.
-            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                AndroidView(
-                    factory = { ctx -> GeckoView(ctx) },
-                    update = { view -> view.setSession(tab.session) },
-                    modifier = Modifier.fillMaxSize()
-                )
-                if (isHome) {
-                    StartPage(
-                        store = store,
-                        onOpen = { url -> openUrl(url) },
-                        contentTopPad = 0.dp,
-                        contentBottomPad = 0.dp
-                    )
+            // Pull-to-refresh indicator (Mariner
+            // BrowserScreen.kt:4168-4200): a frost circle at the
+            // top, sliding down with the pull and rotating as it
+            // nears the trigger.
+            if (pullOffsetPx > 0f || pullRefreshing) {
+                Box(
+                    modifier = Modifier.align(Alignment.TopCenter)
+                        .offset {
+                            IntOffset(0, (pullOffsetPx * 0.45f).toInt())
+                        }
+                        .padding(top = 16.dp)
+                        .size(38.dp)
+                        .frostBar(CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (pullRefreshing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.5.dp
+                        )
+                    } else {
+                        Icon(
+                            Icons.Filled.ArrowDownward,
+                            contentDescription = "Pull to refresh",
+                            modifier = Modifier.size(20.dp)
+                                .rotate(
+                                    (pullOffsetPx / pullTriggerPx)
+                                        .coerceIn(0f, 1f) * 180f
+                                ),
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
+        }
+
+        // The floating bar (Mariner BrowserScreen.kt:4381-4410):
+        // the whole bar leaves on scroll-down and slides back
+        // on scroll-up. It never hides while the user is typing
+        // in it, or on the start page (nothing to scroll).
+        AnimatedVisibility(
+            visible = !barHidden || editingAddress || isHome,
+            modifier = Modifier
+                .align(if (barAtBottom) Alignment.BottomCenter else Alignment.TopCenter)
+                .then(
+                    if (barAtBottom) Modifier.windowInsetsPadding(WindowInsets.navigationBars)
+                        .imePadding()
+                    else Modifier.windowInsetsPadding(WindowInsets.statusBars)
+                )
+                .padding(top = if (barAtBottom) 0.dp else 10.dp, bottom = if (barAtBottom) 10.dp else 0.dp),
+            enter = slideInVertically { if (barAtBottom) it else -it } + fadeIn(),
+            exit = slideOutVertically { if (barAtBottom) it else -it } + fadeOut()
+        ) {
+            addressBar()
         }
 
         // Local suggestions over the page while typing.
         if (editingAddress && suggestions.isNotEmpty()) {
             SuggestionsCard(
                 suggestions = suggestions,
-                barAtBottom = false,
+                barAtBottom = barAtBottom,
                 immersive = false,
-                suggestionQuery = addressText,
+                suggestionQuery = fieldValue.text,
                 onPick = { url ->
                     goAddress(url)
                 }
@@ -711,7 +1139,7 @@ fun BrowserScreen(
         if (findOpen) {
             val result = tab.findResult.value
             FindBar(
-                barAtBottom = false,
+                barAtBottom = barAtBottom,
                 immersive = false,
                 findText = findText,
                 findCount = result?.count ?: 0,

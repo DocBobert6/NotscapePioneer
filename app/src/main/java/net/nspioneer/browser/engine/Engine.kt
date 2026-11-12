@@ -19,6 +19,11 @@ interface EngineTab {
     val canGoForward: State<Boolean>
     val isLoading: State<Boolean>
     val progress: State<Int>             // 0..100
+    // Root scroll offset in CSS px, from
+    // GeckoSession.ScrollDelegate (Batch 1): the shell hides the
+    // floating address bar on scroll-down (Mariner
+    // BrowserScreen.kt:2604) and arms pull-to-refresh only at 0.
+    val scrollY: State<Int>
     val findResult: State<FindResult?>
     fun load(url: String)
     fun reload()

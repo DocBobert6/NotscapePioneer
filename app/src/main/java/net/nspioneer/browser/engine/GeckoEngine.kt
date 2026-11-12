@@ -856,6 +856,20 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             }
         }
 
+        // Batch 1: root scroll offset for the shell's
+        // scroll-hide + pull-to-refresh (Mariner
+        // BrowserScreen.kt:2604, WebView scroll listener).
+        // GeckoView has no View scrollY of its own; the
+        // session's ScrollDelegate reports the content
+        // scroll in CSS px (verified against the pinned
+        // GeckoView 159 AAR: ScrollDelegate.onScrollChanged
+        // (session, scrollX, scrollY)).
+        session.scrollDelegate = object : GeckoSession.ScrollDelegate {
+            override fun onScrollChanged(session: GeckoSession, scrollX: Int, scrollY: Int) {
+                tab.scrollY.value = scrollY
+            }
+        }
+
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
                 tab.isLoading.value = true
@@ -980,6 +994,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         override val canGoForward = mutableStateOf(false)
         override val isLoading = mutableStateOf(false)
         override val progress = mutableIntStateOf(0)
+        override val scrollY = mutableIntStateOf(0)
         override val findResult = mutableStateOf<FindResult?>(null)
         override val isDesktopMode = mutableStateOf(false)
 

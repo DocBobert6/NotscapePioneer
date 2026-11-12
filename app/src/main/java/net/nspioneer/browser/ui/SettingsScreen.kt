@@ -201,6 +201,21 @@ fun SettingsScreen(
                     onClick = { store.putSetting("themeMode", "dark") }
                 )
                 InsetDivider()
+                // Batch 1: address bar position (Mariner
+                // SettingsScreen.kt:927-934), default Bottom.
+                val barPosition = store.setting("barPosition", "bottom")
+                ChoiceRow(
+                    label = "Address bar: Bottom",
+                    selected = barPosition == "bottom",
+                    onClick = { store.putSetting("barPosition", "bottom") }
+                )
+                InsetDivider()
+                ChoiceRow(
+                    label = "Address bar: Top",
+                    selected = barPosition == "top",
+                    onClick = { store.putSetting("barPosition", "top") }
+                )
+                InsetDivider()
                 ChoiceRow(
                     label = "Start page tiles",
                     supporting = "Show the Frequently visited tiles on the start page",
