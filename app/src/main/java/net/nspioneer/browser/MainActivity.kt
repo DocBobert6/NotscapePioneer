@@ -118,9 +118,27 @@ class MainActivity : ComponentActivity() {
         // no other crash record — see installCrashHandler).
         runCatching {
             val crashFile = File(filesDir, "crash-last.log")
+            var crashStamp: String? = null
             if (crashFile.exists()) {
                 val first = crashFile.readLines().firstOrNull() ?: ""
-                if (first.isNotBlank()) engine.noteStatus("last crash: $first")
+                if (first.isNotBlank()) {
+                    engine.noteStatus("last crash: $first")
+                    // First line is "[$stamp] thread=… …" — the
+                    // stamp is the crash time a recovered trace
+                    // is marked with (alpha.26).
+                    crashStamp = Regex("""\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]""")
+                        .find(first)?.groupValues?.getOrNull(1)
+                }
+            }
+            // alpha.26: a trace left running when the app ended
+            // (crash, force-stop, OS kill) survives in the trace
+            // file — recover it so Diagnostics can show it and
+            // Copy status can copy it. A normally-stopped trace
+            // deletes its file, so there is nothing to recover.
+            // A trace file with no crash record is still
+            // recovered, marked as ended-while-tracing.
+            if (engine.recoverCrashedTrace(crashStamp)) {
+                engine.noteStatus("recovered trace from previous run")
             }
         }
 

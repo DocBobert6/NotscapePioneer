@@ -203,6 +203,15 @@ interface Engine {
     val isTracing: State<Boolean>   // Diagnostics trace window open
     fun startTrace()    // writes "--- trace start … ---" marker line
     fun stopTrace()     // writes "--- trace end … ---" marker line
+    // alpha.26 (crash-safe trace): a trace left running when the
+    // app ended is recovered on the next launch into
+    // recoveredTraceLines (own section, never the live log),
+    // headed by recoveredTraceHeader; clearRecoveredTrace()
+    // dismisses it from Diagnostics.
+    val recoveredTraceLines: SnapshotStateList<String>
+    val recoveredTraceHeader: State<String?>
+    fun recoverCrashedTrace(crashStamp: String?): Boolean
+    fun clearRecoveredTrace()
     fun refreshStats()              // recomputes the "stats: APK … | PSS …"
         // line (cold start, PSS, APK size).
     fun close()

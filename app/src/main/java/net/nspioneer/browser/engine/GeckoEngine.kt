@@ -250,6 +250,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override val isTracing get() = statusPanel.isTracing
     override fun startTrace() = statusPanel.startTrace()
     override fun stopTrace() = statusPanel.stopTrace()
+    // alpha.26 (crash-safe trace): a trace left running when the
+    // app ended is recovered into its own section on next launch.
+    override val recoveredTraceLines get() = statusPanel.recoveredTraceLines
+    override val recoveredTraceHeader get() = statusPanel.recoveredTraceHeader
+    override fun recoverCrashedTrace(crashStamp: String?): Boolean =
+        statusPanel.recoverCrashedTrace(crashStamp)
+    override fun clearRecoveredTrace() = statusPanel.clearRecoveredTrace()
     override val mediaLines get() = statusPanel.mediaLines
 
     private var mediaRouter: MediaRouter? = null

@@ -3285,6 +3285,20 @@ fun DiagnosticsScreen(
             engine.statusLines.forEach { line ->
                 Text(line, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             }
+            // A trace recovered from a previous run that ended
+            // while tracing (alpha.26): its own section, clearly
+            // marked, with a button to clear it once copied.
+            if (engine.recoveredTraceLines.isNotEmpty()) {
+                Text(
+                    engine.recoveredTraceHeader.value ?: "— recovered trace —",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontFamily = FontFamily.Monospace
+                )
+                engine.recoveredTraceLines.forEach { line ->
+                    Text(line, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                }
+                Button(onClick = { engine.clearRecoveredTrace() }) { Text("Clear recovered trace") }
+            }
             Text(
                 "— media probe —",
                 style = MaterialTheme.typography.labelLarge,

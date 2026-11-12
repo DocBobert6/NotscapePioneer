@@ -54,6 +54,27 @@ class StatusPanel(context: Context) {
     val isTracing = mutableStateOf(false)
     private var traceStartStamp: String? = null
 
+    /**
+     * Crash-safe trace persistence (alpha.26): while a trace is
+     * running, every status line is also appended (flushed) to
+     * trace-live.log, so a crash leaves the trace on disk.
+     * traceLock guards the file against stopTrace's finish()
+     * racing an in-flight append; synchronized is re-entrant,
+     * so startTrace/stopTrace may call status() while holding it.
+     */
+    private val traceLock = Any()
+    private val traceFile = TraceLogFile(File(appContext.filesDir, "trace-live.log"))
+
+    /**
+     * A trace recovered from a previous run that ended while
+     * tracing (crash, force-stop, OS kill). Kept apart from the
+     * live statusLines: the live log keeps its 60-line cap and
+     * its behaviour, and the recovered trace cannot be evicted
+     * by it. Cleared by clearRecoveredTrace() from Diagnostics.
+     */
+    val recoveredTraceLines = mutableStateListOf<String>()
+    val recoveredTraceHeader = mutableStateOf<String?>(null)
+
     private fun stamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
@@ -71,6 +92,12 @@ class StatusPanel(context: Context) {
         Log.i(TAG, line)
         statusLines.add(line)
         while (statusLines.size > 60) statusLines.removeAt(0)
+        // alpha.26: while a trace is running, the line is also
+        // appended (flushed) to the trace file, so a crash leaves
+        // the trace on disk.
+        synchronized(traceLock) {
+            if (isTracing.value) traceFile.append(line)
+        }
     }
 
     /** Open a trace window: marker line first, then every status line
@@ -79,16 +106,61 @@ class StatusPanel(context: Context) {
         if (isTracing.value) return
         val stamp = stamp()
         traceStartStamp = stamp
-        isTracing.value = true
-        status("--- trace start $stamp ---")
+        synchronized(traceLock) {
+            // Fresh file first, so the start marker below is the
+            // file's first line too.
+            traceFile.begin()
+            isTracing.value = true
+            status("--- trace start $stamp ---")
+        }
     }
 
     /** Close the trace window with its end marker. No-op if none open. */
     fun stopTrace() {
         if (!isTracing.value) return
-        status("--- trace end ${stamp()} ---")
-        isTracing.value = false
-        traceStartStamp = null
+        synchronized(traceLock) {
+            status("--- trace end ${stamp()} ---")
+            // End marker flushed, then the file is gone: a
+            // normally-stopped trace leaves nothing to recover.
+            traceFile.finish()
+            isTracing.value = false
+            traceStartStamp = null
+        }
+    }
+
+    /**
+     * Recover a trace left running when the app ended (alpha.26).
+     * crashStamp is the crash time from crash-last.log when a
+     * crash was recorded, null otherwise (force-stop, OS kill —
+     * still recovered, marked as ended-while-tracing, so the
+     * recovery is never mislabelled as a crash). Returns true
+     * when a trace was recovered. A stale or empty file is
+     * discarded, so it is not re-read on every launch.
+     */
+    fun recoverCrashedTrace(crashStamp: String?): Boolean {
+        val lines = traceFile.readRecovered()
+        if (lines.isNullOrEmpty()) {
+            traceFile.discard()
+            return false
+        }
+        recoveredTraceLines.clear()
+        recoveredTraceLines.addAll(lines)
+        recoveredTraceLines.add(
+            if (crashStamp != null) "--- trace interrupted by crash $crashStamp ---"
+            else "--- trace interrupted — app ended while tracing (no crash recorded) ---"
+        )
+        recoveredTraceHeader.value =
+            if (crashStamp != null) "— recovered trace (crash $crashStamp) —"
+            else "— recovered trace (app ended while tracing) —"
+        return true
+    }
+
+    /** Dismiss a recovered trace (Diagnostics): clears the panel
+     *  and deletes the trace file, so it is not recovered again. */
+    fun clearRecoveredTrace() {
+        recoveredTraceLines.clear()
+        recoveredTraceHeader.value = null
+        traceFile.discard()
     }
 
     fun noteMedia(tabNumber: Int, kind: String, url: String) {
@@ -126,6 +198,13 @@ class StatusPanel(context: Context) {
         )
         statusLines.removeAll { it.startsWith("stats:") }
         statusLines.add(stats)
+        // alpha.26: refreshStats writes to the log directly (not
+        // via status()), so the trace file gets the stats line
+        // here — the file records every line that enters the
+        // status log while tracing, exactly as Copy status shows.
+        synchronized(traceLock) {
+            if (isTracing.value) traceFile.append(stats)
+        }
     }
 
     /**
@@ -145,6 +224,15 @@ class StatusPanel(context: Context) {
         // Added to the copied text only — never to the panel itself.
         if (isTracing.value) {
             lines += "--- trace running since ${traceStartStamp ?: "?"} ---"
+        }
+        // A trace recovered from a previous run that ended while
+        // tracing (alpha.26): its own section, never merged into
+        // the live log. Absent when there is no recovered trace,
+        // so the copied text is byte-identical to before when no
+        // crash happened.
+        if (recoveredTraceLines.isNotEmpty()) {
+            lines += recoveredTraceHeader.value ?: "— recovered trace —"
+            lines += recoveredTraceLines
         }
         lines += "— media probe —"
         if (mediaLines.isEmpty()) {
