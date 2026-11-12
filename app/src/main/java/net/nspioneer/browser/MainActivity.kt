@@ -175,6 +175,14 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Rebuild item 8: a self-closing popup tab leaves a brief
+        // "Popup closed" trace instead of vanishing silently.
+        // No "Tab closed / Undo" bar — that bar is only for
+        // user-initiated closes.
+        engine.onPopupClosed = {
+            Toast.makeText(this, "Popup closed", Toast.LENGTH_SHORT).show()
+        }
+
         // Tracking protection: the engine is built ETP Strict;
         // apply the stored level only when it differs, so a
         // plain launch never reloads the fresh tab for nothing.

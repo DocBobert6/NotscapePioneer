@@ -153,6 +153,12 @@ interface Engine {
         // this the shell keeps a dead tab whose closed session the
         // view would rebind (watch-wrestling.eu crash suspect,
         // 2026-11-12). Not fired while the engine itself is closing.
+    var onPopupClosed: ((EngineTab) -> Unit)?  // rebuild item 8:
+        // fired when a popup tab closes itself (window.close() /
+        // onCloseWindow) AND was the selected tab: the shell leaves
+        // a brief "Popup closed" trace. Engine-closed tabs still
+        // never show the "Tab closed / Undo" bar — that bar is
+        // only for user-initiated closes.
     // The shell calls this whenever the active tab changes
     // (switch, new tab, close): the engine records the selected
     // tab and activates + focuses its session when open, so a

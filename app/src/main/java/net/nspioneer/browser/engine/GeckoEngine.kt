@@ -237,6 +237,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     override var onTabCreated: ((EngineTab) -> Unit)? = null
     override var onTabDestroyed: ((EngineTab) -> Unit)? = null
+    override var onPopupClosed: ((EngineTab) -> Unit)? = null
     override var onExtensionInstallPrompt: ((String, List<String>, (Boolean) -> Unit) -> Unit)? = null
 
     override val uBlockState: State<String> get() = extensions.uBlockState
@@ -1559,7 +1560,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // Only popup tabs close this way.
                 if (tab.isPopupWin) {
                     statusPanel.status("tab ${n()}: popup close requested")
+                    val wasSelected = selectedTab === tab
                     destroyTab(tab)
+                    // Rebuild item 8: a self-closing popup tab used
+                    // to vanish without a trace. Leave a status line
+                    // always, and a "Popup closed" trace in the shell
+                    // when it was the tab on screen.
+                    statusPanel.status("tab ${n()}: popup closed")
+                    if (wasSelected) onPopupClosed?.invoke(tab)
                 }
             }
 
