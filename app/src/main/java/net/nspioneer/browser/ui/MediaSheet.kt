@@ -1,5 +1,6 @@
 package net.nspioneer.browser.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -121,6 +122,17 @@ fun MediaSheet(
                         LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = sheetMax)) {
                             items(media) { item ->
                                 ListItem(
+                                    // The whole media row is tappable
+                                    // to play — the small Play icon was
+                                    // the only tap target, and a tap on
+                                    // the row text did nothing. Page
+                                    // entries keep no row tap: they are
+                                    // not playable, their only action is
+                                    // the "Open" button.
+                                    modifier = if (item.kind == "page") Modifier else Modifier.clickable {
+                                        onDismiss()
+                                        onPlay(item, false)
+                                    },
                                     colors = ListItemDefaults.colors(
                                         containerColor = Color.Transparent
                                     ),
