@@ -630,7 +630,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     // from this state and answers it here.
     override val pendingPopupDecision: State<PopupController.PendingPopupDecision?>
         get() = popupController.pendingDecision
-    override fun answerPopupDecision(choice: PopupController.PopupChoice) =
+    override fun answerPopupDecision(choice: PopupChoice) =
         popupController.answerPending(choice)
     override fun dismissPopupDecision() = popupController.dismissPending()
 

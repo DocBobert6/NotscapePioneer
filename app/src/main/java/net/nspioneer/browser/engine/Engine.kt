@@ -264,7 +264,7 @@ interface Engine {
     val pendingPopupDecision: State<PopupController.PendingPopupDecision?>
     /** Answer the held popup prompt (Allow once / Deny once /
      *  Trust / Don't trust). */
-    fun answerPopupDecision(choice: PopupController.PopupChoice)
+    fun answerPopupDecision(choice: PopupChoice)
     /** Dismiss the held popup prompt without choosing: Deny
      *  (once) + capture. */
     fun dismissPopupDecision()
