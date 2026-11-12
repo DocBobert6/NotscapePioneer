@@ -1208,6 +1208,37 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     // Per-tab delegates
     // ------------------------------------------------------------------
 
+    /** Create + wire + bring up a tab for an onNewSession request
+     *  and return its (unopened) session for Gecko to open
+     *  (alpha.12: handing Gecko an already-open session throws
+     *  AssertionError and kills the app). Used directly for
+     *  allowed popups and same-site links, and as the factory a
+     *  held cross-site tapped link runs at answer time
+     *  (alpha.20) — the tab must not exist until he allows it. */
+    private fun createNewSessionTab(
+        sourceTab: GeckoTab,
+        uri: String,
+        isPopup: Boolean,
+    ): GeckoSession {
+        val newTab = createTabInternal(
+            sourceTab.isPrivate, isPopup, openSession = false
+        ) as GeckoTab
+        // The opener (this session) — the popunder guard's
+        // hereHost fallback for a fresh popup tab whose own
+        // URL is still blank (item 6). Every new-session
+        // tab gets one, popup or gesture link alike.
+        newTab.openerTab = sourceTab
+        newTab.popupTargetUri = uri
+        newTab.isNewSessionPending.value = true
+        onTabCreated?.invoke(newTab)
+        statusPanel.status(
+            "tab ${tabNumberFor(sourceTab.session)}: window.open -> tab ${newTab.id}" +
+                if (isPopup) " (popup)" else ""
+        )
+        bringUpNewSessionTab(newTab, uri)
+        return newTab.session
+    }
+
     private fun attachDelegates(tab: GeckoTab) {
         val session = tab.session
         fun n() = tabNumberFor(session)
@@ -1415,45 +1446,44 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // onNewSession against a pending allowed popup
                 // (rebuild item 1) and the new tab is marked
                 // isPopupWin=true (Mariner TabList.isPopupWin) so
-                // onCloseWindow can close it. A gesture link matches
-                // nothing and is not a popup.
+                // onCloseWindow can close it.
                 val isPopup = popupController.matchNewSession(uri) != null
                 if (!isPopup) {
+                    val sourceHost = runCatching {
+                        Uri.parse(tab.url.value).host
+                    }.getOrNull() ?: ""
+                    val targetHost = runCatching {
+                        Uri.parse(uri).host
+                    }.getOrNull() ?: ""
+                    if (isCrossSiteLink(sourceHost, targetHost)) {
+                        // A tapped link to a different site
+                        // (alpha.20): hold it for the four-choice
+                        // prompt, exactly like a scripted popup.
+                        // The tab is created only if he allows
+                        // it — createNewSessionTab runs at answer
+                        // time, not here. Same-site links open
+                        // directly, as before.
+                        return popupController.onGestureRequest(
+                            PopupController.SourceTab(
+                                tab.id, sourceHost, tab.isPrivate
+                            ),
+                            uri,
+                        ) { createNewSessionTab(tab, uri, isPopup = false) }
+                    }
                     // A tapped link from a blacklisted site: deny
                     // it like any other blocked popup (alpha.14)
                     // — no tab is created, and the URL is
                     // captured for the notice. Tapping a link on
                     // a site he distrusts is not consent for its
                     // popups to open.
-                    val sourceHost = runCatching {
-                        Uri.parse(tab.url.value).host
-                    }.getOrNull() ?: ""
                     if (!popupController.gestureAllowed(sourceHost)) {
                         popupController.noteGestureDenied(uri, sourceHost)
                         return null
                     }
                 }
-                // openSession=false: the session MUST reach Gecko
-                // unopened — Gecko opens it itself, and handing it
-                // an already-open session throws AssertionError and
-                // kills the app (watch-wrestling.eu, alpha.11).
-                val newTab = createTabInternal(
-                    tab.isPrivate, isPopup, openSession = false
-                ) as GeckoTab
-                // The opener (this session) — the popunder guard's
-                // hereHost fallback for a fresh popup tab whose own
-                // URL is still blank (item 6). Every new-session
-                // tab gets one, popup or gesture link alike.
-                newTab.openerTab = tab
-                newTab.popupTargetUri = uri
-                newTab.isNewSessionPending.value = true
-                onTabCreated?.invoke(newTab)
-                statusPanel.status(
-                    "tab ${n()}: window.open -> tab ${newTab.id}" +
-                        if (isPopup) " (popup)" else ""
+                return GeckoResult.fromValue(
+                    createNewSessionTab(tab, uri, isPopup)
                 )
-                bringUpNewSessionTab(newTab, uri)
-                return GeckoResult.fromValue(newTab.session)
             }
         }
 

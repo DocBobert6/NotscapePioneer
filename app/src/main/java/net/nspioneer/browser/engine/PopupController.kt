@@ -60,6 +60,15 @@ fun answerEffect(choice: PopupChoice): PopupAnswerEffect = when (choice) {
 fun isGestureBlocked(strict: Boolean, allowPopups: Boolean, blockPopups: Boolean): Boolean =
     decidePopup(strict, allowPopups, blockPopups) == PopupVerdict.DENY_CAPTURE
 
+/** Cross-site test for a tapped link (alpha.20): true when the
+ *  target host differs from the source tab's host. Blank hosts
+ *  are not cross-site — a link from the start page, or to
+ *  about:blank, opens directly, as now. Pure — unit-tested
+ *  (PopupControllerTest). */
+fun isCrossSiteLink(sourceHost: String, targetHost: String): Boolean =
+    sourceHost.isNotBlank() && targetHost.isNotBlank() &&
+        !sourceHost.equals(targetHost, ignoreCase = true)
+
 /** Capture-list rule (max 5, arrival order, deduped, blank /
  *  about:blank never captured). Pure — unit-tested
  *  (PopupControllerTest). Returns the new list; the caller swaps
@@ -127,22 +136,37 @@ class PopupController(
     val capturedHost: State<String> get() = _capturedHost
     private val _capturedHost = mutableStateOf("")
 
-    /** A scripted-popup request waiting on the user's choice
-     *  (alpha.14): the Gecko request is HELD, not answered,
-     *  until he picks Allow / Deny / Trust / Don't trust. The
-     *  shell renders the four-choice prompt from this state and
-     *  answers it via [answerPending]; dismissing the prompt
-     *  counts as Deny (once) + capture. */
+    /** A popup request waiting on the user's choice
+     *  (alpha.14 scripted; alpha.20 cross-site tapped link):
+     *  the Gecko request is HELD, not answered, until he picks
+     *  Allow / Deny / Trust / Don't trust. The shell renders
+     *  the four-choice prompt from this state and answers it
+     *  via [answerPending]; dismissing the prompt counts as
+     *  Deny (once) + capture. */
     data class PendingPopupDecision(
         val sourceHost: String,
         val targetUri: String?,
         val sourceTabId: Int,
+        // Alpha.20: a held cross-site tapped link, not a
+        // scripted popup — the prompt words it as a link.
+        val isGestureLink: Boolean = false,
     )
 
     val pendingDecision: State<PendingPopupDecision?> get() = _pendingDecision
     private val _pendingDecision = mutableStateOf<PendingPopupDecision?>(null)
     private var pendingResult: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? = null
     private var pendingPrompt: GeckoSession.PromptDelegate.PopupPrompt? = null
+
+    /** A cross-site tapped link waiting on the user's choice
+     *  (alpha.20): the onNewSession result is HELD, not
+     *  answered, until he picks Allow / Deny / Trust / Don't
+     *  trust — same prompt, same [answerPending] as a scripted
+     *  popup. [pendingGestureCreate] builds the tab at answer
+     *  time (the tab must not exist until he allows it); the
+     *  session it returns is handed to Gecko unopened, as the
+     *  alpha.12 crash fix requires. */
+    private var pendingGestureResult: GeckoResult<GeckoSession>? = null
+    private var pendingGestureCreate: (() -> GeckoSession)? = null
 
     /**
      * Answer a scripted-popup request (PromptDelegate.onPopupPrompt)
@@ -215,22 +239,103 @@ class PopupController(
         return result
     }
 
+    /**
+     * Answer a cross-site tapped link's onNewSession against the
+     * SOURCE tab's host (alpha.20). Whitelisted / blacklisted /
+     * strict-off sites are decided synchronously: an allowed
+     * link's tab is created at once (the factory runs here); a
+     * blacklisted link is denied with no tab, exactly as
+     * alpha.14's gesture path (notice + capture — the silent
+     * change is alpha.21, not this build). An UNLISTED site's
+     * link is HELD for the user's choice: the returned
+     * GeckoResult is intentionally uncompleted, and the shell's
+     * four-choice prompt answers it via [answerPending]. A
+     * request must never hang: every path completes the result,
+     * and any failure inside the decision still completes it
+     * as a denial (null = no new session).
+     */
+    fun onGestureRequest(
+        source: SourceTab?,
+        targetUri: String?,
+        createTab: () -> GeckoSession,
+    ): GeckoResult<GeckoSession>? {
+        val host = source?.host ?: ""
+        val result = GeckoResult<GeckoSession>()
+        try {
+            val site = if (host.isBlank()) null else store.siteSetting(host)
+            when (decidePopup(
+                strict = store.setting("popupStrict", "true") == "true",
+                allowPopups = site?.allowPopups == true,
+                blockPopups = site?.blockPopups == true,
+            )) {
+                PopupVerdict.ALLOW -> {
+                    result.complete(runCatching { createTab() }.getOrNull())
+                    return result
+                }
+                PopupVerdict.DENY_CAPTURE -> {
+                    noteGestureDenied(targetUri ?: "", host)
+                    return null
+                }
+                PopupVerdict.ASK -> {
+                    // A second request while one is pending
+                    // answers the first as Deny (once) — a
+                    // request must never hang.
+                    dismissPending()
+                    pendingGestureResult = result
+                    pendingGestureCreate = createTab
+                    _pendingDecision.value = PendingPopupDecision(
+                        host, targetUri, source?.id ?: -1, isGestureLink = true
+                    )
+                    status(
+                        "popup waiting: ${targetUri ?: "(no target)"} on " +
+                            "${host.ifBlank { "?" }} — asking (tapped link)"
+                    )
+                    return result
+                }
+            }
+        } catch (e: Exception) {
+            // Never hang the request: a failure inside the
+            // decision still answers it, as a denial. If the
+            // failure came after the request was held for the
+            // prompt, drop the held state too.
+            if (pendingGestureResult === result) {
+                pendingGestureResult = null
+                pendingGestureCreate = null
+                _pendingDecision.value = null
+                capture(targetUri, host)
+            }
+            status("popup decision failed: ${e.javaClass.simpleName} — denying")
+            runCatching { result.complete(null) }
+            return result
+        }
+    }
+
     /** Answer the held popup request (the shell's four-choice
-     *  prompt). The choice is applied in full: the Gecko request
-     *  is completed, the site is whitelisted / blacklisted for
-     *  Trust / Don't trust, an allowed popup is armed for its
-     *  onNewSession, a denied one's URL is captured. No-op when
-     *  nothing is held. */
+     *  prompt) — scripted (onPopupRequest) or cross-site
+     *  tapped link (onGestureRequest). The choice is applied
+     *  in full: the Gecko request is completed, the site is
+     *  whitelisted / blacklisted for Trust / Don't trust, an
+     *  allowed popup is armed for its onNewSession, a denied
+     *  one's URL is captured. No-op when nothing is held. */
     fun answerPending(choice: PopupChoice) {
-        val result = pendingResult ?: return
-        val prompt = pendingPrompt ?: return
-        val decision = _pendingDecision.value
+        val isGesture = pendingGestureResult != null
+        val result = pendingResult
+        val prompt = pendingPrompt
+        val gestureResult = pendingGestureResult
+        val gestureCreate = pendingGestureCreate
+        if (result == null && gestureResult == null) return
         pendingResult = null
         pendingPrompt = null
+        pendingGestureResult = null
+        pendingGestureCreate = null
+        val decision = _pendingDecision.value
         _pendingDecision.value = null
         val effect = answerEffect(choice)
         val host = decision?.sourceHost ?: ""
         val target = decision?.targetUri
+        // A held cross-site tap is distinguishable in the log
+        // from a scripted popup (alpha.20).
+        val suffix = if (isGesture) " (tapped link)" else ""
         runCatching {
             if (effect.writeAllow != null || effect.writeBlock != null) {
                 if (host.isNotBlank()) {
@@ -243,30 +348,47 @@ class PopupController(
                     )
                 }
             }
-            if (effect.armAllowed) {
-                pendingAllowed = PendingAllowed(decision?.sourceTabId ?: -1, target)
-            }
-            if (effect.capture) capture(target, host)
             status(
                 "popup ${when (choice) {
                     PopupChoice.ALLOW_ONCE -> "allowed once"
                     PopupChoice.DENY_ONCE -> "denied"
                     PopupChoice.TRUST -> "trusted: ${host.ifBlank { "?" }} whitelisted"
                     PopupChoice.DONT_TRUST -> "distrusted: ${host.ifBlank { "?" }} blacklisted"
-                }}: ${target ?: "(no target)"}"
+                }}: ${target ?: "(no target)"}$suffix"
             )
-            result.complete(prompt.confirm(effect.complete))
+            if (isGesture) {
+                // The tab is created now, at answer time — it
+                // must not have existed before he allowed it.
+                // Completing with null means no new session.
+                if (effect.armAllowed) {
+                    gestureResult?.complete(
+                        runCatching { gestureCreate?.invoke() }.getOrNull()
+                    )
+                } else {
+                    if (effect.capture) capture(target, host)
+                    gestureResult?.complete(null)
+                }
+            } else {
+                if (effect.armAllowed) {
+                    pendingAllowed = PendingAllowed(decision?.sourceTabId ?: -1, target)
+                }
+                if (effect.capture) capture(target, host)
+                result?.complete(prompt?.confirm(effect.complete))
+            }
         }.onFailure {
             // The request must still be answered even if a store
             // write failed — complete it as a denial.
-            runCatching { result.complete(prompt.confirm(AllowOrDeny.DENY)) }
+            runCatching {
+                if (isGesture) gestureResult?.complete(null)
+                else result?.complete(prompt?.confirm(AllowOrDeny.DENY))
+            }
         }
     }
 
     /** Dismiss the held prompt without choosing: Deny (once) +
      *  capture (alpha.14). No-op when nothing is held. */
     fun dismissPending() {
-        if (pendingResult == null) return
+        if (pendingResult == null && pendingGestureResult == null) return
         answerPending(PopupChoice.DENY_ONCE)
     }
 
