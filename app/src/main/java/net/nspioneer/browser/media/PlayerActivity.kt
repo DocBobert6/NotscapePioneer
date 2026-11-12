@@ -2371,7 +2371,7 @@ private enum class ScaleMode { Fit, Stretch, Fill, Crop }
 
 /** One selectable audio/subtitle track in the player's track rows. */
 /** A quality parsed from an HLS master playlist (0.0.967). */
-private data class ParsedQuality(
+internal data class ParsedQuality(
     val label: String,
     val bandwidth: Long
 )

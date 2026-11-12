@@ -24,6 +24,7 @@ import androidx.work.ForegroundInfo
 import net.nspioneer.browser.data.DownloadRecord
 import net.nspioneer.browser.data.PioneerStore
 import java.io.File
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -2332,7 +2333,7 @@ object Downloads {
     private fun EditedMediaItemSequence(
         items: List<EditedMediaItem>
     ): androidx.media3.transformer.EditedMediaItemSequence =
-        androidx.media3.transformer.EditedMediaItemSequence(items)
+        androidx.media3.transformer.EditedMediaItemSequence.Builder(items).build()
 
     // ---------- staging sweep ----------
 

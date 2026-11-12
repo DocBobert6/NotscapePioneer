@@ -2,6 +2,8 @@ package net.nspioneer.browser.media
 
 import android.content.Context
 import androidx.work.CoroutineWorker
+import androidx.work.Data
+import androidx.work.ListenableWorker
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -34,27 +36,28 @@ private const val MAX_ATTEMPTS = 3
 
 private suspend fun CoroutineWorker.runDownloadWorker(
     context: Context,
-    params: WorkerParameters,
+    inputData: Data,
+    runAttemptCount: Int,
     run: suspend (PioneerStore, net.nspioneer.browser.data.DownloadRecord, String?) -> Boolean,
-): Result {
+): ListenableWorker.Result {
     val appCtx = context.applicationContext
     val store = PioneerStore.get(appCtx)
-    val recId = params.inputData.getLong("recId", -1L)
-    if (recId < 0) return Result.failure()
+    val recId = inputData.getLong("recId", -1L)
+    if (recId < 0) return ListenableWorker.Result.failure()
     val rec = store.downloadsSnapshot().firstOrNull { it.id == recId }
-        ?: return Result.failure()
-    val referer = params.inputData.getString("referer")?.takeIf { it.isNotBlank() }
+        ?: return ListenableWorker.Result.failure()
+    val referer = inputData.getString("referer")?.takeIf { it.isNotBlank() }
     // Foreground from the start: WorkManager requires the
     // notification within the foreground window, and a
     // download can run for a long time.
     setForeground(Downloads.foregroundInfo(appCtx, rec, rec.progress))
     val ok = withContext(Dispatchers.IO) { run(store, rec, referer) }
     return when {
-        ok -> Result.success()
+        ok -> ListenableWorker.Result.success()
         store.downloadsSnapshot().firstOrNull { it.id == recId }?.status in
-            listOf("paused", "cancelled") -> Result.success()
-        params.runAttemptCount < MAX_ATTEMPTS -> Result.retry()
-        else -> Result.failure()
+            listOf("paused", "cancelled") -> ListenableWorker.Result.success()
+        runAttemptCount < MAX_ATTEMPTS -> ListenableWorker.Result.retry()
+        else -> ListenableWorker.Result.failure()
     }
 }
 
@@ -65,8 +68,8 @@ class HlsDownloadWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
-    override suspend fun doWork(): Result = runDownloadWorker(
-        applicationContext, params
+    override suspend fun doWork(): ListenableWorker.Result = runDownloadWorker(
+        applicationContext, inputData, runAttemptCount
     ) { store, rec, referer ->
         Downloads.runHlsJob(applicationContext, store, rec, referer).ok
     }
@@ -79,8 +82,8 @@ class DashDownloadWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
-    override suspend fun doWork(): Result = runDownloadWorker(
-        applicationContext, params
+    override suspend fun doWork(): ListenableWorker.Result = runDownloadWorker(
+        applicationContext, inputData, runAttemptCount
     ) { store, rec, referer ->
         Downloads.runDashJob(applicationContext, store, rec, referer).ok
     }
@@ -94,8 +97,8 @@ class SegmentedDownloadWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
-    override suspend fun doWork(): Result = runDownloadWorker(
-        applicationContext, params
+    override suspend fun doWork(): ListenableWorker.Result = runDownloadWorker(
+        applicationContext, inputData, runAttemptCount
     ) { store, rec, referer ->
         Downloads.runSegmentedJob(applicationContext, store, rec, referer)
     }
@@ -107,8 +110,8 @@ class MergeDownloadWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
-    override suspend fun doWork(): Result = runDownloadWorker(
-        applicationContext, params
+    override suspend fun doWork(): ListenableWorker.Result = runDownloadWorker(
+        applicationContext, inputData, runAttemptCount
     ) { store, rec, referer ->
         Downloads.runMergeJob(applicationContext, store, rec, referer)
     }

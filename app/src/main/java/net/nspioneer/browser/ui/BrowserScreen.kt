@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -46,6 +47,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -233,29 +235,6 @@ fun BrowserScreen(
         context.startActivity(Intent.createChooser(intent, "Share page"))
     }
 
-    // Back chain (MainActivity calls this first; false means
-    // "nothing left here — exit"): close overlays, then engine
-    // back, then the start page, then close the tab; the last
-    // home tab exits the app.
-    val backHandler: () -> Boolean = {
-        when {
-            longPressUrl != null -> { onLongPressHandled(); true }
-            mediaSheetOpen -> { mediaSheetOpen = false; true }
-            siteInfoOpen -> { siteInfoOpen = false; true }
-            showPopupNotice -> { showPopupNotice = false; clearPendingPopups(); true }
-            customizeOpen -> { customizeOpen = false; true }
-            menuOpen -> { menuOpen = false; true }
-            tabSwitcherOpen -> { tabSwitcherOpen = false; true }
-            findOpen -> { closeFind(); true }
-            editingAddress -> { editingAddress = false; focusManager.clearFocus(); true }
-            tab.canGoBack.value -> { tab.goBack(); true }
-            !isHome -> { homeTabIds.add(tab.id); true }
-            tabs.size > 1 -> { onCloseTab(tab); true }
-            else -> false
-        }
-    }
-    SideEffect { onSetBackHandler(backHandler) }
-
     val suggestions = remember(addressText, editingAddress, store.revision) {
         if (!editingAddress) emptyList()
         else {
@@ -441,6 +420,31 @@ fun BrowserScreen(
         pendingPopupUrls.clear()
         (engine as? GeckoEngine)?.popunderCaptures?.clear()
     }
+
+    // Back chain (MainActivity calls this first; false means
+    // "nothing left here — exit"): close overlays, then engine
+    // back, then the start page, then close the tab; the last
+    // home tab exits the app. Declared here, after the sheet /
+    // popup state and clearPendingPopups it closes over, which
+    // are declared above in the Phase 3 section.
+    val backHandler: () -> Boolean = {
+        when {
+            longPressUrl != null -> { onLongPressHandled(); true }
+            mediaSheetOpen -> { mediaSheetOpen = false; true }
+            siteInfoOpen -> { siteInfoOpen = false; true }
+            showPopupNotice -> { showPopupNotice = false; clearPendingPopups(); true }
+            customizeOpen -> { customizeOpen = false; true }
+            menuOpen -> { menuOpen = false; true }
+            tabSwitcherOpen -> { tabSwitcherOpen = false; true }
+            findOpen -> { closeFind(); true }
+            editingAddress -> { editingAddress = false; focusManager.clearFocus(); true }
+            tab.canGoBack.value -> { tab.goBack(); true }
+            !isHome -> { homeTabIds.add(tab.id); true }
+            tabs.size > 1 -> { onCloseTab(tab); true }
+            else -> false
+        }
+    }
+    SideEffect { onSetBackHandler(backHandler) }
 
     /** Open every captured popup in its own tab, then clear. */
     fun openPendingPopups() {
