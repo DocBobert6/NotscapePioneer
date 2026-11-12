@@ -223,6 +223,40 @@ fun SettingsScreen(
     var showClearHistory by remember { mutableStateOf(false) }
     var showErasePrivate by remember { mutableStateOf(false) }
     var showSiteControls by remember { mutableStateOf(false) }
+    var confirmImport by remember { mutableStateOf<String?>(null) }
+
+    // Backup export/import (alpha.10, Mariner's flow):
+    // plain JSON through the document picker. No encrypted
+    // variant — Pioneer has no EncryptedBackup.
+    val backupExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(store.exportBackup().toByteArray())
+                }
+                Toast.makeText(context, "Backup saved", Toast.LENGTH_SHORT).show()
+            }.onFailure {
+                Toast.makeText(context, "Backup failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+    val backupImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                val text = context.contentResolver.openInputStream(uri)
+                    ?.bufferedReader()?.readText().orEmpty()
+                if (text.isNotBlank()) {
+                    confirmImport = text
+                }
+            }.onFailure {
+                Toast.makeText(context, "Couldn't read that file", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -1125,6 +1159,26 @@ fun SettingsScreen(
                     onCheckedChange = { store.putSetting("deleteOnExit", it.toString()) }
                 )
             }
+            Spacer(Modifier.height(8.dp))
+            SettingsCard {
+                OutlinedButton(
+                    onClick = { backupExportLauncher.launch("notscape-pioneer-backup.json") },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Export backup") }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { backupImportLauncher.launch(arrayOf("application/json")) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Import backup") }
+                Text(
+                    "A backup holds bookmarks, history, favourites, " +
+                        "downloads, site settings and settings. Importing " +
+                        "replaces what is on this device.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
 
             // Downloads (alpha.10, Mariner's download rows):
             // location, EPUB auto-shelf, segmented downloads,
@@ -1585,6 +1639,35 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showErasePrivate = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (confirmImport != null) {
+        FrostDialog(
+            onDismissRequest = { confirmImport = null },
+            title = { Text("Import backup?") },
+            text = {
+                Text(
+                    "Your bookmarks, history, favourites, downloads, " +
+                        "site settings and settings will be replaced by " +
+                        "the backup. This can't be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val json = confirmImport
+                    confirmImport = null
+                    val ok = json != null && store.importBackup(json)
+                    Toast.makeText(
+                        context,
+                        if (ok) "Backup imported" else "That file is not a backup",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }) { Text("Import") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmImport = null }) { Text("Cancel") }
             }
         )
     }

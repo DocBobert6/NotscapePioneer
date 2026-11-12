@@ -1317,4 +1317,177 @@ class PioneerStore private constructor(context: Context) {
      *  random suffix, so ids are unique and roughly
      *  time-ordered. */
     private fun newId(): Long = System.currentTimeMillis() * 1000 + (0..999).random()
+
+    // ---------- backup ----------
+    /** Full data backup as JSON (alpha.10, Mariner's
+     *  exportBackup shape, Pioneer areas only): bookmarks,
+     *  folders, favourites, history, downloads, site
+     *  settings and settings, under the same keys the
+     *  store files use (so the document stays readable
+     *  next to a Mariner backup). There is no vault in
+     *  Pioneer and no encrypted variant — Pioneer has no
+     *  EncryptedBackup. */
+    fun exportBackup(): String {
+        synchronized(lock) {
+            val root = JSONObject()
+            root.put("schemaVersion", 1)
+            for (part in listOf(
+                Part.BOOKMARKS, Part.FOLDERS, Part.HISTORY,
+                Part.FAVOURITES, Part.SITE_SETTINGS, Part.SETTINGS,
+                Part.DOWNLOADS
+            )) {
+                val obj = JSONObject(serialize(part))
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    root.put(k, obj.get(k))
+                }
+            }
+            return root.toString(2)
+        }
+    }
+
+    /** Restores a backup produced by [exportBackup]. A
+     *  missing section keeps what is on the device; a
+     *  present section replaces it wholesale. Returns
+     *  false when the document is not a backup at all. */
+    fun importBackup(json: String): Boolean {
+        synchronized(lock) {
+            return runCatching {
+                val root = JSONObject(json)
+                require(
+                    root.has("bookmarks") || root.has("history") ||
+                        root.has("favourites")
+                )
+                root.optJSONArray("bookmarks")?.let { arr ->
+                    val items = (0 until arr.length()).mapNotNull { i ->
+                        val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                        val url = o.optString("url")
+                        if (url.isBlank()) return@mapNotNull null
+                        Bookmark(
+                            o.optLong("id"), o.optString("title"), url,
+                            o.optLong("t"), o.optString("f")
+                        )
+                    }
+                    bookmarks.clear()
+                    bookmarks.addAll(items)
+                }
+                root.optJSONArray("bookmarkFolders")?.let { arr ->
+                    val items = (0 until arr.length()).mapNotNull { i ->
+                        arr.optString(i).takeIf { it.isNotBlank() }
+                    }
+                    bookmarkFolders.clear()
+                    bookmarkFolders.addAll(items)
+                }
+                root.optJSONArray("history")?.let { arr ->
+                    val items = (0 until arr.length()).mapNotNull { i ->
+                        val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                        val url = o.optString("url")
+                        if (url.isBlank()) return@mapNotNull null
+                        HistoryEntry(
+                            o.optLong("id"), o.optString("title"), url,
+                            o.optLong("t")
+                        )
+                    }
+                    history.clear()
+                    history.addAll(items)
+                }
+                root.optJSONArray("favourites")?.let { arr ->
+                    val items = (0 until arr.length()).mapNotNull { i ->
+                        val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                        val url = o.optString("url")
+                        if (url.isBlank()) return@mapNotNull null
+                        Bookmark(
+                            o.optLong("id"), o.optString("title"), url,
+                            o.optLong("t")
+                        )
+                    }
+                    favourites.clear()
+                    favourites.addAll(items)
+                }
+                root.optJSONArray("downloads")?.let { arr ->
+                    val items = (0 until arr.length()).mapNotNull { i ->
+                        val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                        val url = o.optString("url")
+                        if (url.isBlank()) return@mapNotNull null
+                        DownloadRecord(
+                            o.optLong("id"), o.optString("title"), url,
+                            o.optString("fileName"), o.optLong("dmId", -1),
+                            o.optString("status", "failed"), o.optLong("t"),
+                            o.optBoolean("media", false),
+                            o.optInt("progress", -1),
+                            o.optString("contentUri", ""),
+                            o.optBoolean("isPrivate", false)
+                        )
+                    }
+                    downloads.clear()
+                    downloads.addAll(items)
+                }
+                root.optJSONObject("siteSettings")?.let { obj ->
+                    val keys = obj.keys()
+                    val parsed = mutableMapOf<String, SiteSetting>()
+                    while (keys.hasNext()) {
+                        val host = keys.next()
+                        val s = obj.optJSONObject(host) ?: continue
+                        parsed[host] = SiteSetting(
+                            host,
+                            s.optBoolean("js", true),
+                            s.optBoolean("img", false),
+                            s.optBoolean("pop", false),
+                            s.optBoolean("nb", false),
+                            s.optBoolean("bp", false),
+                            s.optBoolean("c3", false)
+                        )
+                    }
+                    siteSettings.clear()
+                    siteSettings.putAll(parsed)
+                }
+                root.optJSONObject("settings")?.let { obj ->
+                    val keys = obj.keys()
+                    val parsed = mutableMapOf<String, String>()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        parsed[k] = obj.optString(k)
+                    }
+                    settings.clear()
+                    settings.putAll(parsed)
+                }
+                mutated(
+                    Part.BOOKMARKS, Part.FOLDERS, Part.HISTORY,
+                    Part.FAVOURITES, Part.SITE_SETTINGS, Part.SETTINGS,
+                    Part.DOWNLOADS
+                )
+                flush()
+                true
+            }.getOrDefault(false)
+        }
+    }
+
+    /** Erase all user data (alpha.10, Mariner's
+     *  clearAllData, Pioneer areas only): bookmarks,
+     *  folders, history, favourites, downloads list,
+     *  site settings, saved tab session and closed tabs,
+     *  plus the download job/error/tombstone settings.
+     *  General settings (theme, home page, …) survive,
+     *  as in Mariner. Files on disk are never touched —
+     *  only the records. The caller also wipes engine
+     *  data (cookies/cache/site data) separately. */
+    fun clearAllData() {
+        synchronized(lock) {
+            bookmarks.clear(); bookmarkFolders.clear(); history.clear()
+            favourites.clear(); downloads.clear(); siteSettings.clear()
+            settings.keys.filter {
+                it.startsWith("dljob:") || it.startsWith("dlerror:") ||
+                    it.startsWith("dldowngrade:") ||
+                    it.startsWith("dltombstone:") || it == "closedTabs"
+            }.forEach { settings.remove(it) }
+            tabSession.clear()
+            mutated(
+                Part.BOOKMARKS, Part.FOLDERS, Part.HISTORY,
+                Part.FAVOURITES, Part.SITE_SETTINGS, Part.SETTINGS,
+                Part.SESSION, Part.DOWNLOADS
+            )
+            flush()
+        }
+    }
 }
