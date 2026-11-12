@@ -1785,19 +1785,24 @@ object Downloads {
 
     data class DashOutcome(val ok: Boolean, val bytes: Long = 0, val error: String? = null)
 
-    private data class DashRep(
+    internal data class DashRep(
         val bandwidth: Long, val width: Int, val height: Int,
         val mime: String, val baseUrl: String?,
         val mediaTemplate: String?, val initTemplate: String?,
         val timescale: Long, val duration: Long, val startNumber: Long,
         val segments: List<String>,
+        /** SegmentTimeline start times (alpha.10, Mariner
+         *  DashManifest.kt:174-197): empty when the manifest
+         *  carries no (valid) timeline. */
+        val timeline: List<Long> = emptyList(),
     )
 
     /** Parse a DASH manifest (MPD) into its representations.
      *  Supports SegmentTemplate (media/initialization with
-     *  $Number$ / $Time$) and SegmentList (SegmentURL list).
-     *  Dynamic (live) manifests are rejected honestly. */
-    private fun parseDashManifest(text: String, baseUrl: String): List<DashRep> {
+     *  $Number$ / $Time$, plus SegmentTimeline) and SegmentList
+     *  (SegmentURL list). Dynamic (live) manifests are
+     *  rejected honestly. */
+    internal fun parseDashManifest(text: String, baseUrl: String): List<DashRep> {
         val factory = org.xmlpull.v1.XmlPullParserFactory.newInstance()
         factory.isNamespaceAware = false
         val parser = factory.newPullParser()
@@ -1816,6 +1821,12 @@ object Downloads {
         var curDuration = 0L
         var curStart = 1L
         var curSegments = mutableListOf<String>()
+        // SegmentTimeline state (alpha.10): collected while
+        // inside a <SegmentTimeline> in this Representation.
+        var curTimeline = mutableListOf<Long>()
+        var timelineOk = true
+        var timelineCursor = 0L
+        var inTimeline = false
         var inRep = false
         var event = parser.eventType
         while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
@@ -1846,6 +1857,10 @@ object Downloads {
                         curDuration = 0L
                         curStart = 1L
                         curSegments = mutableListOf()
+                        curTimeline = mutableListOf()
+                        timelineOk = true
+                        timelineCursor = 0L
+                        inTimeline = false
                     }
                     "BaseURL" -> {
                         if (inRep) curBase = parser.nextText()?.trim()
@@ -1864,14 +1879,60 @@ object Downloads {
                             parser.getAttributeValue(null, "media")?.let { curSegments += it }
                         }
                     }
+                    // SegmentTimeline (alpha.10, Mariner
+                    // DashManifest.kt:174-197): <S> attrs t
+                    // (default cursor), d (must be > 0), r
+                    // (default 0, must be >= 0); each S adds
+                    // r+1 times; cap 10,000; any invalid S
+                    // discards the whole timeline.
+                    "SegmentTimeline" -> {
+                        if (inRep) {
+                            inTimeline = true
+                            curTimeline = mutableListOf()
+                            timelineOk = true
+                            timelineCursor = 0L
+                        }
+                    }
+                    "S" -> {
+                        if (inRep && inTimeline && timelineOk) {
+                            val d = parser.getAttributeValue(null, "d")?.toLongOrNull() ?: 0L
+                            var tt = parser.getAttributeValue(null, "t")?.toLongOrNull()
+                                ?: timelineCursor
+                            val r = parser.getAttributeValue(null, "r")?.toIntOrNull() ?: 0
+                            if (r < 0 || d <= 0) {
+                                timelineOk = false
+                            } else {
+                                // Audit D-m6 (Mariner): cap expansion
+                                // — a hostile timeline must not build
+                                // an unbounded list.
+                                for (k in 0 until r + 1) {
+                                    if (curTimeline.size > 10_000) break
+                                    curTimeline += tt
+                                    tt += d
+                                }
+                                timelineCursor = tt
+                            }
+                        }
+                    }
                 }
                 org.xmlpull.v1.XmlPullParser.END_TAG -> {
+                    if (parser.name == "SegmentTimeline" && inTimeline) {
+                        inTimeline = false
+                        // An invalid or empty timeline is
+                        // discarded — the track falls back to
+                        // expand-until-404 below.
+                        if (!timelineOk || curTimeline.isEmpty()) {
+                            curTimeline = mutableListOf()
+                        }
+                    }
                     if (parser.name == "Representation" && inRep) {
                         inRep = false
+                        inTimeline = false
                         reps += DashRep(
                             curBw, curW, curH, curMime, curBase,
                             curMedia, curInit, curTimescale, curDuration,
-                            curStart, curSegments.toList()
+                            curStart, curSegments.toList(),
+                            curTimeline.toList()
                         )
                     }
                 }
@@ -1939,6 +2000,9 @@ object Downloads {
     }
 
     /** Download one DASH track (init + segments) into a file.
+     *  With a SegmentTimeline the count is exact: $Number$ =
+     *  startNumber+i and $Time$ = timeline[i] (alpha.10,
+     *  Mariner DashManifest.kt:330-355). Without one,
      *  SegmentTemplate $Number$ is expanded until the first
      *  404 (the manifest carries no segment count for
      *  SegmentTimeline-less manifests); SegmentList uses its
@@ -1960,26 +2024,41 @@ object Downloads {
                 rep.segments.isNotEmpty() ->
                     rep.segments.map { resolveUrl(baseUrl, it) }
                 rep.mediaTemplate != null -> {
-                    // Expand $Number$ until 404; cap at 20,000
-                    // segments so a runaway template cannot loop.
-                    val found = mutableListOf<String>()
-                    var n = rep.startNumber
-                    while (n < rep.startNumber + 20_000) {
-                        val u = resolveUrl(
-                            baseUrl,
-                            rep.mediaTemplate
-                                .replace("\$Number\$", n.toString())
-                                .replace("\$Number%05d\$", "%05d".format(n))
-                        )
-                        found += u
-                        n++
-                        // Probe lazily during fetch (below) — the
-                        // list is capped by the first 404 there.
-                        if (found.size >= 20_000) break
+                    if (rep.timeline.isNotEmpty()) {
+                        // SegmentTimeline: exactly that many
+                        // segments — no 404 probing, no runaway.
+                        rep.timeline.mapIndexed { i, time ->
+                            val n = rep.startNumber + i
+                            resolveUrl(
+                                baseUrl,
+                                rep.mediaTemplate
+                                    .replace("\$Number\$", n.toString())
+                                    .replace("\$Number%05d\$", "%05d".format(n))
+                                    .replace("\$Time\$", time.toString())
+                            )
+                        }
+                    } else {
+                        // Expand $Number$ until 404; cap at 20,000
+                        // segments so a runaway template cannot loop.
+                        val found = mutableListOf<String>()
+                        var n = rep.startNumber
+                        while (n < rep.startNumber + 20_000) {
+                            val u = resolveUrl(
+                                baseUrl,
+                                rep.mediaTemplate
+                                    .replace("\$Number\$", n.toString())
+                                    .replace("\$Number%05d\$", "%05d".format(n))
+                            )
+                            found += u
+                            n++
+                            // Probe lazily during fetch (below) — the
+                            // list is capped by the first 404 there.
+                            if (found.size >= 20_000) break
+                        }
+                        // The fetcher below stops at the first 404,
+                        // so over-generation here is harmless.
+                        found
                     }
-                    // The fetcher below stops at the first 404,
-                    // so over-generation here is harmless.
-                    found
                 }
                 rep.baseUrl != null -> listOf(resolveUrl(baseUrl, rep.baseUrl))
                 else -> emptyList()
