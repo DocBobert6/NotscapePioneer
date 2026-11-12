@@ -8,6 +8,16 @@ import net.nspioneer.browser.media.DetectedMedia  // defined in C's
 
 data class FindResult(val ordinal: Int, val count: Int, val found: Boolean)
 
+/** One entry of a tab's session (back/forward) history, from
+ *  GeckoSession.SessionState (Batch 2). [index] is the absolute
+ *  index in the session list; [isCurrent] the page showing now. */
+data class SessionHistoryEntry(
+    val title: String,
+    val url: String,
+    val index: Int,
+    val isCurrent: Boolean
+)
+
 interface EngineTab {
     val id: Int
     val isPrivate: Boolean
@@ -24,6 +34,21 @@ interface EngineTab {
     // floating address bar on scroll-down (Mariner
     // BrowserScreen.kt:2604) and arms pull-to-refresh only at 0.
     val scrollY: State<Int>
+    // ---- Batch 2: session history + session state ----
+    // From ProgressDelegate.onSessionStateChange; empty until
+    // the first state push.
+    val historyEntries: State<List<SessionHistoryEntry>>
+    // Latest GeckoSession.SessionState.toString(), or null
+    // before the first push. The shell persists this per tab
+    // for relaunch restore (history + scroll + zoom + form
+    // data, as Mariner's WebView saveState bundle does).
+    val sessionStateJson: State<String?>
+    // Jump to an absolute session-history index
+    // (GeckoSession.gotoHistoryIndex).
+    fun goToHistoryIndex(index: Int)
+    // Ask for a fresh onSessionStateChange before persisting
+    // (GeckoSession.flushSessionState).
+    fun flushSessionState()
     val findResult: State<FindResult?>
     fun load(url: String)
     fun reload()
@@ -81,7 +106,23 @@ interface EngineTab {
 }
 
 interface Engine {
-    fun createTab(isPrivate: Boolean): EngineTab
+    fun createTab(
+        isPrivate: Boolean,
+        // Batch 2: a saved SessionState JSON to restoreState()
+        // instead of loading a URL (null = fresh tab).
+        restoreStateJson: String? = null,
+        // Batch 2: desktop UA + viewport BEFORE any load or
+        // restore — setDesktopMode would reload and lose the
+        // restored scroll position.
+        desktopMode: Boolean = false,
+        // Batch 2: pending scroll restore for URL-only
+        // restores (pre-alpha.6 saves); posted to the probe
+        // when its port connects.
+        scrollY: Int = 0,
+    ): EngineTab
+    // Batch 2: flush every tab's session state (onPause,
+    // before the shell persists the session).
+    fun flushSessionStates()
     fun destroyTab(tab: EngineTab)
     var onTabCreated: ((EngineTab) -> Unit)?  // fired when the engine
         // creates a tab itself (onNewSession / window.open): the shell

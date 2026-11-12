@@ -57,7 +57,17 @@ data class SiteSetting(
 
 data class TabSnapshot(
     val url: String, val title: String,
-    val desktopMode: Boolean = false
+    val desktopMode: Boolean = false,
+    /** Root scroll offset in CSS px at save time (Mariner
+     *  Store.kt TabSnapshot.scrollY). Restored through the
+     *  probe when no session state exists for the tab
+     *  (Batch 2). */
+    val scrollY: Int = 0,
+    /** GeckoSession.SessionState JSON (Batch 2): history,
+     *  scroll position, zoom and form data for this tab.
+     *  "" means URL-only restore (a pre-alpha.6 save, or a
+     *  tab whose state never pushed). */
+    val sessionState: String = ""
 )
 
 // ---- Phase 3: downloads (Mariner Store.kt:23-47, ported verbatim) ----
@@ -777,6 +787,50 @@ class PioneerStore private constructor(context: Context) {
         }
     }
 
+    // ---------- recently closed ----------
+
+    /** Mirrors Mariner Store.saveClosedTabs (Batch 2):
+     *  snapshots of NORMAL tabs at close time, newest first,
+     *  capped at 20. Private tabs are never recorded. Entries
+     *  older than 30 days drop on load; explicit clear wipes
+     *  the key. */
+    fun saveClosedTabs(tabs: List<TabSnapshot>) {
+        synchronized(lock) {
+            val arr = JSONArray()
+            tabs.take(20).forEach {
+                arr.put(
+                    JSONObject().put("url", it.url)
+                        .put("title", it.title)
+                        .put("at", System.currentTimeMillis())
+                )
+            }
+            settings["closedTabs"] = arr.toString()
+            mutated(Part.SETTINGS)
+        }
+    }
+
+    fun loadClosedTabs(): List<TabSnapshot> = synchronized(lock) {
+        val cutoff = System.currentTimeMillis() - 30L * 24 * 3600 * 1000
+        runCatching {
+            val arr = JSONArray(settings["closedTabs"] ?: "")
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val at = o.optLong("at", 0L)
+                if (at != 0L && at < cutoff) return@mapNotNull null
+                val url = o.optString("url")
+                if (url.isBlank()) return@mapNotNull null
+                TabSnapshot(url, o.optString("title"))
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun clearClosedTabs() {
+        synchronized(lock) {
+            settings.remove("closedTabs")
+            mutated(Part.SETTINGS)
+        }
+    }
+
     // ---------- favicons ----------
 
     /** Phase 2: no favicon fetching. Returns the cached
@@ -1035,7 +1089,10 @@ class PioneerStore private constructor(context: Context) {
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val url = o.optString("url")
                 if (url.isBlank()) return@mapNotNull null
-                TabSnapshot(url, o.optString("title"), o.optBoolean("desktop", false))
+                TabSnapshot(
+                    url, o.optString("title"), o.optBoolean("desktop", false),
+                    o.optInt("scrollY", 0), o.optString("sessionState", "")
+                )
             }
             tabSession.addAll(items)
             tabSessionActive = if (items.isEmpty()) 0
@@ -1118,6 +1175,8 @@ class PioneerStore private constructor(context: Context) {
                             JSONObject().put("url", it.url)
                                 .put("title", it.title)
                                 .put("desktop", it.desktopMode)
+                                .put("scrollY", it.scrollY)
+                                .put("sessionState", it.sessionState)
                         )
                     }
                 }

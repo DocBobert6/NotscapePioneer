@@ -7,6 +7,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.speech.RecognizerIntent
 import android.view.MotionEvent
@@ -18,9 +19,16 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.draganddrop.DragAndDropTarget
+import androidx.compose.foundation.draganddrop.DragAndDropTransferData
+import androidx.compose.foundation.draganddrop.dragAndDropSource
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.draganddrop.toAndroidDragEvent
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +40,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
@@ -41,6 +50,9 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -50,11 +62,15 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
@@ -62,18 +78,28 @@ import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -81,8 +107,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
@@ -94,7 +122,10 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -114,8 +145,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.nspioneer.browser.data.PioneerStore
+import net.nspioneer.browser.data.TabSnapshot
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.EngineTab
 import net.nspioneer.browser.engine.GeckoEngine
@@ -136,8 +169,12 @@ import org.mozilla.geckoview.GeckoView
  *
  * - one GeckoView (AndroidView) bound to the active tab's session;
  *   the start page overlays it while a tab is in its home state.
- * - tab switcher sheet: title + URL rows, close, New tab, New
- *   private tab; NO thumbnails in Phase 2 (known gap).
+ * - tab grid overlay: per-class grids (normal vs private), thumbnails
+ *   captured from the GeckoView (GeckoView.capturePixels), search,
+ *   grid/list toggle, drag-reorder, swipe-to-close with Undo,
+ *   recently-closed, close-duplicate + close-all per class.
+ *   Thumbnails are memory-only, never persisted — a tab with no
+ *   still yet shows its title rows, as Mariner does.
  * - address bar with local suggestions (history + bookmarks);
  *   the spike's loadAddress rule (bare domain -> https://, else
  *   DuckDuckGo search).
@@ -162,6 +199,45 @@ internal fun resolveAddress(raw: String): String? {
         text.contains(".") && !text.contains(" ") -> "https://$text"
         else -> "https://duckduckgo.com/?q=" + URLEncoder.encode(text, "UTF-8")
     }
+}
+
+/** One row of the Back/Forward history sheet: the title and URL
+ *  to show, [steps] the signed jump from the current page, and
+ *  [index] the absolute session-history index to jump to. */
+private data class HistorySheetEntry(
+    val title: String,
+    val url: String,
+    val steps: Int,
+    val index: Int
+)
+
+/** Mariner BrowserScreenParts.historySheetEntries, verbatim:
+ *  the entries in [direction] from the current index, nearest
+ *  first: [items] are (title, url) pairs in session order,
+ *  [currentIndex] the page showing now, [direction] -1 for back,
+ *  +1 for forward. Anything else is empty. A blank title falls
+ *  back to the URL. */
+private fun historySheetEntries(
+    currentIndex: Int,
+    items: List<Pair<String, String>>,
+    direction: Int
+): List<HistorySheetEntry> {
+    if (direction != -1 && direction != 1) return emptyList()
+    val out = ArrayList<HistorySheetEntry>()
+    var i = currentIndex + direction
+    while (i in items.indices) {
+        val (title, url) = items[i]
+        out.add(
+            HistorySheetEntry(
+                title = title.ifBlank { url },
+                url = url,
+                steps = i - currentIndex,
+                index = i
+            )
+        )
+        i += direction
+    }
+    return out
 }
 
 /** The download awaiting confirmation in the "Download
@@ -200,6 +276,15 @@ fun BrowserScreen(
     onCloseTab: (EngineTab) -> Unit,
     onDuplicateTab: (EngineTab) -> Unit,
     onCloseOtherTabs: (EngineTab) -> Unit,
+    // Batch 2: close-duplicate + close-all (per class) and
+    // drag-reorder within a class (Mariner TabList).
+    onCloseDuplicateTabs: (EngineTab) -> Unit,
+    onCloseAllTabs: (Boolean) -> Unit,
+    onMoveTab: (EngineTab, Int) -> Unit,
+    // Batch 2: recently closed (normal tabs only).
+    closedTabs: List<TabSnapshot>,
+    onRemoveClosedTab: (TabSnapshot) -> Unit,
+    onClearClosedTabs: () -> Unit,
     onOpenScreen: (PioneerScreen) -> Unit,
     onCopyStatus: () -> Unit,
     onInstallUBlock: () -> Unit,
@@ -216,6 +301,25 @@ fun BrowserScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var customizeOpen by remember { mutableStateOf(false) }
     var tabSwitcherOpen by remember { mutableStateOf(false) }
+    // ---- Batch 2: tab grid + history sheet + undo ----
+    // historySheetDir: 0 = closed, -1 = back history, +1 = forward.
+    var historySheetDir by remember { mutableStateOf(0) }
+    // Which privacy class the grid shows; set to the active tab's
+    // class every time the grid opens (Mariner gridPrivate).
+    var gridPrivate by remember { mutableStateOf(false) }
+    var tabSearch by remember { mutableStateOf("") }
+    var showRecentlyClosed by remember { mutableStateOf(false) }
+    // Undo snackbar (Mariner BrowserScreen.kt:5047-5060): the host
+    // sits bottom-centre with 88dp clearance, above the bar.
+    val snackHost = remember { SnackbarHostState() }
+    val snackScope = rememberCoroutineScope()
+    // Tab thumbnails, memory-only (Mariner tabPreviews): one
+    // 320-px still per tab, recycled on replacement/close.
+    val tabPreviews = remember { mutableStateMapOf<Int, Bitmap>() }
+    // The single GeckoView, captured from the AndroidView factory
+    // so thumbnails can be taken (GeckoView.capturePixels). A plain
+    // holder, not state — only event handlers read it.
+    val geckoViewBox = remember { arrayOf<GeckoView?>(null) }
     var findOpen by remember { mutableStateOf(false) }
     var findText by remember { mutableStateOf("") }
     var editingAddress by remember { mutableStateOf(false) }
@@ -319,6 +423,11 @@ fun BrowserScreen(
     LaunchedEffect(tab.progress.value) {
         if (tab.progress.value >= 100) pullRefreshing = false
     }
+    // Batch 2: opening the grid captures the active tab's still
+    // first, so its card shows the page just left (Mariner).
+    LaunchedEffect(tabSwitcherOpen) {
+        if (tabSwitcherOpen) captureTabPreview(tab.id)
+    }
 
     fun openUrl(url: String) {
         homeTabIds.remove(tab.id)
@@ -342,6 +451,86 @@ fun BrowserScreen(
             putExtra(Intent.EXTRA_TEXT, url)
         }
         context.startActivity(Intent.createChooser(intent, "Share page"))
+    }
+
+    /** Mariner BrowserScreenParts.thumbnailSizeFor, verbatim: a
+     *  320-px-wide still preserving the page aspect. */
+    fun thumbnailSizeFor(viewW: Int, viewH: Int, maxW: Int = 320): Pair<Int, Int> {
+        if (viewW <= 0 || viewH <= 0 || maxW <= 0) return 0 to 0
+        val w = minOf(viewW, maxW)
+        val h = ((viewH.toLong() * w) / viewW).toInt().coerceAtLeast(1)
+        return w to h
+    }
+
+    /** Capture the visible page of [tabId] into tabPreviews
+     *  (Mariner captureTabPreview, Gecko-shaped: only the
+     *  ACTIVE tab can be captured — it is the one attached to
+     *  the single GeckoView. Captures run as the grid opens,
+     *  never around a switch: capturePixels is async, so a
+     *  capture requested just before a session switch could
+     *  land the incoming tab's pixels. A blank/home tab has
+     *  nothing to capture. */
+    fun captureTabPreview(tabId: Int) {
+        val view = geckoViewBox[0] ?: return
+        val t = tabs.firstOrNull { it.id == tabId } ?: return
+        if (t.url.value.isBlank()) return
+        runCatching {
+            view.capturePixels().accept(
+                { bitmap ->
+                    if (bitmap == null) return@accept
+                    val (tw, th) = thumbnailSizeFor(bitmap.width, bitmap.height)
+                    if (tw <= 0 || th <= 0) {
+                        bitmap.recycle()
+                        return@accept
+                    }
+                    val scaled = Bitmap.createScaledBitmap(bitmap, tw, th, true)
+                    if (scaled !== bitmap) bitmap.recycle()
+                    tabPreviews[tabId]?.recycle()
+                    tabPreviews[tabId] = scaled
+                },
+                { _ -> }
+            )
+        }
+    }
+
+    /** Free the stills of tabs that no longer exist (Mariner
+     *  frees a tab's still in closeTab; bulk closes go through
+     *  the shell, so the grid prunes after each bulk action). */
+    fun prunePreviews() {
+        tabPreviews.keys.filter { id -> tabs.none { it.id == id } }.forEach { id ->
+            tabPreviews.remove(id)?.recycle()
+        }
+    }
+
+    /** Close a tab from the grid with an Undo snackbar (Mariner
+     *  closeTab(offerUndo = true)): the shell records the close
+     *  in recently-closed either way; Undo reopens the URL in a
+     *  new tab. Private tabs and blank tabs offer no Undo. */
+    fun closeTabWithUndo(t: EngineTab) {
+        val url = t.url.value.trim()
+        val wasPrivate = t.isPrivate
+        onCloseTab(t)
+        prunePreviews()
+        if (!wasPrivate && url.isNotBlank() && url != "about:blank") {
+            snackScope.launch {
+                if (snackHost.showSnackbar("Tab closed", actionLabel = "Undo") ==
+                    SnackbarResult.ActionPerformed
+                ) {
+                    onOpenUrlInNewTab(url, false, true)
+                }
+            }
+        }
+    }
+
+    /** Switch to [target] from the grid, then close it. The
+     *  outgoing tab's still was already captured when the grid
+     *  opened — capturing here would race the session switch
+     *  (capturePixels is async) and could store the incoming
+     *  tab's pixels under the outgoing tab's id. */
+    fun switchToTab(target: EngineTab) {
+        val idx = tabs.indexOf(target)
+        if (idx >= 0) onSwitchTab(idx)
+        tabSwitcherOpen = false
     }
 
     val suggestions = remember(fieldValue.text, editingAddress, store.revision) {
@@ -718,10 +907,8 @@ fun BrowserScreen(
      *  ported: frost capsule groups, satellite circles beside
      *  it. The download pill and vault chip are NOT here — Phase 3
      *  / Phase 4 scope; they ride in the same column when they
-     *  land. Long-press Back/Forward history is NOT here either:
-     *  Mariner opens a history sheet (audit §1 #13), a separate
-     *  sheet outside Batch 1 — taps navigate, long-press does
-     *  nothing yet. */
+     *  land. Long-press Back/Forward opens the history sheet
+     *  (Batch 2, Mariner beta.69 #58). */
     @Composable
     fun addressBar() {
         val pillShape = RoundedCornerShape(50)
@@ -736,18 +923,28 @@ fun BrowserScreen(
             if (tab.canGoBack.value || tab.canGoForward.value) {
                 Row(modifier = frost) {
                     if (tab.canGoBack.value) {
+                        // Batch 2 (Mariner beta.69 #58): long-press
+                        // lists the back history; a tap jumps there.
                         Box(
                             modifier = Modifier.size(44.dp)
-                                .clickable { tab.goBack() },
+                                .combinedClickable(
+                                    onClick = { tab.goBack() },
+                                    onLongClick = { historySheetDir = -1 }
+                                ),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(Icons.Filled.ChevronLeft, contentDescription = "Back", tint = contentColor, modifier = Modifier.size(24.dp))
                         }
                     }
                     if (tab.canGoForward.value) {
+                        // Batch 2 (Mariner beta.69 #58): long-press
+                        // lists the forward history; a tap jumps there.
                         Box(
                             modifier = Modifier.size(44.dp)
-                                .clickable { tab.goForward() },
+                                .combinedClickable(
+                                    onClick = { tab.goForward() },
+                                    onLongClick = { historySheetDir = 1 }
+                                ),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(Icons.Filled.ChevronRight, contentDescription = "Forward", tint = contentColor, modifier = Modifier.size(24.dp))
@@ -807,12 +1004,13 @@ fun BrowserScreen(
                     if (!editingAddress) {
                         // Home: the start page is a home state per
                         // tab in Pioneer (no homePage setting);
-                        // long-press opens it in a new tab.
+                        // long-press opens it in a new tab of the
+                        // SAME class (Mariner beta.69 #58).
                         Box(
                             modifier = Modifier.size(34.dp)
                                 .combinedClickable(
                                     onClick = { homeTabIds.add(tab.id) },
-                                    onLongClick = { onNewTab(false) }
+                                    onLongClick = { onNewTab(tab.isPrivate) }
                                 ),
                             contentAlignment = Alignment.Center
                         ) {
@@ -956,7 +1154,13 @@ fun BrowserScreen(
                 Box(
                     modifier = Modifier.size(44.dp).then(frost)
                         .combinedClickable(
-                            onClick = { tabSwitcherOpen = true },
+                            onClick = {
+                                // The grid opens on the active tab's
+                                // class (Mariner gridPrivate).
+                                gridPrivate = tab.isPrivate
+                                tabSearch = ""
+                                tabSwitcherOpen = true
+                            },
                             // Long-press opens a new tab without
                             // opening the switcher.
                             onLongClick = { onNewTab(tab.isPrivate) }
@@ -1007,7 +1211,7 @@ fun BrowserScreen(
         // floats over both (below).
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
-                factory = { ctx -> GeckoView(ctx) },
+                factory = { ctx -> GeckoView(ctx).also { geckoViewBox[0] = it } },
                 update = { view ->
                     view.setSession(tab.session)
                     // Pull-to-refresh (Mariner
@@ -1262,97 +1466,548 @@ fun BrowserScreen(
         }
     }
 
-    // Tab switcher sheet: title + URL rows, close, New tab, New
-    // private tab. NO thumbnails in Phase 2 (known gap).
+    // Batch 2 — tab grid (Mariner BrowserScreen.kt:4573-5030):
+    // full-screen overlay, opaque gradient backdrop, per-class
+    // grids, thumbnails, search, grid/list toggle, drag-reorder,
+    // swipe-to-close with Undo, recently-closed, close-duplicate
+    // + close-all per class, floating pill action bar.
     if (tabSwitcherOpen) {
-        FrostSheet(onDismiss = { tabSwitcherOpen = false }) {
-            Column(
-                modifier = Modifier.fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, bottom = 28.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    "Tabs (${tabs.size})",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(horizontal = 4.dp)
+        Box(
+            modifier = Modifier.fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.surfaceContainer
+                        )
+                    )
                 )
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth().height(320.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .padding(16.dp)
+            ) {
+                Spacer(Modifier.height(12.dp))
+                // Private-mode indicator beyond the lock icon
+                // (audit §2): what private means, where private
+                // tabs are managed.
+                if (gridPrivate) {
+                    Text(
+                        "Private tabs — never saved to history or the session. " +
+                            "Their data is wiped when the last private tab closes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+                OutlinedTextField(
+                    value = tabSearch,
+                    onValueChange = { tabSearch = it },
+                    placeholder = { Text("Search tabs") },
+                    singleLine = true,
+                    leadingIcon = {
+                        Icon(Icons.Filled.Search, contentDescription = null)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    items(tabs.toList(), key = { it.id }) { t ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth()
-                                .clickable {
-                                    val idx = tabs.indexOf(t)
-                                    if (idx >= 0) onSwitchTab(idx)
-                                    tabSwitcherOpen = false
+                    TextButton(
+                        onClick = {
+                            val keep = tabs.firstOrNull {
+                                it.id == tab.id && it.isPrivate == gridPrivate
+                            } ?: tabs.firstOrNull { it.isPrivate == gridPrivate }
+                            keep?.let { onCloseOtherTabs(it); prunePreviews() }
+                        },
+                        enabled = tabs.count { it.isPrivate == gridPrivate } > 1
+                    ) { Text("Close others") }
+                    TextButton(
+                        onClick = {
+                            val keep = tabs.firstOrNull {
+                                it.id == tab.id && it.isPrivate == gridPrivate
+                            } ?: tabs.firstOrNull { it.isPrivate == gridPrivate }
+                            keep?.let { onCloseDuplicateTabs(it); prunePreviews() }
+                        },
+                        enabled = tabs.filter { it.isPrivate == gridPrivate }
+                            .groupBy { it.url.value.trim() }
+                            .any { (url, ts) -> url.isNotEmpty() && ts.size > 1 }
+                    ) { Text("Close duplicates") }
+                    TextButton(
+                        onClick = { onCloseAllTabs(gridPrivate); prunePreviews() },
+                        enabled = tabs.any { it.isPrivate == gridPrivate }
+                    ) { Text("Close all") }
+                    TextButton(onClick = {
+                        val cur = store.setting("tabViewMode", "grid")
+                        store.putSetting(
+                            "tabViewMode",
+                            if (cur == "list") "grid" else "list"
+                        )
+                    }) {
+                        Text(
+                            text = if (store.setting("tabViewMode", "grid") == "list") "Grid view" else "List view",
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (!gridPrivate && closedTabs.isNotEmpty()) {
+                        TextButton(onClick = { showRecentlyClosed = true }) {
+                            Text("Recently closed (${closedTabs.size})")
+                        }
+                    }
+                }
+                val gridTabs = tabs.filter {
+                    it.isPrivate == gridPrivate &&
+                        (tabSearch.isBlank() ||
+                            it.title.value.contains(tabSearch, ignoreCase = true) ||
+                            it.url.value.contains(tabSearch, ignoreCase = true))
+                }
+                val listMode =
+                    store.setting("tabViewMode", "grid") == "list"
+                // No tab groups: one flat list, in strip
+                // order, for the visible privacy class.
+                if (tabs.none { it.isPrivate == gridPrivate }) {
+                    Text(
+                        if (gridPrivate) "No private tabs yet — open one below." else "No tabs.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+                if (gridTabs.isEmpty() && tabs.any { it.isPrivate == gridPrivate }) {
+                    Text(
+                        "No tabs match your search.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(if (listMode) 1 else 2),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    items(gridTabs, key = { it.id }) { t ->
+                        // Swipe a card sideways to close the tab (the
+                        // ✕ button still works too).
+                        val dismissState = rememberSwipeToDismissBoxState(
+                            confirmValueChange = { value ->
+                                if (value == SwipeToDismissBoxValue.EndToStart ||
+                                    value == SwipeToDismissBoxValue.StartToEnd
+                                ) {
+                                    closeTabWithUndo(t)
+                                    true
+                                } else false
+                            }
+                        )
+                        SwipeToDismissBox(
+                            state = dismissState,
+                            backgroundContent = {
+                                Box(
+                                    modifier = Modifier.fillMaxSize()
+                                        .background(
+                                            MaterialTheme.colorScheme.errorContainer,
+                                            RoundedCornerShape(20.dp)
+                                        )
+                                        .padding(horizontal = 16.dp),
+                                    contentAlignment = if (dismissState.dismissDirection ==
+                                        SwipeToDismissBoxValue.StartToEnd
+                                    ) Alignment.CenterStart else Alignment.CenterEnd
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Close, contentDescription = "Close tab",
+                                        tint = MaterialTheme.colorScheme.onErrorContainer
+                                    )
                                 }
-                                .background(
-                                    if (t.id == tab.id) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                                    else MaterialTheme.colorScheme.surface,
-                                    MaterialTheme.shapes.medium
-                                )
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            }
                         ) {
-                            if (t.isPrivate) {
-                                Icon(
-                                    Icons.Filled.Lock,
-                                    contentDescription = "Private tab",
-                                    modifier = Modifier.size(18.dp)
-                                        .padding(end = 4.dp)
-                                )
-                            }
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    t.title.value.ifBlank { if (t.url.value.isBlank()) "New tab" else t.url.value },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodyLarge
-                                )
-                                Text(
-                                    t.url.value.ifBlank { "Start page" },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            IconButton(onClick = { onCloseTab(t) }) {
-                                Icon(Icons.Filled.Close, contentDescription = "Close tab")
+                            Card(
+                                modifier = Modifier.fillMaxWidth()
+                                    .height(if (listMode) 80.dp else 150.dp)
+                                    .dragAndDropTarget(
+                                        shouldStartDragAndDrop = { event ->
+                                            val idText = event.toAndroidDragEvent().clipData
+                                                .getItemAt(0)?.text?.toString()
+                                            val id = idText?.toIntOrNull()
+                                            val dragged = tabs.firstOrNull { it.id == id }
+                                            dragged != null &&
+                                                dragged.isPrivate == t.isPrivate
+                                        },
+                                        target = object : DragAndDropTarget {
+                                            override fun onDrop(
+                                                event: androidx.compose.ui.draganddrop.DragAndDropEvent
+                                            ): Boolean {
+                                                val id = event.toAndroidDragEvent().clipData
+                                                    .getItemAt(0)?.text?.toString()
+                                                    ?.toIntOrNull() ?: return false
+                                                val dragged = tabs.firstOrNull { it.id == id }
+                                                    ?: return false
+                                                if (dragged.isPrivate != t.isPrivate) {
+                                                    return false
+                                                }
+                                                val idx = tabs.filter { it.isPrivate == t.isPrivate }
+                                                    .indexOf(t)
+                                                if (idx >= 0) {
+                                                    onMoveTab(dragged, idx)
+                                                }
+                                                return true
+                                            }
+                                        }
+                                    )
+                                    .combinedClickable(
+                                        onClick = { switchToTab(t) }
+                                    ),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (t.id == tab.id)
+                                        Frost.cardColor()
+                                    else MaterialTheme.colorScheme.surfaceContainerLow
+                                ),
+                                border = BorderStroke(
+                                    if (t.id == tab.id) 2.dp else 0.5.dp,
+                                    if (t.id == tab.id)
+                                        MaterialTheme.colorScheme.primary
+                                    else Frost.hairline()
+                                ),
+                                shape = Frost.CardShape
+                            ) {
+                                val preview = tabPreviews[t.id]
+                                val isStartPage = t.id in homeTabIds || t.url.value.isBlank()
+                                val hostText = runCatching { Uri.parse(t.url.value).host }.getOrNull()
+                                    ?: t.url.value
+                                if (listMode) {
+                                    // List rows carry a small still of the
+                                    // tab beside the title/host, from the
+                                    // same memory-only tabPreviews map the
+                                    // grid uses; no still yet keeps the
+                                    // title/host row unchanged.
+                                    Row(
+                                        modifier = Modifier.fillMaxSize().padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (preview != null) {
+                                            Image(
+                                                bitmap = preview.asImageBitmap(),
+                                                contentDescription = "Tab preview",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.width(56.dp).fillMaxHeight()
+                                                    .clip(RoundedCornerShape(8.dp))
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                if (t.isPrivate) {
+                                                    Icon(
+                                                        Icons.Filled.Lock, contentDescription = "Private",
+                                                        modifier = Modifier.size(14.dp),
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                    Spacer(Modifier.width(4.dp))
+                                                }
+                                                Text(
+                                                    if (isStartPage) "Start page"
+                                                    else t.title.value.ifBlank { "New tab" },
+                                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                IconButton(
+                                                    onClick = { onDuplicateTab(t) },
+                                                    modifier = Modifier.size(28.dp)
+                                                ) {
+                                                    Icon(Icons.Filled.ContentCopy, contentDescription = "Duplicate tab", modifier = Modifier.size(15.dp))
+                                                }
+                                                // Long-press the handle to
+                                                // drag this card within its
+                                                // class (Mariner audit P-M7).
+                                                IconButton(
+                                                    onClick = {},
+                                                    modifier = Modifier.size(28.dp)
+                                                        .dragAndDropSource { _ ->
+                                                            DragAndDropTransferData(
+                                                                clipData = ClipData.newPlainText(
+                                                                    "tab",
+                                                                    t.id.toString()
+                                                                )
+                                                            )
+                                                        }
+                                                ) {
+                                                    Icon(
+                                                        Icons.Filled.DragHandle,
+                                                        contentDescription = "Drag to reorder",
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                                IconButton(
+                                                    onClick = { closeTabWithUndo(t) },
+                                                    modifier = Modifier.size(28.dp)
+                                                ) {
+                                                    Icon(Icons.Filled.Close, contentDescription = "Close tab", modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                            if (!isStartPage) {
+                                                Text(
+                                                    hostText,
+                                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Column(modifier = Modifier.fillMaxSize().padding(10.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            if (t.isPrivate) {
+                                                Icon(
+                                                    Icons.Filled.Lock, contentDescription = "Private",
+                                                    modifier = Modifier.size(14.dp),
+                                                    tint = MaterialTheme.colorScheme.primary
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                            }
+                                            Text(
+                                                if (isStartPage) "Start page"
+                                                else t.title.value.ifBlank { "New tab" },
+                                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            IconButton(
+                                                onClick = { onDuplicateTab(t) },
+                                                modifier = Modifier.size(28.dp)
+                                            ) {
+                                                Icon(Icons.Filled.ContentCopy, contentDescription = "Duplicate tab", modifier = Modifier.size(15.dp))
+                                            }
+                                            // Long-press the handle to drag
+                                            // this card within its class
+                                            // (Mariner audit P-M7).
+                                            IconButton(
+                                                onClick = {},
+                                                modifier = Modifier.size(28.dp)
+                                                    .dragAndDropSource { _ ->
+                                                        DragAndDropTransferData(
+                                                            clipData = ClipData.newPlainText(
+                                                                "tab",
+                                                                t.id.toString()
+                                                            )
+                                                        )
+                                                    }
+                                            ) {
+                                                Icon(
+                                                    Icons.Filled.DragHandle,
+                                                    contentDescription = "Drag to reorder",
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { closeTabWithUndo(t) },
+                                                modifier = Modifier.size(28.dp)
+                                            ) {
+                                                Icon(Icons.Filled.Close, contentDescription = "Close tab", modifier = Modifier.size(16.dp))
+                                            }
+                                        }
+                                        if (!isStartPage) {
+                                            Text(
+                                                hostText,
+                                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        if (preview != null) {
+                                            Image(
+                                                bitmap = preview.asImageBitmap(),
+                                                contentDescription = "Tab preview",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.weight(1f).fillMaxWidth()
+                                                    .padding(top = 6.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                Spacer(Modifier.height(14.dp))
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth()
+                        .frostBar(RoundedCornerShape(50), 8.dp)
+                        .padding(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Button(
-                        onClick = { onNewTab(false); tabSwitcherOpen = false },
+                    IconButton(
+                        onClick = {
+                            onNewTab(gridPrivate)
+                            tabSwitcherOpen = false
+                        },
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Add,
+                            contentDescription = if (gridPrivate) "New private tab" else "New tab",
+                            modifier = Modifier.size(25.dp),
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    Box(
                         modifier = Modifier.weight(1f)
-                    ) { Text("New tab") }
-                    OutlinedButton(
-                        onClick = { onNewTab(true); tabSwitcherOpen = false },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("New private tab") }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    TextButton(
-                        onClick = { onDuplicateTab(tab); tabSwitcherOpen = false },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Duplicate current tab") }
-                    TextButton(
-                        onClick = { onCloseOtherTabs(tab); tabSwitcherOpen = false },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Close other tabs") }
+                            .clip(RoundedCornerShape(50))
+                            .clickable { gridPrivate = !gridPrivate }
+                            .padding(horizontal = 12.dp, vertical = 11.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (gridPrivate) {
+                                Icon(
+                                    Icons.Filled.Lock,
+                                    contentDescription = "Private tabs",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(
+                                if (gridPrivate) "Private • ${tabs.size} tabs (${tabs.count { it.isPrivate }} private)"
+                                else "${tabs.size} tabs (${tabs.count { it.isPrivate }} private)",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { tabSwitcherOpen = false },
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = "Done",
+                            modifier = Modifier.size(25.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
         }
+    }
+    // Batch 2 — Back/Forward history sheet (Mariner
+    // BrowserScreen.kt:6448-6510, beta.69 #58): long-press Back
+    // or Forward lists the history in that direction; a tap
+    // jumps straight there instead of stepping one page at a
+    // time. Entries come from the tab's SessionState, so no
+    // WebView back/forward list is needed.
+    if (historySheetDir != 0) {
+        val entries = tab.historyEntries.value
+        val currentIndex = entries.indexOfFirst { it.isCurrent }
+            .takeIf { it >= 0 } ?: (entries.size - 1)
+        val sheetEntries = historySheetEntries(
+            currentIndex,
+            entries.map { it.title to it.url },
+            historySheetDir
+        )
+        FrostSheet(onDismiss = { historySheetDir = 0 }) {
+            Column(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 28.dp)
+            ) {
+                Text(
+                    if (historySheetDir < 0) "Back" else "Forward",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                )
+                if (sheetEntries.isEmpty()) {
+                    Text(
+                        "No pages in that direction.",
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                    )
+                } else {
+                    val sheetMax = (LocalConfiguration.current
+                        .screenHeightDp * 0.6f).dp
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = sheetMax)
+                    ) {
+                        items(sheetEntries, key = { it.index }) { entry ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable {
+                                        tab.goToHistoryIndex(entry.index)
+                                        historySheetDir = 0
+                                    }
+                                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        entry.title,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Text(
+                                        entry.url,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Batch 2 — recently closed (Mariner BrowserScreen.kt:4531-4571):
+    // a tap reopens the tab and drops it from the list.
+    if (showRecentlyClosed) {
+        FrostDialog(
+            onDismissRequest = { showRecentlyClosed = false },
+            title = { Text("Recently closed") },
+            text = {
+                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                    items(closedTabs.toList(), key = { it.url }) { snap ->
+                        ListItem(
+                            headlineContent = {
+                                Text(
+                                    snap.title.ifBlank { "Untitled" },
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            supportingContent = {
+                                Text(snap.url, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            },
+                            modifier = Modifier.clickable {
+                                onRemoveClosedTab(snap)
+                                showRecentlyClosed = false
+                                tabSwitcherOpen = false
+                                onOpenUrlInNewTab(snap.url, false, true)
+                            }
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onClearClosedTabs()
+                        showRecentlyClosed = false
+                    }
+                ) { Text("Clear list") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRecentlyClosed = false }) { Text("Close") }
+            }
+        )
     }
 
     // The browser menu (full page).
@@ -1785,6 +2440,21 @@ fun BrowserScreen(
             confirmButton = {
                 TextButton(onClick = { siteInfoOpen = false }) { Text("Done") }
             }
+        )
+    }
+
+    // Batch 2 — Undo snackbar (Mariner BrowserScreen.kt:5047-5060):
+    // no BoxScope reaches function top level, so the host gets
+    // its own full-screen bottom-centred Box; the Box itself
+    // takes no touches, so taps pass through to the browser
+    // below except on a shown snackbar.
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        SnackbarHost(
+            hostState = snackHost,
+            modifier = Modifier.padding(bottom = 88.dp)
         )
     }
 }

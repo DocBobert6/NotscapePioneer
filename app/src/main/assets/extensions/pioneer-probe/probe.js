@@ -73,6 +73,14 @@
         // {"type":"media-scan"} — re-run the DOM scan now and
         // re-report via media-probe.
         if (msg && msg.type === "media-scan") report("scan");
+        // Batch 2: scroll restore for a URL-only relaunch
+        // restore (pre-alpha.6 saves). The port connects after
+        // load, so one scroll lands; the delayed retry covers
+        // a page whose layout is still settling.
+        if (msg && msg.type === "scroll" && typeof msg.y === "number") {
+          window.scrollTo(0, msg.y);
+          setTimeout(function () { window.scrollTo(0, msg.y); }, 500);
+        }
       });
     }
   } catch (e) { /* live zoom push unavailable; zoom-query still applies */ }

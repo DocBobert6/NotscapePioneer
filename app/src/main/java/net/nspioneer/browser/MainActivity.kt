@@ -76,6 +76,10 @@ class MainActivity : ComponentActivity() {
     private var screen by mutableStateOf(PioneerScreen.Browser)
     private val tabs = mutableStateListOf<EngineTab>()
     private var activeTabIndex by mutableIntStateOf(0)
+    // Batch 2: recently closed (normal tabs only, newest first,
+    // capped at 20, persisted — Mariner TabList.closedSnapshots
+    // + Store.saveClosedTabs). Private tabs are never recorded.
+    private val closedTabs = mutableStateListOf<TabSnapshot>()
     private val homeTabIds = mutableStateSetOf<Int>()
     private var browserBackHandler: (() -> Boolean)? = null
     private var uBlockPrompt by mutableStateOf<UBlockPrompt?>(null)
@@ -123,6 +127,7 @@ class MainActivity : ComponentActivity() {
         }
 
         restoreTabSession()
+        closedTabs.addAll(store.loadClosedTabs())
 
         // Launched from another app with a link (ACTION_VIEW):
         // open it in the active tab.
@@ -166,6 +171,18 @@ class MainActivity : ComponentActivity() {
                             onCloseTab = { tab -> closeTab(tab) },
                             onDuplicateTab = { tab -> duplicateTab(tab) },
                             onCloseOtherTabs = { tab -> closeOtherTabs(tab) },
+                            onCloseDuplicateTabs = { tab -> closeDuplicateTabs(tab) },
+                            onCloseAllTabs = { isPrivate -> closeAllTabsInClass(isPrivate) },
+                            onMoveTab = { tab, toIndexInClass -> moveTabWithinClass(tab, toIndexInClass) },
+                            closedTabs = closedTabs,
+                            onRemoveClosedTab = { snap ->
+                                closedTabs.remove(snap)
+                                store.saveClosedTabs(closedTabs.toList())
+                            },
+                            onClearClosedTabs = {
+                                closedTabs.clear()
+                                store.clearClosedTabs()
+                            },
                             onOpenScreen = { target -> screen = target },
                             onCopyStatus = { copyStatusToClipboard() },
                             onInstallUBlock = { engine.installUBlock() },
@@ -288,7 +305,14 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        // Batch 2: flush the session states first so the
+        // snapshot below carries the freshest history/scroll,
+        // then write every dirty store file NOW — the debounced
+        // save alone is not enough, the process may die before
+        // its 500 ms timer fires (PHASE2-GECKOVIEW-API.md §3).
+        engine.flushSessionStates()
         persistTabSession()
+        store.flush()
         super.onPause()
     }
 
@@ -341,6 +365,7 @@ class MainActivity : ComponentActivity() {
     private fun closeTab(tab: EngineTab) {
         val idx = tabs.indexOf(tab)
         if (idx < 0) return
+        recordClosed(tab)
         engine.destroyTab(tab)
         tabs.removeAt(idx)
         homeTabIds.remove(tab.id)
@@ -353,18 +378,94 @@ class MainActivity : ComponentActivity() {
         persistTabSession()
     }
 
-    private fun duplicateTab(tab: EngineTab) {
-        val url = tab.url.value.ifBlank { null }
-        createTab(tab.isPrivate, url)
+    /** Batch 2 (Mariner TabList.recordClosed): a closed NORMAL
+     *  tab with a real URL is remembered newest-first, capped
+     *  at 20, deduped by URL. Private tabs are never recorded —
+     *  that is the point of them. */
+    private fun recordClosed(tab: EngineTab) {
+        if (tab.isPrivate) return
+        val url = tab.url.value.trim()
+        if (url.isBlank() || url == "about:blank") return
+        closedTabs.removeAll { it.url == url }
+        closedTabs.add(0, TabSnapshot(url, tab.title.value))
+        while (closedTabs.size > 20) {
+            closedTabs.removeAt(closedTabs.lastIndex)
+        }
+        store.saveClosedTabs(closedTabs.toList())
     }
 
-    private fun closeOtherTabs(keep: EngineTab) {
-        tabs.toList().filter { it !== keep }.forEach { other ->
-            engine.destroyTab(other)
-            homeTabIds.remove(other.id)
+    /** Duplicate a tab right after itself and switch to the copy
+     *  (Mariner BrowserScreen.duplicateTab): the copy keeps the
+     *  desktop mode, and a home tab duplicates as a home tab. */
+    private fun duplicateTab(tab: EngineTab) {
+        val url = tab.url.value.ifBlank { null }
+        val idx = tabs.indexOf(tab)
+        val copy = engine.createTab(tab.isPrivate, desktopMode = tab.isDesktopMode.value)
+        wireTab(copy)
+        tabs.add(if (idx >= 0) idx + 1 else tabs.size, copy)
+        if (url == null) {
+            homeTabIds.add(copy.id)
+        } else {
+            copy.load(url)
         }
-        tabs.retainAll(listOf(keep))
-        activeTabIndex = 0
+        activeTabIndex = tabs.indexOf(copy)
+        persistTabSession()
+    }
+
+    /** Batch 2 (Mariner BrowserScreen.closeOtherTabs): close
+     *  every tab in [keep]'s privacy class except [keep] itself.
+     *  Goes through closeTab so each closed tab is recorded in
+     *  recently-closed, exactly as a single close is. */
+    private fun closeOtherTabs(keep: EngineTab) {
+        tabs.filter { it.isPrivate == keep.isPrivate && it.id != keep.id }
+            .toList().forEach { closeTab(it) }
+        activeTabIndex = tabs.indexOf(keep).coerceAtLeast(0)
+        persistTabSession()
+    }
+
+    /** Batch 2 (Mariner BrowserScreen.closeDuplicateTabs):
+     *  close duplicate URLs in [keep]'s privacy class, keeping
+     *  the active tab where it is one of the duplicates, else
+     *  the first tab per URL. Blank URLs are never closed. */
+    private fun closeDuplicateTabs(keep: EngineTab) {
+        tabs.filter { it.isPrivate == keep.isPrivate }
+            .groupBy { it.url.value.trim() }
+            .filter { (url, ts) -> url.isNotEmpty() && ts.size > 1 }
+            .values.forEach { ts ->
+                val survivor = ts.firstOrNull { it.id == keep.id }
+                    ?: ts.first()
+                ts.filter { it.id != survivor.id }.toList()
+                    .forEach { closeTab(it) }
+            }
+    }
+
+    /** Batch 2 (Mariner BrowserScreen.closeAllTabsInClass):
+     *  close every tab in one privacy class. */
+    private fun closeAllTabsInClass(isPrivate: Boolean) {
+        tabs.filter { it.isPrivate == isPrivate }.toList().forEach { closeTab(it) }
+    }
+
+    /** Batch 2 (Mariner TabList.moveWithinClass): move [tab] to
+     *  [toIndexInClass] within its privacy class, keeping the
+     *  class's relative order otherwise. */
+    private fun moveTabWithinClass(tab: EngineTab, toIndexInClass: Int) {
+        val active = activeTab
+        val sameClass = tabs.filter { it.isPrivate == tab.isPrivate }
+        val from = sameClass.indexOf(tab)
+        if (from < 0) return
+        val clamped = toIndexInClass.coerceIn(0, sameClass.size - 1)
+        if (clamped == from) return
+        val reordered = sameClass.toMutableList().apply {
+            removeAt(from)
+            add(clamped, tab)
+        }
+        var gi = 0
+        val merged = tabs.map { t ->
+            if (t.isPrivate == tab.isPrivate) reordered[gi++] else t
+        }
+        tabs.clear()
+        tabs.addAll(merged)
+        activeTabIndex = active?.let { tabs.indexOf(it) }?.takeIf { it >= 0 } ?: 0
         persistTabSession()
     }
 
@@ -383,7 +484,16 @@ class MainActivity : ComponentActivity() {
         if (!::store.isInitialized) return
         val nonPrivate = tabs.filter { !it.isPrivate }
         val snapshots = nonPrivate.map { tab ->
-            TabSnapshot(url = tab.url.value, title = tab.title.value, desktopMode = false)
+            // Batch 2: the real desktop mode (no longer hardcoded
+            // false), the scroll offset, and the session-state
+            // JSON — together they restore the tab as it was.
+            TabSnapshot(
+                url = tab.url.value,
+                title = tab.title.value,
+                desktopMode = tab.isDesktopMode.value,
+                scrollY = tab.scrollY.value,
+                sessionState = tab.sessionStateJson.value ?: ""
+            )
         }
         val active = tabs.getOrNull(activeTabIndex)
         val activeIdx = if (active == null || active.isPrivate) 0
@@ -398,14 +508,28 @@ class MainActivity : ComponentActivity() {
             return
         }
         saved.forEach { snapshot ->
-            // Restore by URL (no session-state restore in Phase 2);
-            // a blank saved URL restores as a fresh start-page tab.
-            createTab(
+            // Batch 2: a saved session state restores the tab
+            // whole — history, scroll, zoom, form data — with
+            // no load() afterwards. Without one (a pre-alpha.6
+            // save, or a tab whose state never pushed) fall back
+            // to the URL; the scroll rides the probe.
+            val stateJson = snapshot.sessionState.ifBlank { null }
+            val tab = engine.createTab(
                 isPrivate = false,
-                url = snapshot.url.ifBlank { null },
-                switchTo = false,
-                persist = false
+                restoreStateJson = stateJson,
+                desktopMode = snapshot.desktopMode,
+                scrollY = snapshot.scrollY
             )
+            wireTab(tab)
+            tabs.add(tab)
+            if (stateJson == null) {
+                val url = snapshot.url.ifBlank { null }
+                if (url == null) {
+                    homeTabIds.add(tab.id)
+                } else {
+                    tab.load(url)
+                }
+            }
         }
         activeTabIndex = store.tabSessionActive.coerceIn(0, tabs.lastIndex)
         persistTabSession()

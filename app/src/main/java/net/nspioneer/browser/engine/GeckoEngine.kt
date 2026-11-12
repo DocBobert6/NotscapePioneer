@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.media.DetectedMedia
+import net.nspioneer.browser.media.Downloads
 import net.nspioneer.browser.media.MediaLog
 import net.nspioneer.browser.media.VideoPopup
 import org.json.JSONObject
@@ -66,6 +67,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     companion object {
         private const val CAST_RECEIVER_APP_ID = "CC1AD845" // Default Media Receiver
+        /** Shared context id for every private tab (Batch 2):
+         *  one partitioned cookie jar for the whole private
+         *  class, as Mariner's single "notscape_private"
+         *  profile — so the last-private-close wipe below
+         *  deletes exactly the private data and nothing else. */
+        private const val PRIVATE_CONTEXT_ID = "pioneer-private"
     }
 
     private val appContext = context.applicationContext
@@ -244,6 +251,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         extensions.installProbeExtension()
         probeCastRoutes()
         statusPanel.refreshStats()
+        // Batch 2: wipe the private context at startup, as
+        // Mariner wipes its private profile — a process that
+        // died with private tabs open must not leave their
+        // data behind.
+        wipePrivateData()
     }
 
     // ------------------------------------------------------------------
@@ -265,16 +277,34 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     // Tabs
     // ------------------------------------------------------------------
 
-    override fun createTab(isPrivate: Boolean): EngineTab =
-        createTabInternal(isPrivate, isPopupWin = false)
+    override fun createTab(
+        isPrivate: Boolean,
+        restoreStateJson: String?,
+        desktopMode: Boolean,
+        scrollY: Int,
+    ): EngineTab =
+        createTabInternal(
+            isPrivate, isPopupWin = false,
+            restoreStateJson = restoreStateJson,
+            desktopMode = desktopMode, scrollY = scrollY
+        )
 
     /** Internal tab creation: popup windows (window.open /
      *  onNewSession after an allowed onPopupPrompt) are
      *  marked isPopupWin=true (Mariner TabList.isPopupWin). */
-    private fun createTabInternal(isPrivate: Boolean, isPopupWin: Boolean): EngineTab {
+    private fun createTabInternal(
+        isPrivate: Boolean,
+        isPopupWin: Boolean,
+        restoreStateJson: String? = null,
+        desktopMode: Boolean = false,
+        scrollY: Int = 0,
+    ): EngineTab {
         val session = if (isPrivate) {
             GeckoSession(
-                GeckoSessionSettings.Builder().usePrivateMode(true).build()
+                GeckoSessionSettings.Builder()
+                    .usePrivateMode(true)
+                    .contextId(PRIVATE_CONTEXT_ID)
+                    .build()
             )
         } else {
             GeckoSession()
@@ -285,6 +315,48 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // (first-load watch item: the spike loaded immediately after
         // open, before setActive/setFocused and before any view).
         session.open(runtime)
+        if (desktopMode) {
+            // Batch 2: desktop UA + viewport BEFORE any load or
+            // restore — setDesktopMode would reload and lose the
+            // restored scroll position.
+            session.settings.userAgentMode =
+                GeckoSessionSettings.USER_AGENT_MODE_DESKTOP
+            session.settings.viewportMode =
+                GeckoSessionSettings.VIEWPORT_MODE_DESKTOP
+            tab.isDesktopMode.value = true
+        }
+        if (!restoreStateJson.isNullOrBlank()) {
+            // Batch 2: relaunch restore — history, scroll,
+            // zoom and form data in one call (Mariner's
+            // WebView restoreState bundle, Gecko-shaped).
+            session.setActive(true)
+            session.setFocused(true)
+            runCatching {
+                GeckoSession.SessionState.fromString(restoreStateJson)?.let { state ->
+                    session.restoreState(state)
+                    // The delegate may or may not re-fire
+                    // onLocationChange for a restore; pin the bar
+                    // state from the state itself so the tab never
+                    // reads as a home tab, and keep the restore
+                    // from re-recording history.
+                    val current = state.getOrNull(state.currentIndex)
+                    val uri = current?.uri
+                    if (!uri.isNullOrBlank() && uri != "about:blank") {
+                        tab.url.value = uri
+                        tab.title.value = current.title ?: ""
+                        tab.lastNavigatedUrl = uri
+                    }
+                }
+            }.onFailure { e ->
+                statusPanel.status(
+                    "tab ${tab.id}: restoreState failed: ${e.message}"
+                )
+            }
+        } else if (scrollY > 0) {
+            // Batch 2: URL-only restore (pre-alpha.6 save) —
+            // the scroll rides the probe port when it connects.
+            tab.pendingScrollY = scrollY
+        }
         tabs += tab
         extensions.registerSession(session)
         return tab
@@ -302,6 +374,35 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         own.probePort?.let { runCatching { it.disconnect() } }
         own.probePort = null
         runCatching { own.session.close() }
+        // Batch 2: the last private tab closing wipes the whole
+        // private context (Mariner PrivateProfile.wipe, Gecko
+        // shape) — the session is already closed above, and no
+        // other private tab remains.
+        if (own.isPrivate && tabs.none { it.isPrivate }) {
+            wipePrivateData()
+            Downloads.wipePrivateDownloads(appContext, store)
+        }
+    }
+
+    override fun flushSessionStates() {
+        tabs.toList().forEach { tab ->
+            runCatching { tab.session.flushSessionState() }
+        }
+    }
+
+    /** Explicit private-data wipe (Mariner PrivateProfile.wipe):
+     *  delete the shared private context's storage. Scoped to
+     *  the private context id — normal tabs (null context) are
+     *  never touched. Any failure is logged, never thrown. */
+    private fun wipePrivateData() {
+        runCatching {
+            runtime.storageController.clearDataForSessionContext(PRIVATE_CONTEXT_ID)
+            statusPanel.status("private: wiped private context")
+        }.onFailure { e ->
+            statusPanel.status(
+                "private: wipe failed: ${e.javaClass.simpleName}"
+            )
+        }
     }
 
     override fun close() {
@@ -640,6 +741,23 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // The freshly connected page gets its stored factor at once,
         // so a live zoom change is not the only path that applies it.
         if (tab.textZoomFactor != 1.0f) postZoom(tab, tab.textZoomFactor)
+        // Batch 2: a pending scroll restore (URL-only relaunch
+        // restore, pre-alpha.6 saves) rides the port the moment
+        // it connects — the content script scrolls after load.
+        if (tab.pendingScrollY > 0) {
+            val y = tab.pendingScrollY
+            tab.pendingScrollY = 0
+            runCatching {
+                port.postMessage(
+                    JSONObject().apply {
+                        put("type", "scroll")
+                        put("y", y)
+                    }
+                )
+            }.onFailure { e ->
+                statusPanel.status("tab ${tab.id}: scroll post failed: ${e.message}")
+            }
+        }
     }
 
     override fun unregisterProbePort(port: WebExtension.Port) {
@@ -887,6 +1005,28 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             override fun onProgressChange(session: GeckoSession, progress: Int) {
                 tab.progress.value = progress
             }
+
+            // Batch 2: the session state is pushed on navigation,
+            // scrolling and form-data changes; it carries the
+            // back/forward history (for the history sheet) and,
+            // as a JSON string, the whole restorable tab (for
+            // relaunch restore). Kept per tab, memory-only.
+            override fun onSessionStateChange(
+                session: GeckoSession,
+                state: GeckoSession.SessionState,
+            ) {
+                val current = state.currentIndex
+                tab.historyEntries.value = (0 until state.size).map { i ->
+                    val item = state[i]
+                    SessionHistoryEntry(
+                        title = item.title ?: "",
+                        url = item.uri ?: "",
+                        index = i,
+                        isCurrent = i == current
+                    )
+                }
+                tab.sessionStateJson.value = state.toString()
+            }
         }
 
         session.contentDelegate = object : GeckoSession.ContentDelegate {
@@ -997,6 +1137,24 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         override val scrollY = mutableIntStateOf(0)
         override val findResult = mutableStateOf<FindResult?>(null)
         override val isDesktopMode = mutableStateOf(false)
+
+        // ---- Batch 2: session history + session state ----
+        override val historyEntries =
+            mutableStateOf<List<SessionHistoryEntry>>(emptyList())
+        override val sessionStateJson = mutableStateOf<String?>(null)
+
+        /** Pending scroll restore for a URL-only relaunch
+         *  restore (pre-alpha.6 save): posted to the probe
+         *  port when it connects, then cleared. */
+        var pendingScrollY: Int = 0
+
+        override fun goToHistoryIndex(index: Int) {
+            runCatching { session.gotoHistoryIndex(index) }
+        }
+
+        override fun flushSessionState() {
+            runCatching { session.flushSessionState() }
+        }
 
         override var onNavigate: ((String, String) -> Unit)? = null
         override var onLongPressLink: ((String) -> Unit)? = null
