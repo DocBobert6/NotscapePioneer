@@ -24,11 +24,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.draganddrop.DragAndDropTarget
-import androidx.compose.foundation.draganddrop.DragAndDropTransferData
 import androidx.compose.foundation.draganddrop.dragAndDropSource
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
-import androidx.compose.foundation.draganddrop.toAndroidDragEvent
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,6 +44,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -117,6 +115,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragAndDropTransferData
+import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -423,11 +424,6 @@ fun BrowserScreen(
     LaunchedEffect(tab.progress.value) {
         if (tab.progress.value >= 100) pullRefreshing = false
     }
-    // Batch 2: opening the grid captures the active tab's still
-    // first, so its card shows the page just left (Mariner).
-    LaunchedEffect(tabSwitcherOpen) {
-        if (tabSwitcherOpen) captureTabPreview(tab.id)
-    }
 
     fun openUrl(url: String) {
         homeTabIds.remove(tab.id)
@@ -531,6 +527,14 @@ fun BrowserScreen(
         val idx = tabs.indexOf(target)
         if (idx >= 0) onSwitchTab(idx)
         tabSwitcherOpen = false
+    }
+
+    // Batch 2: opening the grid captures the active tab's still
+    // first, so its card shows the page just left (Mariner).
+    // Declared after captureTabPreview above: Kotlin local
+    // functions must be declared before use.
+    LaunchedEffect(tabSwitcherOpen) {
+        if (tabSwitcherOpen) captureTabPreview(tab.id)
     }
 
     val suggestions = remember(fieldValue.text, editingAddress, store.revision) {
