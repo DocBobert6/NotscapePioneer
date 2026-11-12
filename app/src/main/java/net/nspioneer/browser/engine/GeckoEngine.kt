@@ -1228,7 +1228,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // URL is still blank (item 6). Every new-session
         // tab gets one, popup or gesture link alike.
         newTab.openerTab = sourceTab
-        newTab.popupTargetUri = uri
+        newTab.popupTargetUri.value = uri
         newTab.isNewSessionPending.value = true
         onTabCreated?.invoke(newTab)
         statusPanel.status(
@@ -1536,6 +1536,15 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 tab.isLoading.value = false
                 tab.progress.value = 100
                 statusPanel.status("tab ${n()}: load ${if (success) "OK" else "FAILED"}")
+                // Alpha.23 item 4: a failed load that never
+                // committed a URL leaves the tab blank — clear
+                // the pending target so the shell falls back to
+                // the start page instead of a permanent loading
+                // state. (A failed load normally still commits
+                // its URL, so this rarely fires.)
+                if (!success && tab.url.value.isBlank()) {
+                    tab.popupTargetUri.value = null
+                }
                 // Batch 4: a failed HTTPS-only upgrade means the
                 // host does not serve https — remember it on the
                 // tab, so the next attempt warns instead of
@@ -1731,6 +1740,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                     "tab ${tab.id}: new-session session still not open"
                 )
                 tab.isNewSessionPending.value = false
+                // Alpha.23 item 4: a session that never opened
+                // will never load — clear the pending target
+                // too, or the shell's belt-and-braces loading
+                // state would spin forever instead of falling
+                // back to the start page (which is what this
+                // branch is for).
+                tab.popupTargetUri.value = null
                 return@postDelayed
             }
             tab.sessionOpened.value = true
@@ -1849,8 +1865,9 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         var openerTab: GeckoTab? = null
 
         /** The URI onNewSession was asked to open — the bring-up
-         *  loads it when Gecko did not (items 3 + 4). */
-        var popupTargetUri: String? = null
+         *  loads it when Gecko did not (items 3 + 4). A State so
+         *  the shell can read it (alpha.23 item 4). */
+        override val popupTargetUri = mutableStateOf<String?>(null)
 
         /** True once a REAL load has started on this tab
          *  (onPageStart with a non-about:blank URL, alpha.23):

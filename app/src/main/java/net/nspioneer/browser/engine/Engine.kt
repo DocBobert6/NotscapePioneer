@@ -119,6 +119,12 @@ interface EngineTab {
     // starts (or the bring-up resolves): the shell shows a
     // loading state for the tab instead of the start page.
     val isNewSessionPending: State<Boolean>
+    // The URI onNewSession was asked to open (alpha.23 item 4):
+    // null for shell-created tabs. The shell shows a loading
+    // state while it is a real URL and the tab URL is still
+    // blank, even if isNewSessionPending was cleared by another
+    // path — belt and braces against the start-page flash.
+    val popupTargetUri: State<String?>
     // True once the session is open (engine-opened, or Gecko
     // opened it after onNewSession): the shell binds the view
     // on this signal, not on a recomposition side-effect.

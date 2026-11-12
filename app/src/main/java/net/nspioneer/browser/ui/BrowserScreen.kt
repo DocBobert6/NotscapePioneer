@@ -1639,7 +1639,20 @@ fun BrowserScreen(
                 modifier = Modifier.fillMaxSize()
             )
             if (isHome) {
-                if (tab.isNewSessionPending.value) {
+                // Alpha.23 item 4 (belt and braces): a
+                // new-session tab with a real target URI and
+                // still no URL shows the loading state even if
+                // isNewSessionPending was cleared by another
+                // path. The target must be a real URL — a blank
+                // or about:blank target (window.open() with no
+                // URL) resolves to the start page, not a spinner.
+                val hasPendingTarget =
+                    tab.popupTargetUri.value?.let {
+                        it.isNotBlank() && it != "about:blank"
+                    } == true
+                if (tab.isNewSessionPending.value ||
+                    (hasPendingTarget && tabUrl.isBlank())
+                ) {
                     // A new-session tab whose load has not started
                     // yet: a loading state, never the start page —
                     // the start page is what made Robert think
