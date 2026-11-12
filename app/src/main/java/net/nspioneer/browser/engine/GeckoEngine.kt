@@ -1456,7 +1456,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // srcUri) so the sheet can offer "View image",
                 // "Download" and "Block this element".
                 val imageUrl = if (
-                    element.type == GeckoSession.ContentDelegate.TYPE_IMAGE
+                    element.type == GeckoSession.ContentDelegate.ContextElement.TYPE_IMAGE
                 ) element.srcUri else null
                 if (element.linkUri != null || imageUrl != null) {
                     tab.onLongPressTarget?.invoke(
