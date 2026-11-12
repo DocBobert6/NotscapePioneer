@@ -93,10 +93,11 @@ import net.nspioneer.browser.engine.EngineTab
  *   actions (Save as PDF, Save offline, Scan QR,
  *   Screenshot). Omitted by design (their phases have not
  *   arrived — do not fake them): Reader view, Vault, Games,
- *   TTS, Playlists, Reading list, Bookshelf, Site blocking,
- *   Global ad blocking (uBlock Origin is the blocker in
- *   Pioneer). Downloads, Offline library, Add to home
- *   screen and Block an element (long-press) all exist now.
+ *   TTS, Playlists, Reading list, Bookshelf, Global ad
+ *   blocking (uBlock Origin is the blocker in Pioneer).
+ *   Downloads, Offline library, Add to home screen,
+ *   Block an element (long-press) and Blocked-elements
+ *   Manage all exist now.
  * - Desktop site is a real row: it flips the GeckoView
  *   user-agent + viewport to desktop via EngineTab.setDesktopMode
  *   and stores the choice per site; the choice is restored on

@@ -225,6 +225,13 @@ interface Engine {
     var onPopupPrompt: ((targetUri: String?) -> Unit)?        // on Engine
     fun answerPopupPrompt(allow: Boolean)
 
+    /** Mariner's strict-model popup decision for the current
+     *  page (§8.8): allowed when strict is off, or when the
+     *  site is whitelisted per-site. The single decision site
+     *  (audit S3): the shell's handlePopupPrompt asks here
+     *  instead of recomputing it against its own host. */
+    fun popupAllowedNow(): Boolean
+
     // ---- Batch 4: settings the engine enforces ----
     // Web dark mode ("Auto" | "On" | "Off"): GeckoView has no
     // forced darkening — this sets prefers-color-scheme only

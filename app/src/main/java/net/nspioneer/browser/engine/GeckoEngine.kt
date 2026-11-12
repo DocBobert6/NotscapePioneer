@@ -160,7 +160,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                     runCatching { Uri.parse(u).host }.getOrNull() ?: ""
                 } ?: ""
             },
-            onPopupAllowed = { expectPopupSession = true },
+            onPopupAllowed = { target ->
+                expectPopupSession = true
+                expectPopupTarget = target
+            },
         )
     }
 
@@ -178,8 +181,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     /** Set when a popup was allowed (onPopupPrompt ALLOW):
      *  the next onNewSession tab is a popup window
-     *  (isPopupWin=true). Consumed by onNewSession. */
+     *  (isPopupWin=true). Consumed by onNewSession.
+     *  expectPopupTarget carries the allowed popup's URI
+     *  (null for a target-less window.open): only a new
+     *  tab whose URI matches is marked, so a prompt that
+     *  never produces a tab cannot mis-mark the next
+     *  unrelated tab (audit S3). */
     private var expectPopupSession: Boolean = false
+    private var expectPopupTarget: String? = null
 
     /**
      * Popunder-guard captures (strict popup blocker, §8.9):
@@ -576,6 +585,9 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun answerPopupPrompt(allow: Boolean) {
         promptDelegate.answerPopup(allow)
     }
+
+    override fun popupAllowedNow(): Boolean =
+        promptDelegate.popupAllowedNow()
 
     // ------------------------------------------------------------------
     // Batch 4: settings the engine enforces
@@ -1333,8 +1345,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // expectPopupSession, the new tab is marked
                 // isPopupWin=true (Mariner TabList.isPopupWin) so
                 // onCloseWindow can close it.
-                val isPopup = expectPopupSession
+                val isPopup = expectPopupSession &&
+                    (expectPopupTarget == null || expectPopupTarget == uri)
                 expectPopupSession = false
+                expectPopupTarget = null
                 val newTab = createTabInternal(tab.isPrivate, isPopup) as GeckoTab
                 onTabCreated?.invoke(newTab)
                 statusPanel.status(

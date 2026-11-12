@@ -59,8 +59,10 @@ data class HistoryEntry(val id: Long, val title: String, val url: String, val vi
 data class SiteSetting(
     val host: String, val javaScript: Boolean = true,
     val blockImages: Boolean = false, val allowPopups: Boolean = false,
-    val disableBlocking: Boolean = false, val blockPopups: Boolean = false,
-    val allowThirdPartyCookies: Boolean = false
+    val disableBlocking: Boolean = false, val blockPopups: Boolean = false
+    // No per-site third-party-cookies field: GeckoView 159
+    // has no such API (audit S4, documented-impossible), so
+    // the field was defined + serialised but never read.
 )
 
 data class TabSnapshot(
@@ -1235,8 +1237,10 @@ class PioneerStore private constructor(context: Context) {
                     s.optBoolean("img", false),
                     s.optBoolean("pop", false),
                     s.optBoolean("nb", false),
-                    s.optBoolean("bp", false),
-                    s.optBoolean("c3", false)
+                    s.optBoolean("bp", false)
+                    // "c3" (per-site third-party cookies) is no
+                    // longer read: no such GeckoView API exists.
+                    // Old files carrying it still parse.
                 )
             }
         }.onFailure { Log.w(TAG, "load siteSettings: ${it.javaClass.simpleName}") }
@@ -1330,7 +1334,6 @@ class PioneerStore private constructor(context: Context) {
                             .put("pop", s.allowPopups)
                             .put("nb", s.disableBlocking)
                             .put("bp", s.blockPopups)
-                            .put("c3", s.allowThirdPartyCookies)
                     )
                 }
             }

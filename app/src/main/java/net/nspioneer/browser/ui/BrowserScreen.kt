@@ -975,8 +975,10 @@ fun BrowserScreen(
      *  are silenced completely: no notice, ever. */
     fun handlePopupPrompt(targetUri: String?) {
         val host = pageHost
-        val strict = store.setting("popupStrict", "true") == "true"
-        val allowed = !strict || store.siteSetting(host).allowPopups
+        // Single decision site (audit S3): the engine's
+        // popupAllowedNow, not a recomputation against the
+        // shell's host.
+        val allowed = engine.popupAllowedNow()
         if (allowed) {
             engine.answerPopupPrompt(true)
             return
@@ -2870,7 +2872,6 @@ fun BrowserScreen(
                 }
             },
             castAvailable = castAvailable,
-            playlistAddAllowed = false,
             onPlay = { media, startPip ->
                 PlayerActivity.launch(
                     context, media.url, media.label.ifBlank { tab.title.value },

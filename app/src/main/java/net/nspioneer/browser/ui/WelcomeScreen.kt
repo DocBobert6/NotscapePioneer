@@ -68,9 +68,10 @@ import net.nspioneer.browser.data.PioneerStore
  *
  * Pioneer scope, not Mariner's: no Games page, no
  * bookshelf / reader / playlists, no notifications ask
- * (Pioneer has no download-notifications helper). Strings
- * are literals — Pioneer's strings.xml carries only
- * app_name.
+ * (the download progress notification helper exists —
+ * Downloads.progressNotification — the welcome flow
+ * simply does not ask). Strings are literals —
+ * Pioneer's strings.xml carries only app_name.
  */
 @Composable
 fun WelcomeScreen(store: PioneerStore, onDone: () -> Unit) {

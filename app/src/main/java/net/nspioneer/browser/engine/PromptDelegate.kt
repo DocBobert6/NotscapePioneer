@@ -62,8 +62,12 @@ class PioneerPromptDelegate(
     /** Host of the page the popup / chooser came from. */
     private val pageHost: () -> String,
     /** Called when a popup is allowed (engine marks the next
-     *  onNewSession tab as a popup window). */
-    private val onPopupAllowed: () -> Unit,
+     *  onNewSession tab as a popup window). Receives the
+     *  allowed popup's target URI (null for a target-less
+     *  window.open): the engine only arms a new tab whose
+     *  URI matches, so a prompt that never produces a tab
+     *  cannot mis-mark the next unrelated tab. */
+    private val onPopupAllowed: (String?) -> Unit,
 ) : GeckoSession.PromptDelegate {
 
     // ---- file chooser ----
@@ -188,7 +192,7 @@ class PioneerPromptDelegate(
         if (deliver == null) {
             // No shell handler: apply the strict model here.
             val allowed = popupAllowedNow()
-            if (allowed) onPopupAllowed()
+            if (allowed) onPopupAllowed(pendingPopupTarget)
             runCatching {
                 result.complete(
                     prompt.confirm(
@@ -209,7 +213,7 @@ class PioneerPromptDelegate(
         // request must never hang unanswered.
         if (pendingPopupResult === result) {
             val allowed = popupAllowedNow()
-            if (allowed) onPopupAllowed()
+            if (allowed) onPopupAllowed(pendingPopupTarget)
             runCatching {
                 result.complete(
                     prompt.confirm(
@@ -240,6 +244,7 @@ class PioneerPromptDelegate(
     fun answerPopup(allow: Boolean) {
         val result = pendingPopupResult ?: return
         val prompt = pendingPopupPrompt
+        val target = pendingPopupTarget
         pendingPopupResult = null
         pendingPopupPrompt = null
         pendingPopupTarget = null
@@ -247,7 +252,7 @@ class PioneerPromptDelegate(
             runCatching { result.complete(null) }
             return
         }
-        if (allow) onPopupAllowed()
+        if (allow) onPopupAllowed(target)
         runCatching {
             result.complete(
                 prompt.confirm(if (allow) AllowOrDeny.ALLOW else AllowOrDeny.DENY)
@@ -255,10 +260,10 @@ class PioneerPromptDelegate(
         }
     }
 
-    /** Whether the site has silenced popup notices entirely
-     *  ("Always deny" — Mariner: no notice, ever). */
-    fun popupsSilenced(): Boolean {
-        val host = pageHost()
-        return host.isNotBlank() && store.siteSetting(host).blockPopups
-    }
+    // NOTE: no popupsSilenced() helper — the two notice paths
+    // check blockPopups against DIFFERENT hosts (the shell's
+    // active-tab host in handlePopupPrompt, the popunder
+    // capture's host in the merge), so a helper bound to
+    // pageHost() would answer for the wrong site. The
+    // inline checks stay (audit S3 cleanup).
 }

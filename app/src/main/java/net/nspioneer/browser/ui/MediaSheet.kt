@@ -12,7 +12,6 @@ import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,17 +44,18 @@ import net.nspioneer.browser.media.VideoPopup
  * FrostSheet, max 60% screen height; per item Play, PiP
  * (video only, launches the player straight into PiP),
  * Download, Cast (only if [castAvailable] and the URL is
- * remote), Add to playlist (if [playlistAddAllowed]); merge
- * checkboxes (select 2 → "Merge" → [onMerge] with the pair);
- * footer per-site pop-up opt-out toggle; empty state verbatim.
+ * remote); merge checkboxes (select 2 → "Merge" →
+ * [onMerge] with the pair); footer per-site pop-up
+ * opt-out toggle; empty state verbatim.
  *
  * Phase 4 boundary: the Cast tap is present but does not
  * launch a session (design §10). [onCast] is the shell's
  * hook for whatever the integration decides (deferred
  * notice); the sheet itself never starts a Cast session.
- * Likewise [onDownload] / [onAddToPlaylist] / [onMerge]
- * are shell hooks — the download engines and the playlist
- * store live outside this file.
+ * Likewise [onDownload] / [onMerge] are shell hooks —
+ * the download engines live outside this file. Add to
+ * playlist is Phase 4 with playlists: no parameter, no
+ * button until then (audit S3 cleanup).
  */
 @Composable
 fun MediaSheet(
@@ -67,12 +67,10 @@ fun MediaSheet(
     popupOff: Boolean,
     onPopupOffChange: (Boolean) -> Unit,
     castAvailable: Boolean,
-    playlistAddAllowed: Boolean,
     onPlay: (DetectedMedia, startPip: Boolean) -> Unit,
     onDownload: (DetectedMedia) -> Unit,
     onOpenPage: (DetectedMedia) -> Unit,
     onCast: ((DetectedMedia) -> Unit)? = null,
-    onAddToPlaylist: ((DetectedMedia) -> Unit)? = null,
     onMerge: ((List<DetectedMedia>) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
@@ -194,16 +192,6 @@ fun MediaSheet(
                                                         onCast?.invoke(item)
                                                     }) {
                                                         Icon(Icons.Filled.Cast, contentDescription = "Cast")
-                                                    }
-                                                }
-                                                if (playlistAddAllowed) {
-                                                    IconButton(onClick = {
-                                                        onAddToPlaylist?.invoke(item)
-                                                    }) {
-                                                        Icon(
-                                                            Icons.Filled.PlaylistAdd,
-                                                            contentDescription = "Add to playlist"
-                                                        )
                                                     }
                                                 }
                                             }
