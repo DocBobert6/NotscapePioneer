@@ -36,8 +36,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -735,7 +737,7 @@ internal fun BrowserMenuRowsContent(
             val desktopNow = host.isNotBlank() && store.siteDesktop(host)
             MenuRowVisible(store, "desktopSite",
                 if (desktopNow) "Desktop site ✓" else "Desktop site",
-                null
+                Icons.Filled.DesktopWindows
             ) {
                 onDismiss()
                 if (host.isNotBlank()) {
@@ -752,7 +754,7 @@ internal fun BrowserMenuRowsContent(
             MenuRowVisible(store, "favoritesManager", "Favorites", Icons.Filled.Favorite) { onDismiss(); onOpenScreen(PioneerScreen.Favorites) }
         },
         MenuSlot("history", shows("history")) {
-            MenuRowVisible(store, "history", "History", null) { onDismiss(); onOpenScreen(PioneerScreen.History) }
+            MenuRowVisible(store, "history", "History", Icons.Filled.History) { onDismiss(); onOpenScreen(PioneerScreen.History) }
         },
         MenuSlot("downloads", shows("downloads")) {
             MenuRowVisible(store, "downloads", "Downloads", Icons.Filled.Download) { onDismiss(); onOpenScreen(PioneerScreen.Downloads) }
@@ -766,7 +768,7 @@ internal fun BrowserMenuRowsContent(
             }
         },
         MenuSlot("copyStatus", shows("copyStatus")) {
-            MenuRowVisible(store, "copyStatus", "Copy status", null) { onDismiss(); onCopyStatus() }
+            MenuRowVisible(store, "copyStatus", "Copy status", Icons.Filled.ContentCopy) { onDismiss(); onCopyStatus() }
         },
         MenuSlot("diagnostics", shows("diagnostics")) {
             MenuRowVisible(store, "diagnostics", "Diagnostics", Icons.Filled.Info) { onDismiss(); onOpenScreen(PioneerScreen.Diagnostics) }
