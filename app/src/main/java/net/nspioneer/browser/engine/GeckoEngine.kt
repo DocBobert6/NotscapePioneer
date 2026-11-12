@@ -304,12 +304,15 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     /** The stored web-dark-mode value as a GeckoView colour
      *  scheme (Batch 4): Auto → system, On → dark, Off →
-     *  light. */
+     *  light. Case-normalised: Settings writes lowercase
+     *  ("auto"/"on"/"off") and an older default was "Auto" —
+     *  the reader must accept either case, or On/Off never
+     *  takes effect (audit 2026-11-12). */
     private fun preferredColorSchemeForStore(): Int = when (
-        store.setting("webDarkMode", "Auto")
+        store.setting("webDarkMode", "auto").lowercase()
     ) {
-        "On" -> GeckoRuntimeSettings.COLOR_SCHEME_DARK
-        "Off" -> GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
+        "on" -> GeckoRuntimeSettings.COLOR_SCHEME_DARK
+        "off" -> GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
         else -> GeckoRuntimeSettings.COLOR_SCHEME_SYSTEM
     }
 
@@ -582,9 +585,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     override fun setWebDarkMode(mode: String) {
         runCatching {
-            runtime.settings.preferredColorScheme = when (mode) {
-                "On" -> GeckoRuntimeSettings.COLOR_SCHEME_DARK
-                "Off" -> GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
+            // Case-normalised: Settings passes lowercase
+            // ("auto"/"on"/"off"); accept either case.
+            runtime.settings.preferredColorScheme = when (mode.lowercase()) {
+                "on" -> GeckoRuntimeSettings.COLOR_SCHEME_DARK
+                "off" -> GeckoRuntimeSettings.COLOR_SCHEME_LIGHT
                 else -> GeckoRuntimeSettings.COLOR_SCHEME_SYSTEM
             }
         }.onFailure { e ->
