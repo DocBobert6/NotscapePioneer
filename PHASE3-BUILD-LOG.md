@@ -7,9 +7,10 @@ permissions and file chooser. Measured against WebView Mariner on the same
 pages, numbers reported plainly — including anywhere Gecko comes out worse.
 Gate 3 is a parity scorecard Robert can read in two minutes.
 
-Head commit: `a99070a4` (fix) on top of `1fad27af` (Phase 3) on top of
-`43a77b68` (Phase 2, 0.1.0-alpha.3). Version: `0.1.0-alpha.4`,
-versionCode 4, debug-signed only. No release keystore created.
+Head commit: `ccdc9b3a` (CI: run unit tests in CI + this log) on top of
+`a99070a4` (fix) on top of `1fad27af` (Phase 3) on top of `43a77b68`
+(Phase 2, 0.1.0-alpha.3). Version: `0.1.0-alpha.4`, versionCode 4,
+debug-signed only. No release keystore created.
 
 ## Design
 
@@ -86,6 +87,7 @@ versionCode 4, debug-signed only. No release keystore created.
 |---|---|---|---|
 | 43155186361 | 1fad27af | failure | `compileDebugKotlin`: 33 errors in 4 files (see below) |
 | 43156077397 | a99070a4 | **success** | fix commit (below) |
+| 43156629347 | ccdc9b3a | **success** | workflow test step + this log; `Run unit tests` step passes in CI (row A now genuinely CI-measured) |
 
 Fix commit `a99070a4` ("Phase 3 fix: CI compile errors …"):
 - `DownloadWorkers.kt`: unqualified `Result` resolved to `kotlin.Result`
@@ -125,6 +127,12 @@ Fix commit `a99070a4` ("Phase 3 fix: CI compile errors …"):
   refs), `BlockingObserver` (17), `PlayerActivity` (547),
   `DownloadWorkers` (15), `HlsDownloadWorker` (4), `Copy status`,
   `installUBlock` (17), `GeckoEngine` (143), `PioneerStore` (324).
+- Head build re-verified (run 43156629347, head `ccdc9b3a`, artifact
+  13916222722): zip 120,242,106 bytes; APK 220,648,004 bytes (same size
+  as the 43156077397 APK), SHA-256
+  `ff7a90bfe8b6c6845502a270154c374ded680b83ebef5aa336a0e77f7c3a3d34`
+  (differs from `4c36071e…` — debug-build signing timestamps; same
+  code), package/version/code/minSdk/libxul all confirmed again.
 - Size note: 220,648,004 bytes vs alpha.3's 211,311,019 (+9,336,985) —
   Media3 1.9.4 + WorkManager + the lists/player code. The engine is
   still the cost (libxul ~154 MB).
