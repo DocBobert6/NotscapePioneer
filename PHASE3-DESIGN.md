@@ -904,21 +904,66 @@ one.
 
 ### 8.9 Popups
 
-**PORT — Mariner's model, ADAPTED to `onPopupPrompt` (API doc §4).**
-`popupStrict` (default true). Per-site `allowPopups` → a real new tab
-(`isPopupWin=true`, created by the engine as in Phase 2's
-`onNewSession` path). Blocked → the target URL is collected into
-`pendingPopupUrls` (max 5) and a notice is shown, unless per-site
-`blockPopups` ("Always deny" silences completely). `onCloseWindow`
-closes the popup tab. **Popunder guard (adapted):** Mariner's guard
-lives in `shouldOverrideUrlLoading` (gesture-less main-frame hop to a
-different host covered by `FilterEngine.isDocumentBlocked` → captured
-as a blocked popup). GeckoView has no equivalent hook; the guard is
-approximated from `NavigationDelegate.onLocationChange` + the probe's
-`webRequest` observation (a main-frame navigation with no user gesture
-to a `$document`-blocked host). The worker records how close the
-approximation gets on the scorecard (§9 row K) instead of claiming
-parity it cannot measure.
+**REBUILT (alpha.13, Robert agreed 2026-11-12) — one popup controller,
+`engine/PopupController.kt`.** The old design split the decision across
+four pieces (`expectPopupSession` boolean, PromptDelegate pending fields,
+`handlePopupPrompt` in the shell, popunder-guard capture); the rebuild
+replaces all four with a single per-source-tab state machine (pending →
+allowed / denied / captured) holding the Gecko request, the target URI,
+and the source tab together until answered. No global boolean, no
+cross-tab mis-marking.
+
+- **Decision (items 1+2):** `onPopupPrompt` maps the session to its
+  source tab and evaluates `allowPopups` / `blockPopups` for that tab's
+  host, never `currentTab`'s. `popupStrict` (default true). Allowed →
+  a real new tab (`isPopupWin=true`, created by the engine as in Phase
+  2's `onNewSession` path). Denied → captured, never loaded.
+- **Allowed popup (items 3+4):** once Gecko opens the returned session,
+  the app sets it active and focused, binds the view on the explicit
+  `sessionOpened` signal, and switches to it. The GeckoView 159 API
+  evidence does not settle whether Gecko loads the `onNewSession` URI
+  into the returned session (API doc §9 is silent; only a code comment
+  claimed it), so the app loads the URI itself after Gecko's open, ONLY
+  when the session is still blank — correct whether or not Gecko loads
+  it. While the load is pending the tab shows a loading state, never
+  the start page. The device check (Copy status after tapping Full Show
+  on watch-wrestling.eu) is the verification: discriminator lines
+  "tab M: window.open -> tab N", "tab N: loading <url>", "load
+  OK/FAILED", plus "tab N: Gecko did not load the new-session URI —
+  loading it" when the fallback fires.
+- **Denied popup (item 5):** captured from two sources — `prompt.targetUri`
+  AND the popunder guard's capture of the opener's next gesture-less hop
+  (covers target-less `window.open()`). Blocked URLs collect into the
+  controller's queue (max 5) and a notice is shown, unless per-site
+  `blockPopups` ("Always deny" silences completely). "Open once" /
+  "Open all" work off the captured list.
+- **Popunder guard (item 6):** Mariner's rule (gesture-less main-frame
+  hop to a different host covered by `FilterEngine.isDocumentBlocked` →
+  captured as a blocked popup), implemented in `onLoadRequest` — the
+  earlier "approximation" note was stale: the implementation already
+  used `onLoadRequest`, not `onLocationChange` + probe observation.
+  Two blind spots fixed: the "here" host falls back to the opener
+  tab's host for a fresh popup tab (its own URL is blank), so redirect
+  hops inside a popup tab's load chain are capturable (deny + capture
+  with notice, not silent deny).
+- **Bar and view (item 7):** the address bar follows the *bound*
+  session's URL (`boundTabId`, set only on a successful bind, never
+  reset), not the active tab's recorded URL; the view re-binds
+  deterministically on the `sessionOpened` signal.
+- **Self-closing popup (item 8):** `onCloseWindow` still closes only
+  popup tabs, and now leaves a "Popup closed" status line + a brief
+  toast when it was the selected tab. Engine-closed tabs never show
+  the "Tab closed / Undo" bar.
+- **Timers (item 9):** the "Tab closed" snackbar has an explicit Short
+  duration and is single-shot (no second bar queues while one is
+  showing). The popup notice's 12s auto-dismiss hides only — it no
+  longer clears the captured queue; the queue clears on the user's own
+  dismiss or on opening the URLs.
+- **Tests (item 10):** `PopupControllerTest` covers the decision matrix
+  (strict off allows; strict on default DENY_CAPTURE; strict on +
+  whitelisted allows; strict on + blacklisted DENY_SILENT; allow beats
+  block) and capture rules (order, dedupe, blank/about:blank ignored,
+  cap 5).
 
 ## Gate 3 scorecard (side-by-side parity vs WebView Mariner)
 
@@ -943,7 +988,7 @@ word).
 | H | Player UI: exact match | Same video in Mariner's player and Pioneer's player, side-by-side screenshots: top capsule, centre transport, options capsule + each pill row (scale / quality / audio / subtitles), portrait scrubber pill, brightness + volume pills, lock cover, queue dialog. Then the gesture set: double-tap ±10s, centre double-tap zoom reset, hold-to-scan, drag seek / brightness / volume, pinch zoom 1–3× + pan. Speed cycle 0.5→2.0×, sleep cycle 0→60m, listen mode, PiP enter. | Screenshot pairs must match (layout, controls, labels, icons). Gestures must produce the same result in both. Any difference is listed, not waved through. | **Device-owed** |
 | I | File chooser | A page with `<input type=file>`, one with `multiple`, one with `accept="image/*"`, one folder upload. Pick a file from the device (including a SAF `content://` pick, e.g. from Downloads). | The picked file arrives in the page (or the upload completes) in both browsers. The `content://` pick is the trap row (API doc §3) — if it returns null in Pioneer, FAIL. | **Device-owed** |
 | J | Permissions | `https://permission.site` (camera, microphone, geolocation) + an autoplay test page, in both browsers. Answer allow / deny / dismiss per prompt; revisit the site; check the stored decision is honoured; deny the OS permission once and confirm the site is not granted. | Dialog text matches Mariner's ("Allow $host to use" + resource words); decisions persist across a restart; OS denial never grants the site. | **Device-owed** |
-| K | Popups | A popup-test page (user-gesture popup → new tab; scripted popup → blocked + notice; popunder hop → blocked). | New tab opens for the gesture popup; blocked popups collect (max 5) with the notice; `blockPopups` silences. Popunder approximation quality recorded as it measures (§8.9). | **Device-owed** |
+| K | Popups | A popup-test page (user-gesture popup → new tab; scripted popup → blocked + notice; popunder hop → blocked) + watch-wrestling.eu Full Show tap. | New tab opens for the gesture popup **with content** (loading state, never the start page; bar shows the bound session's URL); blocked popups collect (max 5) with the notice; `blockPopups` silences; self-closing popup leaves a "Popup closed" trace. Copy-status discriminator lines are the evidence: "tab M: window.open -> tab N", "tab N: loading <url>", "load OK/FAILED", plus "tab N: Gecko did not load the new-session URI — loading it" if the item-4 fallback fires. | **Device-owed** |
 | L | Inventory diff (the 22:47 lesson) | **From the code, not from eyeballing:** every Mariner setting key, menu row and feature in Phase 3 scope, checked against Pioneer. | A written list: carried over / adapted (with reason) / dropped (with reason) / missing. Any missing item is a FAIL of this row until it is carried over or dropped with a recorded reason. | **CI-adjacent** — produced by reading code, verified at Gate 3 from the diff. |
 | M | Material You | Same wallpaper on the Pixel 10a; open the player, a dialog, and a sheet in both browsers. | Dynamic palette applies (colours follow the wallpaper) in the Phase 3 build exactly as in Mariner. **Fix only if broken** — this row is a check, not a rebuild. | **Device-owed** |
 | N | Fullscreen video | An in-page video with a fullscreen button, in both browsers. | Enter: system bars hide, chrome hides, video fills the screen. Exit: everything restores. The pop-up ▶ button hides while fullscreen. | **Device-owed** |
