@@ -1007,6 +1007,16 @@ an emulator is a Pixel 10a result).
 
 ## Post-Phase 3 workstream (NOT Phase 3 scope — record, do not build)
 
+Decided 2026-11-12 (alpha.10 fix round, Robert agreed to all 20
+recommendations): **reading list, user scripts and playlists are
+Phase 4** — reader + bookshelf for the reading list, the reader
+workstream for user scripts, player work for playlists. They are
+not built in alpha.10 and are not gaps in Phase 3. **MSE / blob
+finder blindness is a documented known Gecko limit, not a gap:**
+direct-URL recovery for MSE playback is impossible in principle
+(§8 verdict above — no URL exists for an MSE stream); the
+webRequest observer recovers manifest / segment URLs only.
+
 The Phase 1–2 shell UI audit + corrections (Robert, 2026-11-11 22:43):
 audit what is already built (Phases 1–2 shell) against Mariner, list the
 differences, correct them as standalone commits sequenced **after**
