@@ -6,6 +6,7 @@ import net.nspioneer.browser.engine.PopupVerdict
 import net.nspioneer.browser.engine.addPopupCapture
 import net.nspioneer.browser.engine.answerEffect
 import net.nspioneer.browser.engine.decidePopup
+import net.nspioneer.browser.engine.isCrossSiteLink
 import net.nspioneer.browser.engine.isGestureBlocked
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -136,5 +137,35 @@ class PopupControllerTest {
 
     @Test fun gesture_strictOff_isNotBlockedEvenWhenBlacklisted() {
         assertFalse(isGestureBlocked(strict = false, allowPopups = false, blockPopups = true))
+    }
+
+    // ---- cross-site tapped links (alpha.20) ----
+
+    @Test fun crossSite_differentHosts_isCrossSite() {
+        // The Full Show tap: watch-wrestling.eu -> techradan.com.
+        assertTrue(isCrossSiteLink("watch-wrestling.eu", "techradan.com"))
+    }
+
+    @Test fun crossSite_sameHost_isNotCrossSite() {
+        assertFalse(isCrossSiteLink("watch-wrestling.eu", "watch-wrestling.eu"))
+    }
+
+    @Test fun crossSite_sameHostDifferentCase_isNotCrossSite() {
+        assertFalse(isCrossSiteLink("Watch-Wrestling.eu", "watch-wrestling.EU"))
+    }
+
+    @Test fun crossSite_subdomain_isCrossSite() {
+        // Exact-host rule, same as the popunder guard:
+        // a subdomain is a different host.
+        assertTrue(isCrossSiteLink("example.com", "www.example.com"))
+    }
+
+    @Test fun crossSite_blankSource_isNotCrossSite() {
+        // A link from the start page has no source host.
+        assertFalse(isCrossSiteLink("", "techradan.com"))
+    }
+
+    @Test fun crossSite_blankTarget_isNotCrossSite() {
+        assertFalse(isCrossSiteLink("watch-wrestling.eu", ""))
     }
 }
