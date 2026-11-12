@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Notscape Pioneer — Phase 1 spike. Minimal GeckoView browser:
-     one GeckoRuntime, three GeckoSessions as tabs, an address bar.
-     Debug-signed only; no release key exists for this app. -->
+<!-- Notscape Pioneer — Phase 2 shell parity (alpha).
+     GeckoView browser: tabs, history, bookmarks, start page,
+     menu + Customize. Debug-signed only; no release key
+     exists for this app. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -17,11 +18,20 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Links sent from other apps open in Pioneer. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
             </intent-filter>
         </activity>
 

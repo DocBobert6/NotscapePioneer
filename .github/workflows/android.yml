@@ -1,9 +1,9 @@
 name: Android CI
 
-# Notscape Pioneer — Phase 1 spike.
+# Notscape Pioneer — Phase 2 shell parity (alpha).
 # A push to main only builds the debug APK and uploads it as an
 # artifact. There is NO release job, NO tag publishing, and NO
-# keystore: the spike is debug-signed only. Nothing here touches
+# keystore: the alpha is debug-signed only. Nothing here touches
 # NotscapeMariner or its RC1.
 on:
   push:
@@ -50,5 +50,5 @@ jobs:
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pioneer-spike-apk
+          name: pioneer-alpha-apk
           path: app/build/outputs/apk/debug/*.apk

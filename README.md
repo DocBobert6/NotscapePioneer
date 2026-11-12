@@ -8,16 +8,17 @@ Gecko makes possible.
 
 Local-only and private, stated positively. No account, no sync.
 
-## Status: Phase 1 spike (alpha, throwaway)
+## Status: Phase 2 shell parity (alpha)
 
-This repository currently holds **only the Phase 1 spike**: a minimal
-GeckoView browser — one `GeckoRuntime`, three `GeckoSession` tabs, an
-address bar, nothing else. It is timeboxed and throwaway. Phase 2 (shell
-parity) does not start until the spike report is written and Robert
-decides go or no-go.
+Gate 1 passed on Robert's Pixel 10a (uBlock installs + blocks, Widevine
+plays, Cast finds 8 routes, cold start 1491ms). Phase 2 is a browser
+Robert can genuinely browse with: tabs, navigation, history, find,
+per-site zoom, private tabs, start page, bookmarks, the full menu and
+Customize. No media, no reader, no vault fill yet — those arrive with
+their phases.
 
 - Package: `net.nspioneer.browser`
-- Version: `0.1.0-alpha.2` (versionCode 2), debug-signed only
+- Version: `0.1.0-alpha.3` (versionCode 3), debug-signed only
 - Engine: GeckoView **159.0.20261102144711** (stable, Firefox 159) —
   pinned, never nightly or beta. arm64-v8a only, minSdk 26.
   Toolchain: AGP 9.4.1 / Kotlin 2.3.21 / Gradle 9.8.1 / compileSdk 36
@@ -31,22 +32,31 @@ decides go or no-go.
 - CI is the compile path (GitHub Actions, `Android CI` workflow).
   Local Gradle does not run in this VM.
 
-## What the spike does
+## What Phase 2 does
 
-- Three tabs backed by three `GeckoSession`s under one `GeckoRuntime`,
-  with Enhanced Tracking Protection set to Strict.
-- Installs uBlock Origin at first launch from AMO
-  (`WebExtensionController.install`, auto-approved install prompt —
-  spike only; a real browser would show the prompt).
+- Tabs backed by one `GeckoSession` each under one `GeckoRuntime`,
+  with Enhanced Tracking Protection set to Strict (changeable in
+  Settings, applies at once). Tab session restores by URL on launch.
+- Private tabs use Gecko private sessions; they are memory-only and
+  never recorded.
+- History, bookmarks (nested folders, HTML import/export), favourites,
+  start page with most-visited tiles — all in a fresh Pioneer-only
+  profile. No shared database with Mariner, no sync.
+- Find in page, per-site text zoom (via the probe extension's content
+  script — GeckoView has no per-session zoom API), per-site desktop
+  mode, full menu with Customize.
+- Installs uBlock Origin from AMO behind a real install prompt
+  (name + permissions, Install / Later) — never auto-approved.
 - Bundles its own `pioneer-probe` WebExtension
   (`app/src/main/assets/extensions/pioneer-probe/`), which reports
-  media URLs and Widevine EME status per page to the app.
+  media URLs and Widevine EME status per page to the app, and applies
+  per-site text zoom.
 - Probes Cast route discovery only (Default Media Receiver) — no
   Cast session is ever launched.
-- An on-screen spike panel (and logcat tag `PioneerSpike`) shows:
+- A Diagnostics screen (and logcat tag `PioneerSpike`) shows:
   install/run status, APK size, process PSS, cold-start time to
   first composite, uBlock/probe status, Cast routes found, and the
-  media URLs the probe reported.
+  media URLs the probe reported — with a Copy status button.
 
 ## On-device checklist (fill in on Robert's Pixel 10a)
 

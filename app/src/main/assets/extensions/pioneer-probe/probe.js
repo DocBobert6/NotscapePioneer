@@ -1,15 +1,56 @@
-/* Pioneer Probe — Phase 1 spike content script.
+/* Pioneer Probe — Phase 2 content script.
  *
  * Runs on every page (document_idle, plus re-scans at +2s and +6s for
  * lazy-loaded players). Reports media element / resource URLs and, on
  * DRM-ish pages only, Widevine EME availability to the app via native
- * messaging. It never modifies the page.
+ * messaging. It also applies per-site text zoom on the app's native
+ * messages (see the zoom block below) — that is its only page change.
  */
 (function () {
   "use strict";
 
   var MEDIA_RE = /\.(m3u8|mpd|mp4|webm|m4s|mp3|aac|ogg|oga|wav|ts)(\?|#|$)/i;
   var DRM_RE = /drm|shaka|bitmovin|castlabs|widevine|eme/i;
+
+  /* Text zoom (Phase 2): per-site, via the app. There is no
+   * per-session text-zoom API in GeckoView and no JS-eval API, so
+   * the app pushes the factor over a native port and the script
+   * applies documentElement font-size scaling. A port only exists
+   * while this page is loaded, so the script also asks the app for
+   * its tab's stored factor after every (re)load ("zoom-query") —
+   * the app's reply resolves that sendNativeMessage promise.
+   * Everything here is guarded: if the port or the query fails,
+   * the media probe below still runs.
+   */
+  var currentZoom = 1.0;
+
+  function applyZoom(factor) {
+    var f = Number(factor);
+    if (!isFinite(f) || f <= 0) return;
+    currentZoom = f;
+    try {
+      document.documentElement.style.fontSize = (f * 100) + "%";
+    } catch (e) { /* page not ready */ }
+  }
+
+  function queryZoom() {
+    try {
+      browser.runtime.sendNativeMessage("pioneer", { type: "zoom-query" })
+        .then(function (reply) {
+          if (reply && reply.factor) applyZoom(reply.factor);
+        })
+        .catch(function () { /* no stored factor — stay at 100% */ });
+    } catch (e) { /* native bridge not ready */ }
+  }
+
+  try {
+    if (browser.runtime && browser.runtime.connectNative) {
+      var zoomPort = browser.runtime.connectNative("pioneer");
+      zoomPort.onMessage.addListener(function (msg) {
+        if (msg && msg.type === "zoom") applyZoom(msg.factor);
+      });
+    }
+  } catch (e) { /* live zoom push unavailable; zoom-query still applies */ }
 
   function collect() {
     var items = [];
@@ -69,6 +110,7 @@
   }
 
   report("idle");
+  queryZoom();
   setTimeout(function () { report("t+2s"); }, 2000);
   setTimeout(function () { report("t+6s"); }, 6000);
 })();
