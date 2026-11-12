@@ -1711,8 +1711,12 @@ fun BrowserScreen(
         // on scroll-up. It never hides while the user is typing
         // in it, or on the start page (nothing to scroll).
         // App mode is chromeless — no floating bar at all.
+        // Fullscreen video hides the bar too: the page's
+        // fullscreen element stays inside the GeckoView, so
+        // the shell must hide its own chrome (Mariner covers
+        // its bar with a separate fullscreen view instead).
         AnimatedVisibility(
-            visible = (!barHidden || editingAddress || isHome) && !isAppMode,
+            visible = (!barHidden || editingAddress || isHome) && !isAppMode && !tab.isFullscreen.value,
             modifier = Modifier
                 .align(if (barAtBottom) Alignment.BottomCenter else Alignment.TopCenter)
                 .then(
