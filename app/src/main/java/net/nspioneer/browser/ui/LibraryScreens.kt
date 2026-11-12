@@ -10,10 +10,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -32,6 +35,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
@@ -66,6 +71,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextOverflow
@@ -290,6 +296,73 @@ fun InsetDivider() {
     )
 }
 
+/** One consistent frosted action bar for the Library pages
+ *  (alpha.18): the page's actions in a floating card, in
+ *  the same order everywhere — Sort, then the page's own
+ *  actions, then Select. Horizontally scrollable so the
+ *  longer download bars fit on narrow screens. The
+ *  optional second row is the Downloads page's
+ *  notifications recovery ("Download notifications are
+ *  off" + Enable). */
+@Composable
+fun LibraryActionBar(
+    modifier: Modifier = Modifier,
+    notification: (@Composable RowScope.() -> Unit)? = null,
+    actions: @Composable RowScope.() -> Unit
+) {
+    GroupedCard(modifier = modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) { actions() }
+        if (notification != null) {
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) { notification() }
+        }
+    }
+}
+
+/** The standard empty state for the Library pages
+ *  (alpha.18): a frosted card with an icon and the
+ *  message — the same on all five pages. The card wears
+ *  the kit card colour, so it floats on the tinted
+ *  backdrop instead of vanishing into it (PanelCard's
+ *  default colour is the backdrop colour itself). */
+@Composable
+fun LibraryEmptyState(
+    icon: ImageVector,
+    text: String,
+    modifier: Modifier = Modifier
+) {
+    PanelCard(
+        modifier = modifier.padding(horizontal = 16.dp),
+        containerColor = Frost.cardColor()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(text, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
 /** The History day-group label. */
 internal fun dayLabel(visitedAt: Long): String {
     val cal = java.util.Calendar.getInstance().apply {
@@ -380,10 +453,7 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
             onValueChange = { bookmarkQuery = it },
             placeholder = "Search bookmarks"
         )
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        LibraryActionBar {
             TextButton(onClick = {
                 bookmarkSort = when (bookmarkSort) {
                     "newest" -> "oldest"
@@ -402,7 +472,6 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
             TextButton(onClick = { exportLauncher.launch("bookmarks.html") }) {
                 Text("Export")
             }
-            Spacer(Modifier.weight(1f))
             TextButton(onClick = {
                 bookmarkSelecting = !bookmarkSelecting
                 if (!bookmarkSelecting) bookmarkSelected = emptySet()
@@ -518,17 +587,16 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
             }
         }
         if (store.bookmarks.isEmpty()) {
-            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text("No bookmarks yet. Star a page to add one.", modifier = Modifier.padding(16.dp))
-            }
+            LibraryEmptyState(
+                icon = Icons.Filled.Star,
+                text = "No bookmarks yet. Star a page to add one."
+            )
         } else if (shown.isEmpty()) {
-            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text(
-                    if (bookmarkQuery.isNotBlank()) "No bookmarks match your search."
-                    else "Nothing in this folder yet.",
-                    modifier = Modifier.padding(16.dp)
-                )
-            }
+            LibraryEmptyState(
+                icon = Icons.Filled.Star,
+                text = if (bookmarkQuery.isNotBlank()) "No bookmarks match your search."
+                else "Nothing in this folder yet."
+            )
         }
         if (shown.isNotEmpty()) {
             LazyColumn {
@@ -885,7 +953,7 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
             onValueChange = { historyQuery = it },
             placeholder = "Search history"
         )
-        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        LibraryActionBar {
             TextButton(onClick = {
                 historySort = when (historySort) {
                     "newest" -> "oldest"
@@ -901,7 +969,7 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
                     }
                 )
             }
-            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { showClearHistory = true }) { Text("Clear history") }
             TextButton(onClick = {
                 historySelecting = !historySelecting
                 if (!historySelecting) historySelected = emptySet()
@@ -924,7 +992,6 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
                     }
                 }) { Text("Delete (${historySelected.size})") }
             }
-            TextButton(onClick = { showClearHistory = true }) { Text("Clear history") }
         }
         val shownHistory = store.history.filter { h ->
             historyQuery.isBlank() ||
@@ -938,13 +1005,15 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
             }
         }
         if (store.history.isEmpty()) {
-            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text("No history yet.", modifier = Modifier.padding(16.dp))
-            }
+            LibraryEmptyState(
+                icon = Icons.Filled.History,
+                text = "No history yet."
+            )
         } else if (shownHistory.isEmpty()) {
-            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text("No history matches your search.", modifier = Modifier.padding(16.dp))
-            }
+            LibraryEmptyState(
+                icon = Icons.Filled.History,
+                text = "No history matches your search."
+            )
         }
         if (shownHistory.isNotEmpty()) {
             LazyColumn {
@@ -1090,11 +1159,9 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                     f.url.contains(query, ignoreCase = true)
             }
             if (shown.isEmpty()) {
-                Text(
-                    "No favorites yet. Star a page from the menu to add one.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(16.dp)
+                LibraryEmptyState(
+                    icon = Icons.Filled.Favorite,
+                    text = "No favorites yet. Star a page from the menu to add one."
                 )
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -1441,29 +1508,7 @@ fun LibraryScreen(
             onValueChange = { downloadQuery = it },
             placeholder = "Search downloads"
         )
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = {
-                dlSelecting = !dlSelecting
-                if (!dlSelecting) dlSelected = emptySet()
-            }) { Text(if (dlSelecting) "Done" else "Select") }
-            if (dlSelected.isNotEmpty()) {
-                // Records only, files stay — same rule
-                // as "Clear completed" (audit P-p4).
-                TextButton(onClick = {
-                    store.downloadsSnapshot()
-                        .filter { it.id in dlSelected && it.media == dlScreenMedia }
-                        .forEach { rec ->
-                            Downloads.deleteEngineStaging(context, store, rec)
-                            Downloads.clearJobBundle(store, rec.id)
-                            store.removeDownload(rec.id)
-                        }
-                    dlSelected = emptySet()
-                    dlSelecting = false
-                }) { Text("Delete records (${dlSelected.size})") }
-            }
+        LibraryActionBar {
             TextButton(onClick = {
                 mediaSort = when (mediaSort) {
                     "newest" -> "oldest"
@@ -1479,13 +1524,6 @@ fun LibraryScreen(
                     }
                 )
             }
-            Spacer(Modifier.weight(1f))
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Spacer(Modifier.weight(1f))
             if (refreshing) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
@@ -1511,6 +1549,25 @@ fun LibraryScreen(
                     Text("Clear completed")
                 }
             }
+            TextButton(onClick = {
+                dlSelecting = !dlSelecting
+                if (!dlSelecting) dlSelected = emptySet()
+            }) { Text(if (dlSelecting) "Done" else "Select") }
+            if (dlSelected.isNotEmpty()) {
+                // Records only, files stay — same rule
+                // as "Clear completed" (audit P-p4).
+                TextButton(onClick = {
+                    store.downloadsSnapshot()
+                        .filter { it.id in dlSelected && it.media == dlScreenMedia }
+                        .forEach { rec ->
+                            Downloads.deleteEngineStaging(context, store, rec)
+                            Downloads.clearJobBundle(store, rec.id)
+                            store.removeDownload(rec.id)
+                        }
+                    dlSelected = emptySet()
+                    dlSelecting = false
+                }) { Text("Delete records (${dlSelected.size})") }
+            }
         }
         // The offline library is for media downloads only; ordinary file
         // and image downloads live in the phone's Downloads folder
@@ -1529,12 +1586,10 @@ fun LibraryScreen(
             }
         }
         if (mediaDownloads.isEmpty()) {
-            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text(
-                    if (downloadQuery.isNotBlank()) "No downloads match your search." else "Nothing downloaded yet. Use “Media on this page” in the browser and tap download.",
-                    modifier = Modifier.padding(16.dp)
-                )
-            }
+            LibraryEmptyState(
+                icon = Icons.Filled.Download,
+                text = if (downloadQuery.isNotBlank()) "No downloads match your search." else "Nothing downloaded yet. Use “Media on this page” in the browser and tap download."
+            )
         }
         if (mediaDownloads.isNotEmpty()) {
             LazyColumn {
@@ -1664,29 +1719,42 @@ fun DownloadsScreen(
             onValueChange = { downloadQuery = it },
             placeholder = "Search downloads"
         )
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = {
-                dlSelecting = !dlSelecting
-                if (!dlSelecting) dlSelected = emptySet()
-            }) { Text(if (dlSelecting) "Done" else "Select") }
-            if (dlSelected.isNotEmpty()) {
-                // Records only, files stay — same rule
-                // as "Clear completed" (audit P-p4).
-                TextButton(onClick = {
-                    store.downloadsSnapshot()
-                        .filter { it.id in dlSelected && it.media == dlScreenMedia }
-                        .forEach { rec ->
-                            Downloads.deleteEngineStaging(context, store, rec)
-                            Downloads.clearJobBundle(store, rec.id)
-                            store.removeDownload(rec.id)
-                        }
-                    dlSelected = emptySet()
-                    dlSelecting = false
-                }) { Text("Delete records (${dlSelected.size})") }
+        // Download notifications are off (2026-10-26): worker
+        // downloads announce completion as an ordinary
+        // notification, which needs the permission — the
+        // bar's second row is the recovery path for a denial.
+        // notifTick re-checks when returning from Settings.
+        var notifTick by remember { mutableStateOf(0) }
+        val notifLifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(notifLifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    notifTick++
+                }
             }
+            notifLifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                notifLifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
+        val notifOff = remember(notifTick) {
+            android.os.Build.VERSION.SDK_INT >= 33 &&
+                !downloadNotificationsEnabled(context)
+        }
+        LibraryActionBar(
+            notification = if (notifOff) {
+                {
+                    Text(
+                        "Download notifications are off",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    TextButton(onClick = { openAppNotificationSettings(context) }) {
+                        Text("Enable")
+                    }
+                }
+            } else null
+        ) {
             TextButton(onClick = {
                 fileSort = when (fileSort) {
                     "newest" -> "oldest"
@@ -1702,13 +1770,6 @@ fun DownloadsScreen(
                     }
                 )
             }
-            Spacer(Modifier.weight(1f))
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Spacer(Modifier.weight(1f))
             if (refreshing) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
@@ -1740,42 +1801,24 @@ fun DownloadsScreen(
                     Text("Clear leftover files")
                 }
             }
-        }
-        // Download notifications are off (2026-10-26): worker
-        // downloads announce completion as an ordinary
-        // notification, which needs the permission — the
-        // row below is the recovery path for a denial.
-        // notifTick re-checks when returning from Settings.
-        var notifTick by remember { mutableStateOf(0) }
-        val notifLifecycleOwner = LocalLifecycleOwner.current
-        DisposableEffect(notifLifecycleOwner) {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) {
-                    notifTick++
-                }
-            }
-            notifLifecycleOwner.lifecycle.addObserver(observer)
-            onDispose {
-                notifLifecycleOwner.lifecycle.removeObserver(observer)
-            }
-        }
-        val notifOff = remember(notifTick) {
-            android.os.Build.VERSION.SDK_INT >= 33 &&
-                !downloadNotificationsEnabled(context)
-        }
-        if (notifOff) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Download notifications are off",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                TextButton(onClick = { openAppNotificationSettings(context) }) {
-                    Text("Enable")
-                }
+            TextButton(onClick = {
+                dlSelecting = !dlSelecting
+                if (!dlSelecting) dlSelected = emptySet()
+            }) { Text(if (dlSelecting) "Done" else "Select") }
+            if (dlSelected.isNotEmpty()) {
+                // Records only, files stay — same rule
+                // as "Clear completed" (audit P-p4).
+                TextButton(onClick = {
+                    store.downloadsSnapshot()
+                        .filter { it.id in dlSelected && it.media == dlScreenMedia }
+                        .forEach { rec ->
+                            Downloads.deleteEngineStaging(context, store, rec)
+                            Downloads.clearJobBundle(store, rec.id)
+                            store.removeDownload(rec.id)
+                        }
+                    dlSelected = emptySet()
+                    dlSelecting = false
+                }) { Text("Delete records (${dlSelected.size})") }
             }
         }
         // The Downloads page is for ordinary file and
@@ -1810,12 +1853,10 @@ fun DownloadsScreen(
             }
         }
         if (fileDownloads.isEmpty() && privateDownloads.isEmpty()) {
-            PanelCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text(
-                    if (downloadQuery.isNotBlank()) "No downloads match your search." else "Nothing downloaded yet. Files and images you download from the browser will appear here.",
-                    modifier = Modifier.padding(16.dp)
-                )
-            }
+            LibraryEmptyState(
+                icon = Icons.Filled.Download,
+                text = if (downloadQuery.isNotBlank()) "No downloads match your search." else "Nothing downloaded yet. Files and images you download from the browser will appear here."
+            )
         }
         if (fileDownloads.isNotEmpty() || privateDownloads.isNotEmpty()) {
             LazyColumn {
