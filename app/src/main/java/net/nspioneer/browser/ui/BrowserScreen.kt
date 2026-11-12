@@ -141,6 +141,11 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -546,6 +551,10 @@ fun BrowserScreen(
     }
     fun goAddress(raw: String) {
         val resolved = resolveAddress(store, raw) ?: return
+        // The bar used to fail with zero trace (no status
+        // line, no toast) when Enter did nothing — log the
+        // navigation so Copy status proves the bar fired.
+        engine.noteStatus("address: go $resolved")
         // Batch 4: HTTPS-only (Mariner's loadUrl check) — an
         // http:// address upgrades in place, or warns when
         // it can't.
@@ -1285,6 +1294,28 @@ fun BrowserScreen(
                             } else if (!st.isFocused && editingAddress) {
                                 editingAddress = false
                                 fieldValue = TextFieldValue(if (isHome) "" else tabUrl)
+                            }
+                        }.onKeyEvent { event ->
+                            // Enter as a raw key event: the bar's
+                            // only navigation used to be
+                            // KeyboardActions(onGo), which fires
+                            // only when the IME delivers an IME
+                            // action. Keyboards that deliver Enter
+                            // as a key event instead (and hardware
+                            // keyboards) hit nothing at all — the
+                            // bar typed fine and Enter did nothing.
+                            // A Go action produces no KeyEvent and
+                            // a consumed Enter never reaches the
+                            // field's default mapping, so the two
+                            // paths cannot double-fire.
+                            if (event.type == KeyEventType.KeyDown &&
+                                (event.key == Key.Enter ||
+                                    event.key == Key.NumPadEnter)
+                            ) {
+                                goAddress(fieldValue.text)
+                                true
+                            } else {
+                                false
                             }
                         },
                         singleLine = true,
