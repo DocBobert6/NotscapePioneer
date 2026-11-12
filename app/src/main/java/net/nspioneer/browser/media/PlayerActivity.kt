@@ -779,6 +779,12 @@ fun PlayerScreen(
     var videoTracks by remember { mutableStateOf<List<TrackChoice>>(emptyList()) }
     var selectedVideoId by remember { mutableStateOf<String?>(null) }
     var showQualityRow by remember { mutableStateOf(false) }
+    // alpha.19: brightness + volume sit behind buttons like
+    // quality/zoom do — their slider rows only render while
+    // the matching row is open (a deliberate deviation from
+    // Mariner, whose player shows both sliders always).
+    var showBrightnessRow by remember { mutableStateOf(false) }
+    var showVolumeRow by remember { mutableStateOf(false) }
     // Parsed HLS qualities (0.0.967, Robert: no selector on
     // eligible videos): when the player exposes fewer than two
     // renditions for an HLS master, the master's own variant
@@ -1967,6 +1973,8 @@ fun PlayerScreen(
                                             showTextRow = false
                                             showScaleRow = false
                                             showQualityRow = false
+                                            showBrightnessRow = false
+                                            showVolumeRow = false
                                         }
                                     },
                                     modifier = Modifier.size(38.dp)
@@ -1994,6 +2002,8 @@ fun PlayerScreen(
                                             showAudioRow = false
                                             showTextRow = false
                                             showScaleRow = false
+                                            showBrightnessRow = false
+                                            showVolumeRow = false
                                         }
                                     },
                                     modifier = Modifier.size(38.dp)
@@ -2037,6 +2047,8 @@ fun PlayerScreen(
                                             showAudioRow = false
                                             showScaleRow = false
                                             showQualityRow = false
+                                            showBrightnessRow = false
+                                            showVolumeRow = false
                                         }
                                     },
                                     modifier = Modifier.size(38.dp)
@@ -2088,6 +2100,8 @@ fun PlayerScreen(
                                             showAudioRow = false
                                             showTextRow = false
                                             showQualityRow = false
+                                            showBrightnessRow = false
+                                            showVolumeRow = false
                                         }
                                     },
                                     modifier = Modifier.size(38.dp)
@@ -2103,6 +2117,64 @@ fun PlayerScreen(
                                         modifier = Modifier.size(20.dp)
                                     )
                                 }
+                            }
+                            // alpha.19: brightness + volume behind
+                            // buttons, like quality/zoom — each
+                            // opens its slider row and closes the
+                            // others. Brightness is the window
+                            // setting ("system" = device default);
+                            // volume is the player volume, never
+                            // the device volume. Both stay usable
+                            // in listen mode (audio still plays).
+                            IconButton(
+                                onClick = {
+                                    pokeControls()
+                                    showBrightnessRow = !showBrightnessRow
+                                    if (showBrightnessRow) {
+                                        showAudioRow = false
+                                        showTextRow = false
+                                        showScaleRow = false
+                                        showQualityRow = false
+                                        showVolumeRow = false
+                                    }
+                                },
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.WbSunny,
+                                    contentDescription = "Brightness",
+                                    tint = if (showBrightnessRow || brightnessSetting != "system") {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    pokeControls()
+                                    showVolumeRow = !showVolumeRow
+                                    if (showVolumeRow) {
+                                        showAudioRow = false
+                                        showTextRow = false
+                                        showScaleRow = false
+                                        showQualityRow = false
+                                        showBrightnessRow = false
+                                    }
+                                },
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.VolumeUp,
+                                    contentDescription = "Volume",
+                                    tint = if (showVolumeRow || playerVolume < 1f) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             TextButton(
                                 onClick = {
@@ -2217,7 +2289,10 @@ fun PlayerScreen(
                     }
                     // Brightness + volume sliders (beta.18):
                     // same pill treatment as the scrubber.
-                    Row(
+                    // alpha.19: each renders only while its
+                    // row is open (toggled from the capsule
+                    // above); the slider itself is unchanged.
+                    if (showBrightnessRow) Row(
                         modifier = if (isPortrait) {
                             Modifier.fillMaxWidth().playerCapsule()
                                 .padding(horizontal = 14.dp, vertical = 2.dp)
@@ -2273,7 +2348,7 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    Row(
+                    if (showVolumeRow) Row(
                         modifier = if (isPortrait) {
                             Modifier.fillMaxWidth().playerCapsule()
                                 .padding(horizontal = 14.dp, vertical = 2.dp)
