@@ -13,6 +13,7 @@ import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -115,16 +116,24 @@ fun PanelCard(
     )
 }
 
-/** A bottom sheet in the kit's sheet material and shape. */
+/** A bottom sheet in the kit's sheet material and shape.
+ * skipPartiallyExpanded opens it at its full content
+ * height (alpha.17: the menu sheet wants to open showing
+ * its sections, not parked at half height); the default
+ * keeps the existing sheets' behaviour. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FrostSheet(
     onDismiss: () -> Unit,
     draggable: Boolean = true,
+    skipPartiallyExpanded: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = skipPartiallyExpanded
+        ),
         sheetGesturesEnabled = draggable,
         containerColor = Frost.sheetColor(),
         shape = Frost.SheetShape,

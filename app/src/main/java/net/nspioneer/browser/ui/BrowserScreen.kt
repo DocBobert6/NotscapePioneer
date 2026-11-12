@@ -2570,9 +2570,9 @@ fun BrowserScreen(
         )
     }
 
-    // The browser menu (full page).
+    // The browser menu as a bottom sheet (alpha.17).
     if (menuOpen) {
-        BrowserMenuPage(
+        BrowserMenuSheet(
             store = store,
             tab = tab,
             uBlockInstalled = uBlockInstalled,
@@ -2584,7 +2584,12 @@ fun BrowserScreen(
             onOpenScreen = { screen -> onOpenScreen(screen) },
             onCopyStatus = { onCopyStatus() },
             onInstallUBlock = { onInstallUBlock() },
-            onCustomize = { customizeOpen = true },
+            // alpha.17: swapping to the editor closes the
+            // menu sheet and opens the customize sheet in
+            // the same frame, so only one sheet is ever
+            // visible — one swipe down always returns to
+            // the browser.
+            onCustomize = { menuOpen = false; customizeOpen = true },
             onAddToHome = { addToHome() },
             // alpha.10: page actions. Screenshot + PDF share
             // one capturePixels bitmap; the PDF is a viewport

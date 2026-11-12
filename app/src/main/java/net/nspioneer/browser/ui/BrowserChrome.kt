@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -590,12 +591,13 @@ private class MenuSlot(
 /** Per-site text zoom steps (factors). */
 private val ZOOM_STEPS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
 
-/** The single browser menu: every Phase 2 menu row, on a
- * page that scrolls its full length, grouped under section
- * labels and rendered in the user's customized order. Rows
- * honour the user's menu customization; the zoom card and
- * the "Customize menu" row are not customizable rows. Back
- * returns to the browser. */
+/** The single browser menu: every Phase 2 menu row, grouped
+ * under section labels and rendered in the user's customized
+ * order, hosted in a bottom sheet (alpha.17) — see
+ * BrowserMenuSheet. Rows honour the user's menu
+ * customization; the zoom card and the "Customize menu" row
+ * are not customizable rows. Swipe down or back returns to
+ * the browser. */
 @Composable
 internal fun BrowserMenuRowsContent(
     store: PioneerStore,
@@ -855,10 +857,15 @@ internal fun BrowserMenuRowsContent(
     }
 }
 
-/** The single menu page: every Phase 2 menu row, on a page
- * that scrolls its full length. Back returns to the browser. */
+/** The browser menu as a bottom sheet (alpha.17): the same
+ * rows content as the old full page, in a FrostSheet that
+ * opens at its full height (skipPartiallyExpanded) and caps
+ * at 85% of the screen, so the browser stays visible
+ * behind it and long lists scroll. The "Menu" heading sits
+ * at the top of the sheet beside the drag handle. Swipe
+ * down or back returns to the browser. */
 @Composable
-internal fun BrowserMenuPage(
+internal fun BrowserMenuSheet(
     store: PioneerStore,
     tab: EngineTab,
     uBlockInstalled: Boolean,
@@ -877,38 +884,41 @@ internal fun BrowserMenuPage(
     onScreenshot: () -> Unit,
     onScanQr: () -> Unit
 ) {
-    Box(
-        modifier = Modifier.fillMaxSize()
-            .background(MaterialTheme.colorScheme.surface)
+    FrostSheet(
+        onDismiss = onClose,
+        skipPartiallyExpanded = true
     ) {
-        SubScreen("Menu", onBack = onClose) {
-            Column(
-                modifier = Modifier.fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(start = 16.dp, end = 16.dp, bottom = 28.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                BrowserMenuRowsContent(
-                    store = store,
-                    tab = tab,
-                    uBlockInstalled = uBlockInstalled,
-                    onDismiss = onClose,
-                    onNewTab = onNewTab,
-                    onReload = onReload,
-                    onShare = onShare,
-                    onFind = onFind,
-                    onOpenScreen = onOpenScreen,
-                    onCopyStatus = onCopyStatus,
-                    onInstallUBlock = onInstallUBlock,
-                    onCustomize = onCustomize,
-                    onAddToHome = onAddToHome,
-                    onSavePdf = onSavePdf,
-                    onSaveOffline = onSaveOffline,
-                    onScreenshot = onScreenshot,
-                    onScanQr = onScanQr
-                )
-            }
+        Column(
+            modifier = Modifier.fillMaxWidth()
+                .fillMaxHeight(0.85f)
+                .verticalScroll(rememberScrollState())
+                .padding(start = 16.dp, end = 16.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "Menu",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
+            BrowserMenuRowsContent(
+                store = store,
+                tab = tab,
+                uBlockInstalled = uBlockInstalled,
+                onDismiss = onClose,
+                onNewTab = onNewTab,
+                onReload = onReload,
+                onShare = onShare,
+                onFind = onFind,
+                onOpenScreen = onOpenScreen,
+                onCopyStatus = onCopyStatus,
+                onInstallUBlock = onInstallUBlock,
+                onCustomize = onCustomize,
+                onAddToHome = onAddToHome,
+                onSavePdf = onSavePdf,
+                onSaveOffline = onSaveOffline,
+                onScreenshot = onScreenshot,
+                onScanQr = onScanQr
+            )
         }
     }
 }
