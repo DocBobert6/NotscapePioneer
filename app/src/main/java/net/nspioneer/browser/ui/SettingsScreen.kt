@@ -1126,6 +1126,53 @@ fun SettingsScreen(
                 )
             }
 
+            // Downloads (alpha.10, Mariner's download rows):
+            // location, EPUB auto-shelf, segmented downloads,
+            // ask-before, Wi-Fi-only. The EPUB row stores its
+            // preference now; it takes effect when the bookshelf
+            // lands in Phase 4 (reader scope) — the row says so.
+            GroupTitle("Downloads")
+            SettingsCard {
+                Text(
+                    "Download location",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
+                )
+                val dlLoc = store.setting("downloadLocation", "public")
+                ChoiceRow(
+                    label = "Downloads folder", selected = dlLoc == "public"
+                ) { store.putSetting("downloadLocation", "public") }
+                InsetDivider()
+                ChoiceRow(
+                    label = "App folder (private)", selected = dlLoc == "app"
+                ) { store.putSetting("downloadLocation", "app") }
+                InsetDivider()
+                ToggleRow(
+                    label = "Downloaded EPUBs go to bookshelf",
+                    supporting = "Stored now; takes effect when the bookshelf lands in Phase 4",
+                    checked = store.setting("epubAutoShelf", "true") == "true",
+                    onCheckedChange = { store.putSetting("epubAutoShelf", it.toString()) }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Use segmented downloads",
+                    checked = store.setting("segmentedDownloads", "true") == "true",
+                    onCheckedChange = { store.putSetting("segmentedDownloads", it.toString()) }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Ask before downloading",
+                    checked = store.setting("confirmDownloads", "true") == "true",
+                    onCheckedChange = { store.putSetting("confirmDownloads", it.toString()) }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Wi-Fi only downloads",
+                    checked = store.setting("wifiOnlyDownloads", "false") == "true",
+                    onCheckedChange = { store.putSetting("wifiOnlyDownloads", it.toString()) }
+                )
+            }
+
             // Video player (alpha.10, Mariner's Video player
             // page): skip interval + subtitle font/size/colour/
             // background/edge + font import. Written to the
