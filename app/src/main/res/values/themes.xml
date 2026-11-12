@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Spike theme: plain dark, no Mariner UI kit (Phase 1 is engine-only). -->
+    <style name="Theme.Pioneer" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#1a120c</item>
+        <item name="android:textColor">#f2e8d8</item>
+        <item name="android:colorBackground">#1a120c</item>
+    </style>
+</resources>

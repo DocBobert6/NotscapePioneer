@@ -1,0 +1,54 @@
+name: Android CI
+
+# Notscape Pioneer — Phase 1 spike.
+# A push to main only builds the debug APK and uploads it as an
+# artifact. There is NO release job, NO tag publishing, and NO
+# keystore: the spike is debug-signed only. Nothing here touches
+# NotscapeMariner or its RC1.
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      # NOTE (2026-11-12): there is deliberately NO sdkmanager install
+      # step for the android-37 platform — Google has published
+      # build-tools 37.0.0 but no android-37 platform package to the
+      # public SDK repository (verified on stable and canary channels),
+      # so the install can only fail. The build compiles against SDK
+      # 36 with the AAR metadata check disabled (app/build.gradle.kts).
+      # When the android-37 platform ships, re-add the install step,
+      # raise compileSdk to 37, and re-enable the check.
+
+      - name: Resolve GeckoView version (Mozilla Maven)
+        # Proves the pinned STABLE GeckoView version resolves from
+        # Mozilla's Maven repo before the build spends time on it.
+        run: ./gradlew :app:dependencies --configuration debugRuntimeClasspath | grep -i geckoview
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pioneer-spike-apk
+          path: app/build/outputs/apk/debug/*.apk
