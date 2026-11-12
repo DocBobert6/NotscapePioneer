@@ -26,6 +26,9 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
@@ -599,9 +602,16 @@ private val ZOOM_STEPS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
  * BrowserMenuSheet. Rows honour the user's menu
  * customization; the zoom card and the "Customize menu" row
  * are not customizable rows. Swipe down or back returns to
- * the browser. */
-@Composable
-internal fun BrowserMenuRowsContent(
+ * the browser.
+ *
+ * Alpha.24: this emits its rows as LazyColumn items
+ * (LazyListScope), so the sheet composes only visible rows
+ * and the scroll position lives in the sheet's hoisted list
+ * state rather than in this content. It is a plain function,
+ * not a composable — the context the copy-URL row needs is
+ * passed in from the sheet. */
+internal fun LazyListScope.BrowserMenuRowsContent(
+    context: Context,
     store: PioneerStore,
     tab: EngineTab,
     uBlockInstalled: Boolean,
@@ -625,7 +635,6 @@ internal fun BrowserMenuRowsContent(
     onScreenshot: () -> Unit,
     onScanQr: () -> Unit
 ) {
-    val context = LocalContext.current
     val rev = store.revision
     val url = tab.url.value
     val title = tab.title.value
@@ -788,43 +797,45 @@ internal fun BrowserMenuRowsContent(
         val host = Uri.parse(url).host ?: ""
         if (host.isNotBlank()) {
             val zoom = store.siteZoom(host)
-            GroupedCard {
-                Row(
-                    modifier = Modifier.fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Text size: ${(zoom * 100).toInt()}%",
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(
-                        onClick = {
-                            val next = ZOOM_STEPS.lastOrNull { it < zoom } ?: ZOOM_STEPS.first()
-                            store.putSiteZoom(host, next)
-                            tab.setTextZoom(next)
-                        },
-                        enabled = zoom > ZOOM_STEPS.first()
-                    ) { Text("−") }
-                    TextButton(
-                        onClick = {
-                            val next = ZOOM_STEPS.firstOrNull { it > zoom } ?: ZOOM_STEPS.last()
-                            store.putSiteZoom(host, next)
-                            tab.setTextZoom(next)
-                        },
-                        enabled = zoom < ZOOM_STEPS.last()
-                    ) { Text("+") }
-                    TextButton(
-                        onClick = {
-                            store.putSiteZoom(host, 1.0f)
-                            tab.setTextZoom(1.0f)
-                        },
-                        enabled = zoom != 1.0f
-                    ) { Text("Reset") }
+            item(key = "zoom") {
+                GroupedCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Text size: ${(zoom * 100).toInt()}%",
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = {
+                                val next = ZOOM_STEPS.lastOrNull { it < zoom } ?: ZOOM_STEPS.first()
+                                store.putSiteZoom(host, next)
+                                tab.setTextZoom(next)
+                            },
+                            enabled = zoom > ZOOM_STEPS.first()
+                        ) { Text("−") }
+                        TextButton(
+                            onClick = {
+                                val next = ZOOM_STEPS.firstOrNull { it > zoom } ?: ZOOM_STEPS.last()
+                                store.putSiteZoom(host, next)
+                                tab.setTextZoom(next)
+                            },
+                            enabled = zoom < ZOOM_STEPS.last()
+                        ) { Text("+") }
+                        TextButton(
+                            onClick = {
+                                store.putSiteZoom(host, 1.0f)
+                                tab.setTextZoom(1.0f)
+                            },
+                            enabled = zoom != 1.0f
+                        ) { Text("Reset") }
+                    }
                 }
             }
-            Spacer(modifier = Modifier.size(12.dp))
+            item(key = "zoomSpacer") { Spacer(modifier = Modifier.size(12.dp)) }
         }
     }
     // Render in the customized order, grouping consecutive
@@ -837,23 +848,29 @@ internal fun BrowserMenuRowsContent(
         val section = BrowserMenuRows.sectionOf(inOrder[i].id)
         val group = inOrder.subList(i, inOrder.size)
             .takeWhile { BrowserMenuRows.sectionOf(it.id) == section }
-        Text(
-            section.label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 4.dp)
-        )
-        GroupedCard {
-            Column(modifier = Modifier.padding(vertical = 6.dp)) {
-                group.forEach { it.content() }
+        item(key = "label:${section.label}") {
+            Text(
+                section.label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 4.dp)
+            )
+        }
+        item(key = "card:${section.label}") {
+            GroupedCard {
+                Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                    group.forEach { it.content() }
+                }
             }
         }
         i += group.size
     }
-    GroupedCard {
-        Column(modifier = Modifier.padding(vertical = 6.dp)) {
-            MenuRow("Customize menu", Icons.Filled.Tune) {
-                onDismiss(); onCustomize()
+    item(key = "customize") {
+        GroupedCard {
+            Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                MenuRow("Customize menu", Icons.Filled.Tune) {
+                    onDismiss(); onCustomize()
+                }
             }
         }
     }
@@ -865,7 +882,12 @@ internal fun BrowserMenuRowsContent(
  * at 85% of the screen, so the browser stays visible
  * behind it and long lists scroll. The "Menu" heading sits
  * at the top of the sheet beside the drag handle. Swipe
- * down or back returns to the browser. */
+ * down or back returns to the browser.
+ *
+ * Alpha.24: the rows live in a LazyColumn whose list state
+ * is hoisted here, so the scroll position survives
+ * rows-content recomposition and only visible rows are
+ * composed. */
 @Composable
 internal fun BrowserMenuSheet(
     store: PioneerStore,
@@ -886,23 +908,31 @@ internal fun BrowserMenuSheet(
     onScreenshot: () -> Unit,
     onScanQr: () -> Unit
 ) {
+    // alpha.24: the list state is hoisted here so the
+    // scroll position survives rows-content recomposition
+    // and only visible rows are composed.
+    val context = LocalContext.current
+    val listState = rememberLazyListState()
     FrostSheet(
         onDismiss = onClose,
         skipPartiallyExpanded = true
     ) {
-        Column(
+        LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxWidth()
                 .fillMaxHeight(0.85f)
-                .verticalScroll(rememberScrollState())
                 .padding(start = 16.dp, end = 16.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                "Menu",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 4.dp)
-            )
+            item(key = "heading") {
+                Text(
+                    "Menu",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
             BrowserMenuRowsContent(
+                context = context,
                 store = store,
                 tab = tab,
                 uBlockInstalled = uBlockInstalled,
