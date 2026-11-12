@@ -407,6 +407,28 @@ internal object BrowserMenuRows {
         "settings", "licences", "copyStatus", "diagnostics" -> MenuSection.SETTINGS
         else -> MenuSection.PAGE
     }
+    /** Groups consecutive ids of one section, in order, so the
+     * menu renders one labelled card per run. Pure, so tests
+     * can pin the grouping — and the LazyColumn keys derived
+     * from it. A section CAN appear in two runs (alpha.25):
+     * in the default order installUBlock sits between the
+     * LIBRARY and SETTINGS blocks yet sectionOf maps it to
+     * PAGE, and a custom order can interleave any section —
+     * so a group must never be keyed by its section label
+     * alone, or the second run collides with the first and
+     * LazyColumn throws on menu open. */
+    fun groupedSections(ids: List<String>): List<Pair<MenuSection, List<String>>> {
+        val out = mutableListOf<Pair<MenuSection, List<String>>>()
+        var i = 0
+        while (i < ids.size) {
+            val section = sectionOf(ids[i])
+            val group = ids.subList(i, ids.size)
+                .takeWhile { sectionOf(it) == section }
+            out += section to group
+            i += group.size
+        }
+        return out
+    }
     /** The default row order: tabs, page actions, library,
      * settings. Every id in ALL appears exactly once here. */
     val DEFAULT_ORDER: List<String> = ALL.map { it.first }
@@ -841,16 +863,17 @@ internal fun LazyListScope.BrowserMenuRowsContent(
         }
     }
     // Render in the customized order, grouping consecutive
-    // rows of one section into one labelled card.
+    // rows of one section into one labelled card. Each group
+    // is keyed by its FIRST row's id (alpha.25): a section
+    // can appear in two runs, so a label-derived key would
+    // collide and LazyColumn would throw on menu open. Both
+    // the label and the card key use the first row's id.
     val byId = slots.associateBy { it.id }
     val inOrder = BrowserMenuRows.orderedIds(store)
-        .mapNotNull { byId[it] }.filter { it.shows }
-    var i = 0
-    while (i < inOrder.size) {
-        val section = BrowserMenuRows.sectionOf(inOrder[i].id)
-        val group = inOrder.subList(i, inOrder.size)
-            .takeWhile { BrowserMenuRows.sectionOf(it.id) == section }
-        item(key = "label:${section.label}") {
+        .mapNotNull { byId[it] }.filter { it.shows }.map { it.id }
+    for ((section, ids) in BrowserMenuRows.groupedSections(inOrder)) {
+        val group = ids.mapNotNull { byId[it] }
+        item(key = "label:${group.first().id}") {
             Text(
                 section.label,
                 style = MaterialTheme.typography.labelMedium,
@@ -858,14 +881,13 @@ internal fun LazyListScope.BrowserMenuRowsContent(
                 modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 4.dp)
             )
         }
-        item(key = "card:${section.label}") {
+        item(key = "card:${group.first().id}") {
             GroupedCard {
                 Column(modifier = Modifier.padding(vertical = 6.dp)) {
                     group.forEach { it.content() }
                 }
             }
         }
-        i += group.size
     }
     item(key = "customize") {
         GroupedCard {
