@@ -104,6 +104,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -350,6 +351,19 @@ fun BrowserScreen(
     val tab = tabs.getOrNull(activeTabIndex) ?: return
     val tabUrl = tab.url.value
     val isHome = tab.id in homeTabIds || tabUrl.isBlank()
+    // Popup rebuild (alpha.13, item 7): the address bar follows the
+    // *bound* session's URL, not the active tab's recorded URL — the
+    // two could disagree (bar on the tab, view on the session), which
+    // is what put profitfinderz.com in the bar over watch-wrestling
+    // content. boundTabId is set only on a successful bind below, and
+    // never reset to -1: a tab switch before the new session opens
+    // keeps the bar on the last bound tab instead of going blank.
+    // barUrl falls back to the active tab's URL while nothing is
+    // bound yet (first launch).
+    var boundTabId by remember { mutableIntStateOf(-1) }
+    val barTab = tabs.firstOrNull { it.id == boundTabId } ?: tab
+    val barUrl = barTab.url.value
+    val barIsHome = barTab.id in homeTabIds || barUrl.isBlank()
     var menuOpen by remember { mutableStateOf(false) }
     var customizeOpen by remember { mutableStateOf(false) }
     // alpha.10: Scan QR (Mariner BrowserScreen.kt:437-497,
@@ -413,6 +427,10 @@ fun BrowserScreen(
     // sits bottom-centre with 88dp clearance, above the bar.
     val snackHost = remember { SnackbarHostState() }
     val snackScope = rememberCoroutineScope()
+    // Rebuild item 9: single-shot guard for the Undo bar — a
+    // second close while one bar is showing does not queue
+    // another behind it.
+    var undoSnackbarShowing by remember { mutableStateOf(false) }
     // Tab thumbnails, memory-only (Mariner tabPreviews): one
     // 320-px still per tab, recycled on replacement/close.
     val tabPreviews = remember { mutableStateMapOf<Int, Bitmap>() }
@@ -429,7 +447,7 @@ fun BrowserScreen(
     // TextFieldValue so focusing the pill selects the whole
     // URL, and a mic result lands selected too.
     var fieldValue by remember(tab.id) {
-        mutableStateOf(TextFieldValue(if (isHome) "" else tabUrl))
+        mutableStateOf(TextFieldValue(if (barIsHome) "" else barUrl))
     }
 
     // ---- Batch 1: floating address bar ----
@@ -515,11 +533,13 @@ fun BrowserScreen(
             if (tab.isDesktopMode.value != desktop) tab.setDesktopMode(desktop)
         }
     }
-    // The address field follows the tab while the user is not
-    // editing it.
-    LaunchedEffect(tabUrl, isHome) {
+    // The address field follows the *bound* tab while the user is
+    // not editing it (rebuild item 7): the bar shows the URL of
+    // the session actually on screen, not the active tab's
+    // recorded URL.
+    LaunchedEffect(barUrl, barIsHome) {
         if (!editingAddress) {
-            fieldValue = TextFieldValue(if (isHome) "" else tabUrl)
+            fieldValue = TextFieldValue(if (barIsHome) "" else barUrl)
         }
     }
     // Scroll-hide: the engine's ScrollDelegate feeds
@@ -670,10 +690,26 @@ fun BrowserScreen(
         prunePreviews()
         if (!wasPrivate && url.isNotBlank() && url != "about:blank") {
             snackScope.launch {
-                if (snackHost.showSnackbar("Tab closed", actionLabel = "Undo") ==
-                    SnackbarResult.ActionPerformed
-                ) {
-                    onOpenUrlInNewTab(url, false, true)
+                // Rebuild item 9: explicit Short duration (the
+                // 15s-stuck bar Robert saw is not explained by the
+                // code — a single showSnackbar call, Short default
+                // 4s — so the duration is pinned explicitly here),
+                // and single-shot: no second bar queues while one
+                // is showing. The close is recorded in
+                // recently-closed either way.
+                if (undoSnackbarShowing) return@launch
+                undoSnackbarShowing = true
+                try {
+                    if (snackHost.showSnackbar(
+                            message = "Tab closed",
+                            actionLabel = "Undo",
+                            duration = SnackbarDuration.Short
+                        ) == SnackbarResult.ActionPerformed
+                    ) {
+                        onOpenUrlInNewTab(url, false, true)
+                    }
+                } finally {
+                    undoSnackbarShowing = false
                 }
             }
         }
@@ -975,12 +1011,16 @@ fun BrowserScreen(
     }
 
     // Popup notice auto-dismiss (Mariner
-    // BrowserScreen.kt:1794).
+    // BrowserScreen.kt:1794). Rebuild item 9: the 12s timer hides
+    // only — it no longer clears the captured queue, so the URLs
+    // stay until the user dismisses them (the notice's own
+    // dismiss button and the back handler still clear, by
+    // choice) or opens them. The queue-size effect above
+    // re-shows the notice when a new capture arrives.
     LaunchedEffect(showPopupNotice) {
         if (showPopupNotice) {
             kotlinx.coroutines.delay(12_000)
             showPopupNotice = false
-            clearPendingPopups()
         }
     }
 
@@ -1252,13 +1292,13 @@ fun BrowserScreen(
                                     )
                                 } else {
                                     TextFieldValue(
-                                        tabUrl,
-                                        TextRange(0, tabUrl.length)
+                                        barUrl,
+                                        TextRange(0, barUrl.length)
                                     )
                                 }
                             } else if (!st.isFocused && editingAddress) {
                                 editingAddress = false
-                                fieldValue = TextFieldValue(if (isHome) "" else tabUrl)
+                                fieldValue = TextFieldValue(if (barIsHome) "" else barUrl)
                             }
                         }.onKeyEvent { event ->
                             // Enter as a raw key event: the bar's
@@ -1539,6 +1579,10 @@ fun BrowserScreen(
                     val sessionOpened = tab.sessionOpened.value
                     if (session.isOpen && view.session !== session) {
                         view.setSession(session)
+                        // Rebuild item 7: record the bind — the bar
+                        // follows this tab from here on. A bind is
+                        // the only thing that sets boundTabId.
+                        boundTabId = tab.id
                     }
                     // Pull-to-refresh (Mariner
                     // BrowserScreen.kt:2200-2246): this listener
