@@ -74,12 +74,28 @@ All 9 items verified against Mozilla's GeckoView Javadoc
 
 | Run | Commit | Result | Cause |
 |---|---|---|---|
-| TBD | TBD | TBD | Phase 2 landing commit |
+| 43145678294 | b36d8889 | failure | Phase 2 landing: `material-icons-core` dependency missing (carried shell files import `androidx.compose.material.icons`) + two missing imports (`Arrangement` in SettingsScreen, `Text` in AppTheme) — 67 errors, one root cause |
+| **43146138432** | **0d972679** | **success** | **Green. Artifact `pioneer-alpha-apk`.** Fix commit: added `material-icons-core` (BOM-managed) + the two imports |
 
-## Verified APK
+## Verified APK (run 43146138432, artifact 13911666900)
 
-TBD after CI green (coordinator verifies from the downloaded
-artifact: package, version, code, libxul, arm64-only, signature).
+- GitHub artifact `pioneer-alpha-apk`: zip 111,299,501 bytes
+  (exact match on download; real zip, not the HTML placeholder).
+- Local copy: `~/workspace/notscape-pioneer/artifacts/alpha3/app-debug.apk`
+  (zip beside it: `pioneer-alpha3-apk.zip`).
+- **APK: 211,311,019 bytes** (~201.5 MiB), Android package,
+  debug-signed (v1 + v2 verified with androguard).
+- SHA-256: `491df041f96bdab7c58514f37163b6c454d4f76fe0c40736686cddbb015bfd73`
+- package `net.nspioneer.browser`, versionName `0.1.0-alpha.3`,
+  versionCode 3, minSdk 26, targetSdk 36, app name "Notscape Pioneer".
+- ABIs: **arm64-v8a only** (14 native libs).
+- Engine present: `lib/arm64-v8a/libxul.so` 154,257,040 bytes,
+  `assets/omni.ja`, probe extension assets present.
+- Robert's wagon icon at all densities.
+- Dex confirms the Phase 2 shell is in the build: "Copy status",
+  "Desktop site", "Tracking protection", "zoom-query" (probe zoom
+  mechanism), "installUBlock", "GeckoEngine" (61 refs),
+  "PioneerStore" (222 refs), "pioneer-store" (2 refs).
 
 ## Known gaps (not hidden)
 
