@@ -1,5 +1,6 @@
 package net.nspioneer.browser.ui
 
+import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -76,6 +77,14 @@ fun MediaSheet(
     onDismiss: () -> Unit
 ) {
     var mergeSelect by remember { mutableStateOf(setOf<DetectedMedia>()) }
+    // A "page" entry for the page already open is redundant:
+    // "Open" just reloads it, and the host's scripts may then
+    // open tabs of their own. The sheet is for media that
+    // plays — drop that one entry. Other embed pages
+    // (YouTube/Vimeo/…) stay listed.
+    val shownMedia = remember(media, pageUrl) {
+        media.filterNot { it.kind == "page" && samePageUrl(it.url, pageUrl) }
+    }
     FrostSheet(onDismiss = onDismiss) {
         Column(
             modifier = Modifier.fillMaxWidth()
@@ -88,7 +97,7 @@ fun MediaSheet(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            "Media on this page (${media.size})",
+                            "Media on this page (${shownMedia.size})",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.weight(1f)
@@ -96,7 +105,7 @@ fun MediaSheet(
                         )
                         if (mergeSelect.size == 2) {
                             TextButton(onClick = {
-                                onMerge?.invoke(media.filter { it in mergeSelect })
+                                onMerge?.invoke(shownMedia.filter { it in mergeSelect })
                             }) { Text("Merge") }
                         }
                     }
@@ -108,7 +117,7 @@ fun MediaSheet(
                             )
                         )
                     }
-                    if (media.isEmpty()) {
+                    if (shownMedia.isEmpty()) {
                         Text(
                             "No playable media was found on this page. If a video is playing, " +
                                 "give it a few seconds and try again — streams are spotted as the page loads them.",
@@ -120,7 +129,7 @@ fun MediaSheet(
                         val sheetMax = (LocalConfiguration.current
                             .screenHeightDp * 0.6f).dp
                         LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = sheetMax)) {
-                            items(media) { item ->
+                            items(shownMedia) { item ->
                                 ListItem(
                                     // The whole media row is tappable
                                     // to play — the small Play icon was
@@ -152,7 +161,14 @@ fun MediaSheet(
                                     } else null,
                                     headlineContent = {
                                         Text(
-                                            item.label.ifBlank { item.url.substringAfterLast('/') },
+                                            // A page entry is labeled
+                                            // plainly as a page — its
+                                            // host, never a media
+                                            // filename (an embed URL's
+                                            // last segment can be a long
+                                            // opaque slug).
+                                            if (item.kind == "page") pageHeadline(item.url)
+                                            else item.label.ifBlank { item.url.substringAfterLast('/') },
                                             maxLines = 1, overflow = TextOverflow.Ellipsis
                                         )
                                     },
@@ -241,3 +257,13 @@ fun MediaSheet(
 /** The sheet's pop-up footer, read straight from the store. */
 fun popupOffFor(store: net.nspioneer.browser.data.PioneerStore, host: String): Boolean =
     VideoPopup.isOff(store, host)
+
+/** Same page URL, ignoring a trailing slash either side. */
+private fun samePageUrl(a: String, b: String): Boolean =
+    a.trimEnd('/') == b.trimEnd('/')
+
+/** Headline for a "page" entry: the host, plainly a page. */
+private fun pageHeadline(url: String): String {
+    val host = runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
+    return if (host.isNotBlank()) "Page: $host" else "Web page"
+}
