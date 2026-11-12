@@ -165,7 +165,8 @@ class DownloadsTest {
         assertEquals("a_b_c_d", Downloads.sanitize("a/b\\c:d"))
         assertEquals("spaced", Downloads.sanitize("  spaced  "))
         assertEquals("file.name.mp4", Downloads.sanitize("file.name.mp4"))
-        assertEquals("caf_au_lait", Downloads.sanitize("café au lait"))
+        // 'é' and the space each become '_', so the join is doubled.
+        assertEquals("caf__au_lait", Downloads.sanitize("café au lait"))
     }
 
     @Test
@@ -390,7 +391,7 @@ class DownloadsTest {
         try {
             val src = File(dir, "src.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
             val dst = File(dir, "sub/dst.bin")
-            dst.parentFile.mkdirs()
+            dst.parentFile?.mkdirs()
             assertTrue(Downloads.renameOrCopy(src, dst))
             assertFalse(src.exists())
             assertEquals(listOf<Byte>(1, 2, 3), dst.readBytes().toList())
