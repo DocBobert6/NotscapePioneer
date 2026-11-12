@@ -46,8 +46,10 @@ import java.io.File
  * the SHELL (BrowserScreen, which owns the queue and the
  * notice) through Engine.answerPopupPrompt; this delegate
  * only holds the pending Gecko request. If no shell handler
- * is wired, the strict model is applied here instead so a
- * popup request can never hang unanswered.
+ * is wired — or the wired handler did not answer synchronously
+ * (it answers promptly by contract) — the strict model is
+ * applied here instead so a popup request can never hang
+ * unanswered.
  */
 class PioneerPromptDelegate(
     private val appContext: Context,
@@ -200,6 +202,25 @@ class PioneerPromptDelegate(
             return result
         }
         deliver(prompt.targetUri)
+        // The shell answers synchronously (handlePopupPrompt
+        // completes the request promptly). If it did not — its
+        // handler is not wired yet — apply the strict model
+        // here instead of leaving the request hanging: a popup
+        // request must never hang unanswered.
+        if (pendingPopupResult === result) {
+            val allowed = popupAllowedNow()
+            if (allowed) onPopupAllowed()
+            runCatching {
+                result.complete(
+                    prompt.confirm(
+                        if (allowed) AllowOrDeny.ALLOW else AllowOrDeny.DENY
+                    )
+                )
+            }
+            pendingPopupResult = null
+            pendingPopupPrompt = null
+            pendingPopupTarget = null
+        }
         return result
     }
 

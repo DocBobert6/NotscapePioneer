@@ -31,19 +31,18 @@
  *  `onBeforeSendHeaders`. Neither is a list rule; both ride
  *  the same `rules-update` push.
  *
- *  STRICT POPUP BLOCKER (`$document` / `$popup`, Beta.63 #64):
- *  main-frame loads to a `$document`-blocked host are cancelled
- *  here too (`isDocumentBlocked`), same as any other list match.
- *  CAVEAT, stated plainly: `webRequest` carries no user-gesture
- *  signal, so this cancellation cannot tell a deliberately tapped
- *  link to a popunder host from a gesture-less popunder hop —
- *  Mariner's guard could (it only ever applied to gesture-less
- *  hops, so a tapped link never broke). In Pioneer a tapped link
- *  to a `$document` host IS blocked (uBlock-style). That is the
- *  steering's explicit order, and it is stricter than Mariner;
- *  the gesture-aware approximation (Worker B, design §8.9) still
- *  runs from `onLocationChange` + these observations for the
- *  scorecard row K panel behaviour.
+ *  POPUPS (`$document` / `$popup`, Beta.63 #64): main-frame loads
+ *  are NEVER cancelled here. `webRequest` carries no user-gesture
+ *  signal, so a main-frame cancellation could not tell a
+ *  deliberately tapped link to a popunder host from a
+ *  gesture-less popunder hop — and it blocked the tapped link
+ *  silently, with no notice and no allow/deny recourse
+ *  (watch-wrestling.eu, 2026-11-12). Mariner's guard only ever
+ *  applied to gesture-less hops, so a tapped link never broke;
+ *  Pioneer now matches it: the engine's `onLoadRequest` popunder
+ *  guard has the gesture signal and enforces exactly that rule,
+ *  capturing the hop into the popup queue + notice. Subresource
+ *  blocking below is unchanged.
  *
  *  Rules arrive two ways: the app pushes `rules-update` on the
  *  native port this script opens at startup, and the script asks
@@ -418,17 +417,14 @@
     }
 
     if (isMainFrame) {
-      /* STRICT POPUP BLOCKER: a main-frame load to a
-       * $document/$popup host is cancelled. See the header
-       * caveat — no gesture signal exists at this layer, so a
-       * deliberately tapped link to such a host is blocked too. */
-      var docCat = documentCategory(url, originHost);
-      if (docCat !== null) {
-        pageHostForTab(details.tabId, originHost).then(function (host) {
-          reportObservation("blocked", url, null, docCat, details.tabId, host);
-        });
-        return { cancel: true };
-      }
+      /* Main-frame loads are NEVER cancelled here: this layer
+       * has no user-gesture signal, so a $document cancel
+       * blocked deliberately tapped links too, silently (no
+       * notice, no allow/deny). Mariner's popunder guard
+       * applies only to gesture-less hops; the engine's
+       * onLoadRequest guard has the gesture signal and
+       * enforces exactly that rule. A tapped link to a
+       * $document host therefore loads, as in Mariner. */
       return {};
     }
 
