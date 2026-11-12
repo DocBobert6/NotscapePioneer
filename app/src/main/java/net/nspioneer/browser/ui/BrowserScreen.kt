@@ -860,7 +860,12 @@ fun BrowserScreen(
             isAppMode -> false
             tab.canGoBack.value -> { tab.goBack(); true }
             !isHome -> { homeTabIds.add(tab.id); true }
-            tabs.size > 1 -> { onCloseTab(tab); true }
+            // Back with no page history closes the tab: offer
+            // Undo like the grid does (audit 2026-11-12) — this
+            // is the accidental-close case, so the snackbar
+            // matters most here. Private/blank tabs get no Undo
+            // (closeTabWithUndo's own rule).
+            tabs.size > 1 -> { closeTabWithUndo(tab); true }
             else -> false
         }
     }
