@@ -6,7 +6,11 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Notscape Pioneer — Phase 2 status panel.
@@ -40,6 +44,19 @@ class StatusPanel(context: Context) {
     /** Media URLs reported by the probe extension (newest first, capped at 20). */
     val mediaLines = mutableStateListOf<String>()
 
+    /**
+     * Diagnostics trace window (alpha.16): while tracing, the status
+     * log is bracketed by "--- trace start … ---" / "--- trace end
+     * … ---" marker lines, so Copy status shows exactly what
+     * happened between them. The markers are ordinary status lines
+     * (same log, same cap) — no separate store, no export file.
+     */
+    val isTracing = mutableStateOf(false)
+    private var traceStartStamp: String? = null
+
+    private fun stamp(): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+
     init {
         // Version name read from the installed package, so this line
         // tracks the coordinator's version bump with no code change.
@@ -54,6 +71,24 @@ class StatusPanel(context: Context) {
         Log.i(TAG, line)
         statusLines.add(line)
         while (statusLines.size > 60) statusLines.removeAt(0)
+    }
+
+    /** Open a trace window: marker line first, then every status line
+     *  until stopTrace() is part of the trace. No-op if already open. */
+    fun startTrace() {
+        if (isTracing.value) return
+        val stamp = stamp()
+        traceStartStamp = stamp
+        isTracing.value = true
+        status("--- trace start $stamp ---")
+    }
+
+    /** Close the trace window with its end marker. No-op if none open. */
+    fun stopTrace() {
+        if (!isTracing.value) return
+        status("--- trace end ${stamp()} ---")
+        isTracing.value = false
+        traceStartStamp = null
     }
 
     fun noteMedia(tabNumber: Int, kind: String, url: String) {
@@ -105,6 +140,12 @@ class StatusPanel(context: Context) {
         lines += "SPIKE STATUS — $castLine"
         lines += "— status —"
         lines += statusLines
+        // A trace still open at copy time: say so in the copied text
+        // (the start marker is already among the status lines above).
+        // Added to the copied text only — never to the panel itself.
+        if (isTracing.value) {
+            lines += "--- trace running since ${traceStartStamp ?: "?"} ---"
+        }
         lines += "— media probe —"
         if (mediaLines.isEmpty()) {
             lines += "(no media URLs reported yet — load a video page)"

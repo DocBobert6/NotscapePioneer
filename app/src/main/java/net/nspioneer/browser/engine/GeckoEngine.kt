@@ -244,6 +244,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override val castRoutes: State<String> get() = _castRoutes
     private val _castRoutes = mutableStateOf("cast: not probed yet")
     override val statusLines get() = statusPanel.statusLines
+
+    // Diagnostics trace window (alpha.16): markers live in the same
+    // status log Copy status already copies.
+    override val isTracing get() = statusPanel.isTracing
+    override fun startTrace() = statusPanel.startTrace()
+    override fun stopTrace() = statusPanel.stopTrace()
     override val mediaLines get() = statusPanel.mediaLines
 
     private var mediaRouter: MediaRouter? = null
