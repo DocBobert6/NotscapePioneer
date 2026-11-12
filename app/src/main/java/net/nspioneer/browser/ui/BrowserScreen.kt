@@ -3232,7 +3232,18 @@ fun DiagnosticsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Button(onClick = { onCopyStatus() }) { Text("Copy status") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { onCopyStatus() }) { Text("Copy status") }
+                // Diagnostics trace (alpha.16): bracket a window of
+                // the status log with start/end markers, so Copy
+                // status shows exactly what happened between them.
+                // Same row, same style as Copy status.
+                if (engine.isTracing.value) {
+                    Button(onClick = { engine.stopTrace() }) { Text("Stop trace") }
+                } else {
+                    Button(onClick = { engine.startTrace() }) { Text("Start trace") }
+                }
+            }
             Text(
                 engine.castRoutes.value,
                 style = MaterialTheme.typography.bodyMedium
