@@ -30,10 +30,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,6 +56,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +68,7 @@ import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.SearchTemplate
+import net.nspioneer.browser.media.Downloads
 import org.mozilla.geckoview.StorageController
 import java.io.File
 import java.io.FileOutputStream
@@ -215,7 +220,12 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenLicences: () -> Unit,
     onOpenUrl: (String) -> Unit,
-    onReplayWelcome: () -> Unit
+    onReplayWelcome: () -> Unit,
+    // alpha.10: Renew (clear + close every tab) and Erase
+    // everything (clear + wipe + close private tabs) are owned
+    // by the shell — Settings only asks and confirms.
+    onRenew: () -> Unit = {},
+    onEraseAll: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -224,6 +234,8 @@ fun SettingsScreen(
     var showErasePrivate by remember { mutableStateOf(false) }
     var showSiteControls by remember { mutableStateOf(false) }
     var confirmImport by remember { mutableStateOf<String?>(null) }
+    var confirmClearAll by remember { mutableStateOf(false) }
+    var confirmRenew by remember { mutableStateOf(false) }
 
     // Backup export/import (alpha.10, Mariner's flow):
     // plain JSON through the document picker. No encrypted
@@ -1602,6 +1614,68 @@ fun SettingsScreen(
                     onClick = onOpenLicences
                 )
             }
+            Spacer(Modifier.height(16.dp))
+            GroupTitle("Session")
+            SettingsCard {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { confirmRenew = true },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Autorenew,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = "Renew",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    "Clear cookies, site storage, cache and history, and close every tab",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            GroupTitle("Danger zone")
+            SettingsCard {
+                Text(
+                    "Erase everything",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Bookmarks, history, favourites, downloads list, " +
+                        "site settings and saved tabs on this device are " +
+                        "deleted, along with website cookies, DOM storage " +
+                        "and cached web data. Private tabs are closed and " +
+                        "private browsing data erased. Downloaded files " +
+                        "stay in their folders.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = { confirmClearAll = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Erase everything") }
+            }
             Spacer(Modifier.height(24.dp))
         }
     }
@@ -1668,6 +1742,66 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { confirmImport = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Renew (alpha.10): the actual clear + close runs in the
+    // shell through onRenew; Settings only asks.
+    if (confirmRenew) {
+        FrostDialog(
+            onDismissRequest = { confirmRenew = false },
+            title = { Text("Renew — clear & close?") },
+            text = {
+                Text(
+                    "Cookies, site storage, cache and history are " +
+                        "cleared, and every tab is closed. Bookmarks, " +
+                        "downloads and favourites are kept."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRenew = false
+                    onRenew()
+                }) { Text("Renew") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRenew = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (confirmClearAll) {
+        FrostDialog(
+            onDismissRequest = { confirmClearAll = false },
+            title = { Text("Erase everything?") },
+            text = {
+                Text(
+                    "Bookmarks, history, favourites, downloads list, " +
+                        "site settings and saved tabs on this device " +
+                        "will be deleted, along with website cookies, " +
+                        "DOM storage and cached web data. Private tabs " +
+                        "will be closed and private browsing data " +
+                        "erased. Downloaded files stay in their " +
+                        "folders. This can't be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearAll = false
+                    Downloads.eraseAllDownloads(context, store)
+                    store.clearAllData()
+                    engine.clearGeckoData(
+                        StorageController.ClearFlags.COOKIES or
+                            StorageController.ClearFlags.SITE_DATA or
+                            StorageController.ClearFlags.ALL_CACHES
+                    )
+                    onEraseAll()
+                    Toast.makeText(context, "Everything erased", Toast.LENGTH_SHORT).show()
+                }) { Text("Erase") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearAll = false }) { Text("Cancel") }
             }
         )
     }

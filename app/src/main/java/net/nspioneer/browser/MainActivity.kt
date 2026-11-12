@@ -26,6 +26,7 @@ import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import net.nspioneer.browser.data.PioneerStore
+import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.data.TabSnapshot
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.EngineTab
@@ -287,7 +288,32 @@ class MainActivity : ComponentActivity() {
                             onBack = { screen = PioneerScreen.Browser },
                             onOpenLicences = { screen = PioneerScreen.Licences },
                             onOpenUrl = { url -> openUrlInActiveTab(url) },
-                            onReplayWelcome = { showWelcome = true }
+                            onReplayWelcome = { showWelcome = true },
+                            // alpha.10: Renew mirrors Mariner's doFire —
+                            // clear history + Gecko data + cache, close
+                            // every tab. Bookmarks, downloads and
+                            // favourites are kept.
+                            onRenew = {
+                                store.clearHistory()
+                                engine.clearGeckoData(
+                                    StorageController.ClearFlags.COOKIES or
+                                        StorageController.ClearFlags.SITE_DATA or
+                                        StorageController.ClearFlags.ALL_CACHES
+                                )
+                                StorageInfo.clearCache(this)
+                                tabs.toList().forEach { closeTab(it) }
+                                store.saveClosedTabs(emptyList())
+                                screen = PioneerScreen.Browser
+                                Toast.makeText(
+                                    this,
+                                    "Cleared — everything's closed",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            // alpha.10: Erase everything closes the
+                            // private tabs last — the last private
+                            // close wipes the private context (Batch 2).
+                            onEraseAll = { closeAllTabsInClass(true) }
                         )
                         PioneerScreen.Licences -> LicencesScreen(
                             onBack = { screen = PioneerScreen.Browser }
