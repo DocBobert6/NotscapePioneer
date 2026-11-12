@@ -7,7 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
@@ -81,6 +80,15 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     private val statusPanel = StatusPanel(appContext)
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /** The single popup controller (rebuild item 1, alpha.13):
+     *  one per-source-tab state machine replacing the four split
+     *  pieces (the `expectPopupSession` boolean, the
+     *  PromptDelegate's pending fields, the shell's
+     *  `handlePopupPrompt`, and the popunder-guard capture). */
+    private val popupController = PopupController(store) { line ->
+        statusPanel.status(line)
+    }
+
     /** Phase 3 blocking bridge (Worker A): owns the app side
      *  of the probe's blocking messages (`blocked`,
      *  `cosmetic-query`, `rules-request` / `rules-update`) and
@@ -148,21 +156,22 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     private val promptDelegate: PioneerPromptDelegate by lazy {
         PioneerPromptDelegate(
             appContext = appContext,
-            store = store,
             deliverFilePrompt = { type, mimeTypes, capture, onResult ->
                 onFilePrompt?.invoke(type, mimeTypes, capture, onResult)
             },
-            deliverPopupPrompt = { targetUri ->
-                onPopupPrompt?.invoke(targetUri)
-            },
-            pageHost = {
-                currentTab?.url?.value?.let { u ->
-                    runCatching { Uri.parse(u).host }.getOrNull() ?: ""
-                } ?: ""
-            },
-            onPopupAllowed = { target ->
-                expectPopupSession = true
-                expectPopupTarget = target
+            popupController = popupController,
+            // The tab the popup request's session belongs to: the
+            // controller decides against ITS host (rebuild item 2),
+            // never the engine's current tab.
+            sourceTabForSession = { session ->
+                tabs.firstOrNull { it.session === session }?.let { tab ->
+                    PopupController.SourceTab(
+                        id = tab.id,
+                        host = runCatching { Uri.parse(tab.url.value).host }
+                            .getOrNull() ?: "",
+                        isPrivate = tab.isPrivate,
+                    )
+                }
             },
         )
     }
@@ -178,27 +187,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
      * decision path that also needs the OS check.
      */
     var osGrantHandler: ((resources: List<String>, onResult: (List<String>) -> Unit) -> Unit)? = null
-
-    /** Set when a popup was allowed (onPopupPrompt ALLOW):
-     *  the next onNewSession tab is a popup window
-     *  (isPopupWin=true). Consumed by onNewSession.
-     *  expectPopupTarget carries the allowed popup's URI
-     *  (null for a target-less window.open): only a new
-     *  tab whose URI matches is marked, so a prompt that
-     *  never produces a tab cannot mis-mark the next
-     *  unrelated tab (audit S3). */
-    private var expectPopupSession: Boolean = false
-    private var expectPopupTarget: String? = null
-
-    /**
-     * Popunder-guard captures (strict popup blocker, §8.9):
-     * gesture-less main-frame hops to a $document-blocked
-     * host, denied in onLoadRequest. The shell merges these
-     * into its popup notice queue (BrowserScreen owns the
-     * notice UI; the engine owns the detection).
-     */
-    val popunderCaptures: SnapshotStateList<String> = mutableStateListOf()
-    val popunderPageHost = mutableStateOf("")
 
     private val runtime: GeckoRuntime = createRuntime().also {
         statusPanel.status("runtime: created (ETP Strict)")
@@ -227,7 +215,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override var onPermissionPrompt: ((PermPrompt) -> Unit)? = null
     override var onFilePrompt: ((String, List<String>, Int,
         (List<android.net.Uri>?) -> Unit) -> Unit)? = null
-    override var onPopupPrompt: ((String?) -> Unit)? = null
     private val _filterListsState =
         mutableStateOf(blockingObserver.filterListsStateText())
     override val filterListsState: State<String> get() = _filterListsState
@@ -594,12 +581,17 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         permissionDelegate.answer(prompt, allow)
     }
 
-    override fun answerPopupPrompt(allow: Boolean) {
-        promptDelegate.answerPopup(allow)
+    // Popup blocking (rebuild item 1): the single controller
+    // owns the queue; the shell only renders and drains it.
+    override val popupCaptures: SnapshotStateList<String>
+        get() = popupController.capturedUrls
+    override val popupCaptureHost: State<String>
+        get() = popupController.capturedHost
+    override fun takeCapturedPopups(): List<String> =
+        popupController.takeCaptured()
+    override fun clearCapturedPopups() {
+        popupController.clearCaptured()
     }
-
-    override fun popupAllowedNow(): Boolean =
-        promptDelegate.popupAllowedNow()
 
     // ------------------------------------------------------------------
     // Batch 4: settings the engine enforces
@@ -1322,10 +1314,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                             targetHost != hereHost &&
                             FilterEngine.isDocumentBlocked(u, hereHost)
                         ) {
-                            if (u !in popunderCaptures && popunderCaptures.size < 5) {
-                                popunderCaptures.add(u)
-                            }
-                            popunderPageHost.value = hereHost
+                            // Second capture source (item 5): the
+                            // guard's capture goes into the
+                            // controller's one queue, with the
+                            // notice, instead of a separate list
+                            // the shell had to merge.
+                            popupController.notePopunder(u, hereHost)
                             statusPanel.status(
                                 "tab ${n()}: popunder blocked: $u"
                             )
@@ -1353,14 +1347,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // NEVER call load here; Gecko loads the URI into the
                 // returned session. A private parent opens a private
                 // child; null would make window.open() fail.
-                // Popup windows: when an allowed onPopupPrompt armed
-                // expectPopupSession, the new tab is marked
+                // Popup windows: the controller matches this
+                // onNewSession against a pending allowed popup
+                // (rebuild item 1) and the new tab is marked
                 // isPopupWin=true (Mariner TabList.isPopupWin) so
-                // onCloseWindow can close it.
-                val isPopup = expectPopupSession &&
-                    (expectPopupTarget == null || expectPopupTarget == uri)
-                expectPopupSession = false
-                expectPopupTarget = null
+                // onCloseWindow can close it. A gesture link matches
+                // nothing and is not a popup.
+                val isPopup = popupController.matchNewSession(uri) != null
                 // openSession=false: the session MUST reach Gecko
                 // unopened — Gecko opens it itself, and handing it
                 // an already-open session throws AssertionError and

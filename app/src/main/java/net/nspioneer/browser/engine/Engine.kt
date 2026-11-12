@@ -218,19 +218,22 @@ interface Engine {
     // before delivering a new one.
     var onFilePrompt: ((type: String, mimeTypes: List<String>, capture: Int,
                         onResult: (uris: List<android.net.Uri>?) -> Unit) -> Unit)?
-    // Popup request (no user gesture). targetUri may be null. The SHELL
-    // applies Mariner's popupStrict model (§8.8) and answers via
-    // answerPopupPrompt. A real new tab (gesture / target=_blank) still
-    // arrives as onTabCreated (Phase 2), not here.
-    var onPopupPrompt: ((targetUri: String?) -> Unit)?        // on Engine
-    fun answerPopupPrompt(allow: Boolean)
-
-    /** Mariner's strict-model popup decision for the current
-     *  page (§8.8): allowed when strict is off, or when the
-     *  site is whitelisted per-site. The single decision site
-     *  (audit S3): the shell's handlePopupPrompt asks here
-     *  instead of recomputing it against its own host. */
-    fun popupAllowedNow(): Boolean
+    // Popup blocking (rebuild item 1, alpha.13): the single
+    // PopupController owns the decision, the arming and the
+    // capture queue — the shell only renders the queue (the
+    // notice) and drains it (Open once / Open all). A real new
+    // tab (gesture / target=_blank) still arrives as
+    // onTabCreated (Phase 2), not here.
+    /** Captured popup targets, in arrival order (max 5): prompt
+     *  denies + popunder-guard captures share this one queue. */
+    val popupCaptures: SnapshotStateList<String>
+    /** Host the captures came from — the notice's "on $host" and
+     *  the Always allow / Always deny target. */
+    val popupCaptureHost: State<String>
+    /** Drain the queue (Open once / Open all), then clear. */
+    fun takeCapturedPopups(): List<String>
+    /** Clear the queue (a user dismiss). */
+    fun clearCapturedPopups()
 
     // ---- Batch 4: settings the engine enforces ----
     // Web dark mode ("Auto" | "On" | "Off"): GeckoView has no

@@ -121,7 +121,6 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -731,12 +730,13 @@ fun BrowserScreen(
     var confirmDontAsk by remember { mutableStateOf(false) }
     var pendingVariants by remember { mutableStateOf<List<Downloads.DownloadVariant>>(emptyList()) }
     var pendingVariantIndex by remember { mutableStateOf(0) }
-    // Captured popup targets, in arrival order (Mariner
-    // BrowserScreen.kt:711-721). A queue, not a single slot:
-    // one tap often fires TWO window.open calls, and
-    // collapsing them meant the survivor was usually the ad.
-    val pendingPopupUrls = remember { mutableStateListOf<String>() }
-    var popupPageHost by remember { mutableStateOf("") }
+    // The captured-popup queue lives in the engine's single
+    // popup controller (rebuild item 1): prompt denies +
+    // popunder-guard captures share it (max 5, arrival order —
+    // Mariner BrowserScreen.kt:711-721; one tap often fires TWO
+    // window.open calls, and collapsing them meant the survivor
+    // was usually the ad). The shell only renders it (the
+    // notice below) and drains it (Open once / Open all).
     var showPopupNotice by remember { mutableStateOf(false) }
     var mediaSheetOpen by remember { mutableStateOf(false) }
     var siteInfoOpen by remember { mutableStateOf(false) }
@@ -926,9 +926,11 @@ fun BrowserScreen(
         }
     }
 
+    /** Clear the controller's captured-popup queue (a user
+     *  dismiss: X / Deny / back). The 12s auto-dismiss hides
+     *  the notice without clearing (item 9). */
     fun clearPendingPopups() {
-        pendingPopupUrls.clear()
-        (engine as? GeckoEngine)?.popunderCaptures?.clear()
+        engine.clearCapturedPopups()
     }
 
     // Back chain (MainActivity calls this first; false means
@@ -968,40 +970,8 @@ fun BrowserScreen(
 
     /** Open every captured popup in its own tab, then clear. */
     fun openPendingPopups() {
-        val urls = pendingPopupUrls.toList()
-        clearPendingPopups()
+        val urls = engine.takeCapturedPopups()
         urls.forEach { u -> onOpenUrlInNewTab(u, tab.isPrivate, true) }
-    }
-
-    /** The shell's answer to a popup request (§8.9): the
-     *  strict model decides first; a blocked popup completes
-     *  the Gecko request as denied PROMPTLY (never hang a
-     *  popup request while a notice is up) and its URL is
-     *  captured for Open once / Open all instead. Mariner
-     *  captures via a sacrificial WebView; GeckoView hands
-     *  us the target URI directly, so no sacrificial view
-     *  is needed. Sites the user blacklisted ("Always deny")
-     *  are silenced completely: no notice, ever. */
-    fun handlePopupPrompt(targetUri: String?) {
-        val host = pageHost
-        // Single decision site (audit S3): the engine's
-        // popupAllowedNow, not a recomputation against the
-        // shell's host.
-        val allowed = engine.popupAllowedNow()
-        if (allowed) {
-            engine.answerPopupPrompt(true)
-            return
-        }
-        engine.answerPopupPrompt(false)
-        if (!targetUri.isNullOrBlank() && targetUri != "about:blank" &&
-            targetUri !in pendingPopupUrls && pendingPopupUrls.size < 5
-        ) {
-            pendingPopupUrls.add(targetUri)
-        }
-        popupPageHost = host
-        if (!store.siteSetting(host).blockPopups) {
-            showPopupNotice = true
-        }
     }
 
     // Popup notice auto-dismiss (Mariner
@@ -1012,6 +982,15 @@ fun BrowserScreen(
             showPopupNotice = false
             clearPendingPopups()
         }
+    }
+
+    // A blocked popup capture shows the notice (the controller
+    // owns the queue; the shell only renders it). Keyed on the
+    // queue size: a new capture re-shows the notice after a
+    // dismiss; dismissing it does not clear the queue (item 9),
+    // so it stays hidden until the next capture arrives.
+    LaunchedEffect(engine.popupCaptures.size) {
+        if (engine.popupCaptures.isNotEmpty()) showPopupNotice = true
     }
 
     fun openMediaSheet() {
@@ -1083,7 +1062,6 @@ fun BrowserScreen(
                 }
             }
         }
-        engine.onPopupPrompt = { targetUri -> handlePopupPrompt(targetUri) }
         tab.onVideoPopupTap = { url ->
             VideoPopup.handle(
                 url, false, MediaLog.forTab(tab.id),
@@ -1108,23 +1086,10 @@ fun BrowserScreen(
                 onOpenSheet = { openMediaSheet() }
             )
         }
-        // Popunder-guard captures (engine side) merge into
-        // the shell's popup notice queue.
-        (engine as? GeckoEngine)?.let { ge ->
-            if (ge.popunderCaptures.isNotEmpty()) {
-                val host = ge.popunderPageHost.value
-                ge.popunderCaptures.toList().forEach { u ->
-                    if (u !in pendingPopupUrls && pendingPopupUrls.size < 5) {
-                        pendingPopupUrls.add(u)
-                    }
-                }
-                ge.popunderCaptures.clear()
-                if (host.isNotBlank()) popupPageHost = host
-                if (host.isBlank() || !store.siteSetting(host).blockPopups) {
-                    showPopupNotice = true
-                }
-            }
-        }
+        // No popunder merge here any more: the guard's captures
+        // go straight into the controller's one queue (rebuild
+        // item 1), and the LaunchedEffect above shows the notice
+        // when the queue grows.
     }
 
     /** Mariner's floating address bar (BrowserScreen.kt:3663-3995),
@@ -1800,14 +1765,14 @@ fun BrowserScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     when {
-                                        pendingPopupUrls.size > 1 ->
-                                            "${pendingPopupUrls.size} popups blocked on $popupPageHost"
-                                        popupPageHost.isNotBlank() -> "Popup blocked on $popupPageHost"
+                                        engine.popupCaptures.size > 1 ->
+                                            "${engine.popupCaptures.size} popups blocked on ${engine.popupCaptureHost.value}"
+                                        engine.popupCaptureHost.value.isNotBlank() -> "Popup blocked on ${engine.popupCaptureHost.value}"
                                         else -> "Popup blocked"
                                     },
                                     style = MaterialTheme.typography.titleSmall
                                 )
-                                pendingPopupUrls.firstOrNull()?.let { firstUrl ->
+                                engine.popupCaptures.firstOrNull()?.let { firstUrl ->
                                     Text(
                                         firstUrl,
                                         style = MaterialTheme.typography.bodySmall,
@@ -1829,14 +1794,14 @@ fun BrowserScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (pendingPopupUrls.isNotEmpty()) {
+                            if (engine.popupCaptures.isNotEmpty()) {
                                 Button(onClick = {
                                     openPendingPopups()
                                     showPopupNotice = false
                                 }) {
                                     Text(
-                                        if (pendingPopupUrls.size > 1) {
-                                            "Open all (${pendingPopupUrls.size})"
+                                        if (engine.popupCaptures.size > 1) {
+                                            "Open all (${engine.popupCaptures.size})"
                                         } else {
                                             "Open once"
                                         }
@@ -1847,7 +1812,7 @@ fun BrowserScreen(
                                 // Whitelist the site, then open the
                                 // popup so the tap still lands where
                                 // the user aimed.
-                                val host = popupPageHost
+                                val host = engine.popupCaptureHost.value
                                 if (host.isNotBlank()) {
                                     store.putSiteSetting(
                                         store.siteSetting(host).copy(allowPopups = true, blockPopups = false)
@@ -1867,7 +1832,7 @@ fun BrowserScreen(
                                 // Blacklist the site: its popups are
                                 // blocked silently from now on (undo in
                                 // Settings, Per-site controls).
-                                val host = popupPageHost
+                                val host = engine.popupCaptureHost.value
                                 if (host.isNotBlank()) {
                                     store.putSiteSetting(
                                         store.siteSetting(host).copy(allowPopups = false, blockPopups = true)

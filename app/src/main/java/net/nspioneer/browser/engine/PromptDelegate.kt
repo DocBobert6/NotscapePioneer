@@ -4,10 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
-import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
-import net.nspioneer.browser.data.PioneerStore
 import java.io.File
 
 /**
@@ -36,38 +34,29 @@ import java.io.File
  * passed through untouched — FilePrompt.confirm traverses
  * the tree itself (filesInWebKitDirectory).
  *
- * Popups — Mariner's model (§8.9, BrowserScreen.kt:3201+):
- * popupStrict (default true). Per-site allowPopups → a real
- * new tab (isPopupWin=true, created by the engine as in
- * Phase 2's onNewSession path). Blocked → the target URL is
- * collected into pendingPopupUrls (max 5) and a notice is
- * shown, unless per-site blockPopups ("Always deny"
- * silences completely). The decision itself is applied by
- * the SHELL (BrowserScreen, which owns the queue and the
- * notice) through Engine.answerPopupPrompt; this delegate
- * only holds the pending Gecko request. If no shell handler
- * is wired — or the wired handler did not answer synchronously
- * (it answers promptly by contract) — the strict model is
- * applied here instead so a popup request can never hang
- * unanswered.
+ * Popups — the single PopupController owns them (§8.9, rebuild
+ * item 1, alpha.13): popupStrict (default true). Per-site
+ * allowPopups → a real new tab (isPopupWin=true, created by the
+ * engine as in Phase 2's onNewSession path). Blocked → the target
+ * URL is collected into the controller's queue (max 5) and the
+ * shell shows a notice, unless per-site blockPopups ("Always
+ * deny" silences completely). This delegate only forwards the
+ * request to the controller with the SOURCE tab attached; it
+ * holds no popup state of its own. A popup request must never
+ * hang — the controller answers every request synchronously,
+ * and any failure inside it still completes as a denial.
  */
 class PioneerPromptDelegate(
     private val appContext: Context,
-    private val store: PioneerStore,
     /** Deliver a file-chooser request to the shell. Null = no shell handler. */
     private val deliverFilePrompt: ((type: String, mimeTypes: List<String>, capture: Int,
         onResult: (List<Uri>?) -> Unit) -> Unit)?,
-    /** Deliver a popup request to the shell. Null = no shell handler. */
-    private val deliverPopupPrompt: ((targetUri: String?) -> Unit)?,
-    /** Host of the page the popup / chooser came from. */
-    private val pageHost: () -> String,
-    /** Called when a popup is allowed (engine marks the next
-     *  onNewSession tab as a popup window). Receives the
-     *  allowed popup's target URI (null for a target-less
-     *  window.open): the engine only arms a new tab whose
-     *  URI matches, so a prompt that never produces a tab
-     *  cannot mis-mark the next unrelated tab. */
-    private val onPopupAllowed: (String?) -> Unit,
+    /** The single popup controller (rebuild item 1). */
+    private val popupController: PopupController,
+    /** The tab the popup request's session belongs to (the source
+     *  tab — the controller decides against ITS host, never the
+     *  engine's current tab). Null when the session maps to no tab. */
+    private val sourceTabForSession: (GeckoSession) -> PopupController.SourceTab?,
 ) : GeckoSession.PromptDelegate {
 
     // ---- file chooser ----
@@ -171,99 +160,16 @@ class PioneerPromptDelegate(
         return Uri.fromFile(tmp)
     }
 
-    // ---- popups ----
+    // ---- popups (rebuild item 1) ----
 
-    private var pendingPopupResult: GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? = null
-    private var pendingPopupPrompt: GeckoSession.PromptDelegate.PopupPrompt? = null
-    private var pendingPopupTarget: String? = null
-
+    /** Forward the request to the single popup controller with
+     *  the source tab attached; the controller answers it
+     *  synchronously under the strict model and returns the
+     *  completed GeckoResult. This delegate holds no popup
+     *  state of its own. */
     override fun onPopupPrompt(
         session: GeckoSession,
         prompt: GeckoSession.PromptDelegate.PopupPrompt,
-    ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? {
-        // A popup request must never hang: cancel any previous
-        // unanswered one with a denial first.
-        pendingPopupResult?.let { runCatching { it.complete(null) } }
-        val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
-        pendingPopupResult = result
-        pendingPopupPrompt = prompt
-        pendingPopupTarget = prompt.targetUri
-        val deliver = deliverPopupPrompt
-        if (deliver == null) {
-            // No shell handler: apply the strict model here.
-            val allowed = popupAllowedNow()
-            if (allowed) onPopupAllowed(pendingPopupTarget)
-            runCatching {
-                result.complete(
-                    prompt.confirm(
-                        if (allowed) AllowOrDeny.ALLOW else AllowOrDeny.DENY
-                    )
-                )
-            }
-            pendingPopupResult = null
-            pendingPopupPrompt = null
-            pendingPopupTarget = null
-            return result
-        }
-        deliver(prompt.targetUri)
-        // The shell answers synchronously (handlePopupPrompt
-        // completes the request promptly). If it did not — its
-        // handler is not wired yet — apply the strict model
-        // here instead of leaving the request hanging: a popup
-        // request must never hang unanswered.
-        if (pendingPopupResult === result) {
-            val allowed = popupAllowedNow()
-            if (allowed) onPopupAllowed(pendingPopupTarget)
-            runCatching {
-                result.complete(
-                    prompt.confirm(
-                        if (allowed) AllowOrDeny.ALLOW else AllowOrDeny.DENY
-                    )
-                )
-            }
-            pendingPopupResult = null
-            pendingPopupPrompt = null
-            pendingPopupTarget = null
-        }
-        return result
-    }
-
-    /** Mariner's strict-model decision for the current page
-     *  (BrowserScreen.kt:3216-3218): allowed when strict is
-     *  off, or when the site is whitelisted per-site. */
-    fun popupAllowedNow(): Boolean {
-        val strict = store.setting("popupStrict", "true") == "true"
-        val host = pageHost()
-        return !strict || (host.isNotBlank() && store.siteSetting(host).allowPopups)
-    }
-
-    /** The shell's answer to a pending popup request
-     *  (Engine.answerPopupPrompt). Completes the Gecko
-     *  request via the stored prompt object; an allow also
-     *  arms the next onNewSession tab as a popup window. */
-    fun answerPopup(allow: Boolean) {
-        val result = pendingPopupResult ?: return
-        val prompt = pendingPopupPrompt
-        val target = pendingPopupTarget
-        pendingPopupResult = null
-        pendingPopupPrompt = null
-        pendingPopupTarget = null
-        if (prompt == null) {
-            runCatching { result.complete(null) }
-            return
-        }
-        if (allow) onPopupAllowed(target)
-        runCatching {
-            result.complete(
-                prompt.confirm(if (allow) AllowOrDeny.ALLOW else AllowOrDeny.DENY)
-            )
-        }
-    }
-
-    // NOTE: no popupsSilenced() helper — the two notice paths
-    // check blockPopups against DIFFERENT hosts (the shell's
-    // active-tab host in handlePopupPrompt, the popunder
-    // capture's host in the merge), so a helper bound to
-    // pageHost() would answer for the wrong site. The
-    // inline checks stay (audit S3 cleanup).
+    ): GeckoResult<GeckoSession.PromptDelegate.PromptResponse>? =
+        popupController.onPopupRequest(sourceTabForSession(session), prompt)
 }
