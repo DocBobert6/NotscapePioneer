@@ -1327,6 +1327,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // and tapped links (hasUserGesture) never pass
                 // through here; redirects to a blocked host are
                 // caught exactly as Mariner catches them.
+                // The "here" host is the page the hop came from. A
+                // fresh popup tab has no committed URL yet, so its
+                // own host is blank and the guard could never fire
+                // there (item 6) — fall back to the opener tab's
+                // host, so redirect hops inside a popup tab's load
+                // chain are capturable too (deny + capture with
+                // notice, not silent deny). Once the tab commits
+                // its own URL, that host takes over.
                 if (request.target ==
                     GeckoSession.NavigationDelegate.TARGET_WINDOW_CURRENT &&
                     !request.hasUserGesture && !request.isDirectNavigation
@@ -1336,7 +1344,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                         val targetHost = runCatching { Uri.parse(u).host }.getOrNull() ?: ""
                         val hereHost = runCatching {
                             Uri.parse(tab.url.value).host
-                        }.getOrNull() ?: ""
+                        }.getOrNull()?.takeIf { it.isNotBlank() }
+                            ?: runCatching {
+                                Uri.parse(tab.openerTab?.url?.value ?: "").host
+                            }.getOrNull()?.takeIf { it.isNotBlank() }
+                            ?: ""
                         if (targetHost.isNotBlank() && hereHost.isNotBlank() &&
                             targetHost != hereHost &&
                             FilterEngine.isDocumentBlocked(u, hereHost)
