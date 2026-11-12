@@ -43,7 +43,10 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Screenshot
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
@@ -81,17 +84,19 @@ import net.nspioneer.browser.engine.EngineTab
  * Adapted points:
  * - Package net.nspioneer.browser.ui, PioneerStore, EngineTab
  *   (no WebView, no TabState, no Trace).
- * - Icons: only androidx.compose.material.icons.filled icons that
- *   ship in icons-core (Pioneer does not depend on
- *   material-icons-extended). Rows without a safe core icon render
- *   with a blank glyph slot so the text still aligns; MenuRow
- *   takes a nullable icon for that reason.
- * - Menu rows are the Phase 2 set only. Omitted by design (their
- *   phases have not arrived — do not fake them): Downloads, Reader
- *   view, Vault, Games, TTS, Playlists, Reading list, Bookshelf,
- *   Offline library, Save as PDF, Save offline, Screenshot, Scan
- *   QR, Add to home screen, Block an element, Site blocking,
- *   Global ad blocking (uBlock Origin is the blocker in Pioneer).
+ * - Icons: androidx.compose.material.icons.filled icons from
+ *   icons-core and icons-extended (the extended set arrived
+ *   in Phase 3 for the player glyphs). Rows without a safe
+ *   icon render with a blank glyph slot so the text still
+ *   aligns; MenuRow takes a nullable icon for that reason.
+ * - Menu rows are the Phase 2 set plus the alpha.10 page
+ *   actions (Save as PDF, Save offline, Scan QR,
+ *   Screenshot). Omitted by design (their phases have not
+ *   arrived — do not fake them): Reader view, Vault, Games,
+ *   TTS, Playlists, Reading list, Bookshelf, Site blocking,
+ *   Global ad blocking (uBlock Origin is the blocker in
+ *   Pioneer). Downloads, Offline library, Add to home
+ *   screen and Block an element (long-press) all exist now.
  * - Desktop site is a real row: it flips the GeckoView
  *   user-agent + viewport to desktop via EngineTab.setDesktopMode
  *   and stores the choice per site; the choice is restored on
@@ -358,6 +363,11 @@ internal object BrowserMenuRows {
         "bookmark" to "Bookmark this page",
         "favorites" to "Add to favorites",
         "findInPage" to "Find in page",
+        // alpha.10: page actions, in Mariner's order.
+        "savePdf" to "Save as PDF",
+        "saveOffline" to "Save page offline",
+        "scanQr" to "Scan QR code",
+        "screenshot" to "Screenshot",
         "desktopSite" to "Desktop site",
         "bookmarks" to "Bookmarks",
         "favoritesManager" to "Favorites",
@@ -429,7 +439,12 @@ internal object BrowserMenuRows {
      * and therefore never render for a private tab: a
      * private tab saves nothing. */
     val PRIVATE_HIDDEN: Set<String> =
-        setOf("bookmark", "favorites", "openOtherBrowser", "addToHome")
+        // Mariner's set, plus saveOffline + screenshot (Mariner
+        // BrowserChrome.kt:441): a private tab saves nothing.
+        setOf(
+            "bookmark", "favorites", "openOtherBrowser", "addToHome",
+            "saveOffline", "screenshot"
+        )
     /** One authority for the private-tab menu: a row shows for a
      * private tab only when it is not a persisting row. */
     fun visibleForTab(id: String, isPrivate: Boolean): Boolean =
@@ -595,7 +610,15 @@ internal fun BrowserMenuRowsContent(
     onInstallUBlock: () -> Unit,
     onCustomize: () -> Unit,
     // Batch 4: pin the page to the launcher (app mode).
-    onAddToHome: () -> Unit
+    onAddToHome: () -> Unit,
+    // alpha.10: page actions. Screenshot + PDF capture the
+    // visible page in the shell (capturePixels); Save offline
+    // asks the probe for the page HTML; Scan QR opens the
+    // camera dialog.
+    onSavePdf: () -> Unit,
+    onSaveOffline: () -> Unit,
+    onScreenshot: () -> Unit,
+    onScanQr: () -> Unit
 ) {
     val context = LocalContext.current
     val rev = store.revision
@@ -681,6 +704,27 @@ internal fun BrowserMenuRowsContent(
         MenuSlot("findInPage", shows("findInPage", hasPage)) {
             MenuRowVisible(store, "findInPage", "Find in page", Icons.Filled.Search) {
                 onDismiss(); onFind()
+            }
+        },
+        // alpha.10: page actions, in Mariner's order.
+        MenuSlot("savePdf", shows("savePdf", hasPage)) {
+            MenuRowVisible(store, "savePdf", "Save as PDF", Icons.Filled.PictureAsPdf) {
+                onDismiss(); onSavePdf()
+            }
+        },
+        MenuSlot("saveOffline", shows("saveOffline", hasPage)) {
+            MenuRowVisible(store, "saveOffline", "Save page offline", Icons.Filled.Download, isPrivate = isPrivate) {
+                onDismiss(); onSaveOffline()
+            }
+        },
+        MenuSlot("scanQr", shows("scanQr", hasPage)) {
+            MenuRowVisible(store, "scanQr", "Scan QR code", Icons.Filled.QrCodeScanner, isPrivate = isPrivate) {
+                onDismiss(); onScanQr()
+            }
+        },
+        MenuSlot("screenshot", shows("screenshot", hasPage)) {
+            MenuRowVisible(store, "screenshot", "Screenshot", Icons.Filled.Screenshot, isPrivate = isPrivate) {
+                onDismiss(); onScreenshot()
             }
         },
         MenuSlot("desktopSite", shows("desktopSite", hasPage)) {
@@ -826,7 +870,11 @@ internal fun BrowserMenuPage(
     onCopyStatus: () -> Unit,
     onInstallUBlock: () -> Unit,
     onCustomize: () -> Unit,
-    onAddToHome: () -> Unit
+    onAddToHome: () -> Unit,
+    onSavePdf: () -> Unit,
+    onSaveOffline: () -> Unit,
+    onScreenshot: () -> Unit,
+    onScanQr: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize()
@@ -853,7 +901,11 @@ internal fun BrowserMenuPage(
                     onCopyStatus = onCopyStatus,
                     onInstallUBlock = onInstallUBlock,
                     onCustomize = onCustomize,
-                    onAddToHome = onAddToHome
+                    onAddToHome = onAddToHome,
+                    onSavePdf = onSavePdf,
+                    onSaveOffline = onSaveOffline,
+                    onScreenshot = onScreenshot,
+                    onScanQr = onScanQr
                 )
             }
         }

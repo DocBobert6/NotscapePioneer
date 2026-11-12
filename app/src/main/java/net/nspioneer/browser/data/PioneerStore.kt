@@ -78,6 +78,15 @@ data class TabSnapshot(
     val sessionState: String = ""
 )
 
+/** One saved page (alpha.10, Mariner Store.kt OfflinePage):
+ *  the HTML snapshot file plus the original address it was
+ *  saved from. The snapshot cannot be rendered in a tab —
+ *  the Offline library row re-opens the original URL. */
+data class OfflinePage(
+    val id: Long, val title: String, val url: String,
+    val path: String, val addedAt: Long
+)
+
 // ---- Phase 3: downloads (Mariner Store.kt:23-47, ported verbatim) ----
 data class DownloadRecord(
     val id: Long, val title: String, val url: String, val fileName: String,
@@ -874,6 +883,57 @@ class PioneerStore private constructor(context: Context) {
             settings.remove("closedTabs")
             mutated(Part.SETTINGS)
         }
+    }
+
+    // ---------- saved pages (alpha.10) ----------
+
+    /** One JSON array under the "offlinePages" setting,
+     *  mirroring Mariner's shape — no schema change. */
+    fun offlinePages(): List<OfflinePage> = synchronized(lock) {
+        runCatching {
+            val arr = JSONArray(settings["offlinePages"] ?: "")
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                OfflinePage(
+                    o.optLong("id"), o.optString("title"),
+                    o.optString("url"), o.optString("path"),
+                    o.optLong("addedAt")
+                )
+            }.filter { it.url.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    fun addOfflinePage(title: String, url: String, path: String) {
+        synchronized(lock) {
+            val items = offlinePages().toMutableList()
+            items.removeAll { it.url == url }
+            items.add(
+                0, OfflinePage(
+                    newId(), title.ifBlank { url }, url, path,
+                    System.currentTimeMillis()
+                )
+            )
+            saveOfflinePagesLocked(items)
+        }
+    }
+
+    fun removeOfflinePage(id: Long) {
+        synchronized(lock) {
+            saveOfflinePagesLocked(offlinePages().filter { it.id != id })
+        }
+    }
+
+    private fun saveOfflinePagesLocked(items: List<OfflinePage>) {
+        val arr = JSONArray()
+        items.forEach {
+            arr.put(
+                JSONObject().put("id", it.id).put("title", it.title)
+                    .put("url", it.url).put("path", it.path)
+                    .put("addedAt", it.addedAt)
+            )
+        }
+        settings["offlinePages"] = arr.toString()
+        mutated(Part.SETTINGS)
     }
 
     // ---------- favicons ----------

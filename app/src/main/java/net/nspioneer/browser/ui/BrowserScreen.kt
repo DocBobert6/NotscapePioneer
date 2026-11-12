@@ -12,8 +12,21 @@ import android.net.Uri
 import android.speech.RecognizerIntent
 import android.view.MotionEvent
 import android.widget.Toast
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.ui.window.Dialog
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.QRCodeReader
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.PlanarYUVLuminanceSource
+import java.util.concurrent.Executors
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -168,6 +181,7 @@ import net.nspioneer.browser.engine.PermPrompt
 import net.nspioneer.browser.engine.UserBlockRules
 import net.nspioneer.browser.media.Downloads
 import net.nspioneer.browser.media.MediaLog
+import net.nspioneer.browser.media.PageActions
 import net.nspioneer.browser.media.PlayerActivity
 import net.nspioneer.browser.media.VideoPopup
 import net.nspioneer.browser.media.rememberAskDownloadNotifPermission
@@ -313,6 +327,10 @@ fun BrowserScreen(
     onOpenScreen: (PioneerScreen) -> Unit,
     onCopyStatus: () -> Unit,
     onInstallUBlock: () -> Unit,
+    // alpha.10: Save offline asks the probe for the page HTML
+    // (the shell owns the engine + the save, so the request
+    // and the onPageHtml handler both live in MainActivity).
+    onSaveOffline: () -> Unit = {},
     longPressTarget: LongPressTarget?,
     onLongPressHandled: () -> Unit,
     onOpenUrlInNewTab: (String, Boolean, Boolean) -> Unit,
@@ -330,6 +348,54 @@ fun BrowserScreen(
     val isHome = tab.id in homeTabIds || tabUrl.isBlank()
     var menuOpen by remember { mutableStateOf(false) }
     var customizeOpen by remember { mutableStateOf(false) }
+    // alpha.10: Scan QR (Mariner BrowserScreen.kt:437-497,
+    // CameraX + ZXing). The camera binds while the dialog
+    // is open and unbinds on dismiss (DisposableEffect).
+    var showQrScan by remember { mutableStateOf(false) }
+    var qrPreview by remember { mutableStateOf<PreviewView?>(null) }
+    var qrProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var qrLastToast by remember { mutableStateOf(0L) }
+    val qrExecutor = remember { Executors.newSingleThreadExecutor() }
+    val qrPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            showQrScan = true
+        } else {
+            Toast.makeText(
+                context,
+                "Camera permission is needed to scan QR codes",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+    fun stopQrCamera() {
+        runCatching { qrProvider?.unbindAll() }
+        qrProvider = null
+    }
+    fun decodeQrFrame(proxy: ImageProxy): String? {
+        try {
+            val img = proxy.image ?: return null
+            val plane = img.planes[0]
+            val buf = plane.buffer
+            val stride = plane.rowStride
+            val w = proxy.width
+            val h = proxy.height
+            val packed = ByteArray(w * h)
+            val row = ByteArray(stride)
+            for (y in 0 until h) {
+                buf.position(y * stride)
+                buf.get(row, 0, stride)
+                row.copyInto(packed, y * w, 0, w)
+            }
+            val src = PlanarYUVLuminanceSource(packed, w, h, 0, 0, w, h, false)
+            return QRCodeReader().decode(BinaryBitmap(HybridBinarizer(src))).text
+        } catch (_: Exception) {
+            return null
+        } finally {
+            proxy.close()
+        }
+    }
     var tabSwitcherOpen by remember { mutableStateOf(false) }
     // ---- Batch 2: tab grid + history sheet + undo ----
     // historySheetDir: 0 = closed, -1 = back history, +1 = forward.
@@ -554,6 +620,23 @@ fun BrowserScreen(
                     tabPreviews[tabId]?.recycle()
                     tabPreviews[tabId] = scaled
                 },
+                { _ -> }
+            )
+        }
+    }
+
+    /** Capture the visible page once for a menu action
+     *  (alpha.10: Screenshot / Save as PDF). Only the ACTIVE
+     *  tab can be captured — it is the one attached to the
+     *  single GeckoView. The bitmap is handed to [onBitmap]
+     *  on the capture thread; the caller must not hold it
+     *  (recycle after use). */
+    fun capturePageBitmap(onBitmap: (Bitmap) -> Unit) {
+        val view = geckoViewBox[0] ?: return
+        if (tab.url.value.isBlank()) return
+        runCatching {
+            view.capturePixels().accept(
+                { bitmap -> if (bitmap != null) onBitmap(bitmap) },
                 { _ -> }
             )
         }
@@ -2326,8 +2409,126 @@ fun BrowserScreen(
             onCopyStatus = { onCopyStatus() },
             onInstallUBlock = { onInstallUBlock() },
             onCustomize = { customizeOpen = true },
-            onAddToHome = { addToHome() }
+            onAddToHome = { addToHome() },
+            // alpha.10: page actions. Screenshot + PDF share
+            // one capturePixels bitmap; the PDF is a viewport
+            // image, not a paginated text PDF (no print adapter
+            // in GeckoView — see PageActions).
+            onSavePdf = {
+                capturePageBitmap { bitmap ->
+                    val ok = PageActions.saveViewportPdf(context, bitmap)
+                    bitmap.recycle()
+                    (context as? Activity)?.runOnUiThread {
+                        Toast.makeText(
+                            context,
+                            if (ok) "PDF saved to Downloads" else "Couldn't save that PDF",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            },
+            onSaveOffline = { onSaveOffline() },
+            onScreenshot = {
+                capturePageBitmap { bitmap ->
+                    val ok = PageActions.saveScreenshotBitmap(context, bitmap)
+                    bitmap.recycle()
+                    (context as? Activity)?.runOnUiThread {
+                        Toast.makeText(
+                            context,
+                            if (ok) "Screenshot saved to Pictures" else "Couldn't take that screenshot",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            },
+            onScanQr = { qrPermLauncher.launch(Manifest.permission.CAMERA) }
         )
+    }
+
+    // Scan QR dialog (alpha.10, Mariner BrowserScreen.kt:5209-5290):
+    // CameraX preview + ZXing frame decode; a decoded web
+    // address opens in a new tab of the same privacy class.
+    LaunchedEffect(showQrScan, qrPreview) {
+        if (!showQrScan || qrPreview == null) return@LaunchedEffect
+        val provider = runCatching {
+            ProcessCameraProvider.getInstance(context).get()
+        }.getOrNull() ?: return@LaunchedEffect
+        qrProvider = provider
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(qrPreview!!.surfaceProvider)
+        }
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+        analysis.setAnalyzer(qrExecutor) { proxy ->
+            val raw = decodeQrFrame(proxy)
+            if (raw != null) {
+                (context as? Activity)?.runOnUiThread {
+                    val url = PageActions.sanitizeQrUrl(raw)
+                    if (url == null) {
+                        val now = System.currentTimeMillis()
+                        if (now - qrLastToast > 3000) {
+                            qrLastToast = now
+                            Toast.makeText(
+                                context, "That QR code is not a web address",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    } else {
+                        stopQrCamera()
+                        showQrScan = false
+                        onOpenUrlInNewTab(url, tab.isPrivate, true)
+                    }
+                }
+            }
+        }
+        runCatching {
+            provider.unbindAll()
+            val act = context as? ComponentActivity ?: return@LaunchedEffect
+            provider.bindToLifecycle(
+                act, CameraSelector.DEFAULT_BACK_CAMERA,
+                preview, analysis
+            )
+        }
+    }
+    DisposableEffect(showQrScan) {
+        onDispose { stopQrCamera() }
+    }
+    if (showQrScan) {
+        Dialog(onDismissRequest = { showQrScan = false }) {
+            Column(
+                modifier = Modifier.fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surface,
+                        RoundedCornerShape(16.dp)
+                    ).padding(16.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Scan QR code",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { showQrScan = false }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Close")
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                AndroidView(
+                    factory = { ctx ->
+                        PreviewView(ctx).also { qrPreview = it }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(320.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Point the camera at a QR code for a web address.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 
     // Menu customization sheet.

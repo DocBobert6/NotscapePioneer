@@ -32,6 +32,7 @@ import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.EngineTab
 import net.nspioneer.browser.engine.GeckoEngine
 import net.nspioneer.browser.engine.LongPressTarget
+import net.nspioneer.browser.media.PageActions
 import net.nspioneer.browser.ui.BookmarksScreen
 import net.nspioneer.browser.ui.BrowserScreen
 import net.nspioneer.browser.ui.DiagnosticsScreen
@@ -121,6 +122,23 @@ class MainActivity : ComponentActivity() {
                 val first = crashFile.readLines().firstOrNull() ?: ""
                 if (first.isNotBlank()) engine.noteStatus("last crash: $first")
             }
+        }
+
+        // alpha.10: Save offline — the probe's `page-html`
+        // answer arrives here; save the snapshot + record it,
+        // and toast. A blank answer means the page had no HTML
+        // to give (or the probe never answered).
+        engine.onPageHtml = { tab, html ->
+            val ok = if (html.isBlank()) false else
+                PageActions.saveOfflinePage(
+                    this, store, tab.title.value, tab.url.value, html
+                )
+            Toast.makeText(
+                this,
+                if (ok) "Page saved to Offline library"
+                else "Couldn't save that page",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         // uBlock Origin: the install goes through a real dialog
@@ -249,6 +267,23 @@ class MainActivity : ComponentActivity() {
                             onOpenScreen = { target -> screen = target },
                             onCopyStatus = { copyStatusToClipboard() },
                             onInstallUBlock = { engine.installUBlock() },
+                            // alpha.10: Save offline — the active
+                            // tab must be a web page (Mariner's
+                            // "Nothing to save here" guard); the
+                            // probe answers asynchronously through
+                            // engine.onPageHtml (set in onCreate).
+                            onSaveOffline = {
+                                val tab = activeTab
+                                val url = tab?.url?.value.orEmpty()
+                                if (tab == null || url.isBlank() || !url.startsWith("http")) {
+                                    Toast.makeText(
+                                        this, "Nothing to save here",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    engine.requestPageHtml(tab)
+                                }
+                            },
                             longPressTarget = longPressTarget,
                             onLongPressHandled = { longPressTarget = null },
                             onOpenUrlInNewTab = { url, isPrivate, switchTo ->

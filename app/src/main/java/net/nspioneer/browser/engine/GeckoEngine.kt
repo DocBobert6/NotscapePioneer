@@ -1034,6 +1034,32 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
+    /** alpha.10 (Save offline): ask the tab's probe content
+     *  script for the page's outerHTML. The script answers
+     *  with a `page-html` native message, routed through
+     *  [notePageHtml] to [onPageHtml]. No reply if the port
+     *  is not connected (page still loading, or a non-web
+     *  tab) — the caller toasts that itself. */
+    var onPageHtml: ((GeckoTab, String) -> Unit)? = null
+
+    fun requestPageHtml(tab: GeckoTab) {
+        val port = tab.probePort ?: return
+        runCatching {
+            port.postMessage(
+                JSONObject().apply { put("type", "page-html-request") }
+            )
+        }.onFailure { e ->
+            statusPanel.status(
+                "tab ${tab.id}: page-html request failed: ${e.message}"
+            )
+        }
+    }
+
+    override fun notePageHtml(session: GeckoSession?, html: String) {
+        val tab = tabs.firstOrNull { it.session === session } ?: return
+        onPageHtml?.invoke(tab, html)
+    }
+
     /** Push the autoplay-mute state for this tab's host to
      *  its live probe port, if one is open (Batch 4). */
     private fun postAutoplayMuted(tab: GeckoTab) {

@@ -198,6 +198,14 @@ class ExtensionManager(
                 host.noteNetMedia(sender.session, message.optString("url"))
                 return null
             }
+            // alpha.10: Save offline — the content script
+            // answers a `page-html-request` port message with
+            // this page's outerHTML. Routed to the tab's
+            // onPageHtml handler; the shell saves + toasts.
+            if (type == "page-html") {
+                host.notePageHtml(sender.session, message.optString("html"))
+                return null
+            }
             if (type != "media-probe") {
                 // Worker A fallthrough: the blocking bridge
                 // owns `blocked`, `cosmetic-query` and
@@ -403,6 +411,9 @@ interface ProbeHost {
     /** Phase 3 (Worker C): per-site pop-up-player opt-out
      *  for [host] (`videoPopupOff:$host`). */
     fun videoPopupOff(host: String): Boolean
+    /** alpha.10 (Save offline): the content script answered
+     *  a `page-html-request` with this page's outerHTML. */
+    fun notePageHtml(session: GeckoSession?, html: String)
 
     /** Phase 3 (Worker A): the blocking bridge's native
      *  messages (`blocked`, `cosmetic-query`,

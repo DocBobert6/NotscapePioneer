@@ -1399,10 +1399,12 @@ private fun DownloadRow(
     )
 }
 
-/** The Offline library: media downloads only. Ordinary
- *  file and image downloads live in the phone's Downloads
- *  folder and on the Downloads page. (Mariner
- *  LibraryScreens.kt:1261.) */
+/** The Offline library: media downloads, plus saved pages
+ *  (alpha.10). Ordinary file and image downloads live in
+ *  the phone's Downloads folder and on the Downloads page.
+ *  (Mariner LibraryScreens.kt:1261.) A saved page is an
+ *  HTML snapshot — tapping its row re-opens the original
+ *  URL, as Mariner's .mht rows do. */
 @Composable
 fun LibraryScreen(
     store: PioneerStore,
@@ -1576,6 +1578,58 @@ fun LibraryScreen(
                         Spacer(Modifier.height(24.dp))
                     }
                 }
+            }
+        }
+        // alpha.10: saved pages (HTML snapshots from "Save
+        // page offline"). Tapping a row re-opens the original
+        // URL; the snapshot itself cannot render in a tab.
+        // Deleting removes the record and the snapshot file.
+        val savedPages = store.offlinePages().filter { page ->
+            downloadQuery.isBlank() ||
+                page.title.contains(downloadQuery, ignoreCase = true) ||
+                page.url.contains(downloadQuery, ignoreCase = true)
+        }
+        if (savedPages.isNotEmpty()) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                GroupTitle("Saved pages")
+                SettingsCard {
+                    savedPages.forEachIndexed { i, page ->
+                        if (i > 0) InsetDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .clickable { onOpenUrl(page.url) }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    page.title.ifBlank { page.url },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    page.url,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(onClick = {
+                                runCatching {
+                                    java.io.File(page.path).delete()
+                                }
+                                store.removeOfflinePage(page.id)
+                            }) {
+                                Icon(
+                                    Icons.Filled.Delete,
+                                    contentDescription = "Delete saved page"
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
             }
         }
         Spacer(Modifier.height(8.dp))

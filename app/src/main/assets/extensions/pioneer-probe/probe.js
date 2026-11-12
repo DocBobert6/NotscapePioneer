@@ -88,6 +88,24 @@
         // load, below).
         if (msg && msg.type === "reduced-motion") applyReducedMotion(!!msg.on);
         if (msg && msg.type === "autoplay-muted") applyAutoplayMuted(!!msg.muted);
+        // alpha.10: Save offline — the app asks for this
+        // page's HTML over the port; the script answers with
+        // a native message (outerHTML, capped at 2 MB — a
+        // larger page saves truncated, with a marker).
+        if (msg && msg.type === "page-html-request") {
+          try {
+            var html = document.documentElement.outerHTML || "";
+            var truncated = false;
+            if (html.length > 2000000) {
+              html = html.slice(0, 2000000);
+              truncated = true;
+            }
+            if (truncated) html += "\n<!-- notscape: truncated at 2 MB -->";
+            browser.runtime.sendNativeMessage("pioneer", {
+              type: "page-html", html: html
+            }).catch(function () { /* shell not listening */ });
+          } catch (e) { /* page not readable */ }
+        }
       });
     }
   } catch (e) { /* live zoom push unavailable; zoom-query still applies */ }

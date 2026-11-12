@@ -120,6 +120,14 @@ dependencies {
     implementation("androidx.media3:media3-common:1.9.4")
     implementation("androidx.media3:media3-session:1.9.4")
     implementation("androidx.media3:media3-transformer:1.9.4")
+    // alpha.10 (Scan QR): CameraX 1.4.2 + ZXing, exactly as
+    // Mariner (camera-camera2 / camera-lifecycle / camera-view
+    // + zxing core 3.5.3). The CAMERA permission is already
+    // in the manifest.
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
     // Phase 3 downloads: WorkManager for the HLS / DASH /
     // segmented / merge workers (foreground dataSync).
     implementation("androidx.work:work-runtime-ktx:2.10.0")
