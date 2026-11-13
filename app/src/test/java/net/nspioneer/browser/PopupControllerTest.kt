@@ -115,8 +115,11 @@ class PopupControllerTest {
     }
 
     @Test fun answer_dontTrust() {
+        // alpha.28: Don't trust is silent — no capture for the
+        // distrusted popup (capture=false); the site is still
+        // blacklisted (writeBlock=true).
         assertEquals(
-            PopupAnswerEffect(AllowOrDeny.DENY, false, true, false, true),
+            PopupAnswerEffect(AllowOrDeny.DENY, false, false, false, true),
             answerEffect(PopupChoice.DONT_TRUST)
         )
     }
