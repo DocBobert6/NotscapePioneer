@@ -928,7 +928,6 @@ fun BrowserScreen(
                 referer = referer, isPrivate = isPrivate,
                 stagedFile = stagedFile
             )
-            Toast.makeText(context, "Download started", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -3075,9 +3074,6 @@ fun BrowserScreen(
                             )
                         }
                         pendingDownload = null
-                        Toast.makeText(
-                            context, "Download started", Toast.LENGTH_SHORT
-                        ).show()
                     }
                 ) { Text("Download") }
             },

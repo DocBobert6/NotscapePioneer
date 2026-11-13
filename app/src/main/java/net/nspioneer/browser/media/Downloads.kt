@@ -465,6 +465,22 @@ object Downloads {
     private fun statusOf(store: PioneerStore, id: Long): String? =
         store.downloadsSnapshot().firstOrNull { it.id == id }?.status
 
+    /** Toast from a background thread: post to main, never
+     *  crash (the main looper is null on the plain-JVM test
+     *  classpath, and Toast itself is a stub there). */
+    private fun postToast(context: Context, text: String) {
+        runCatching {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    android.widget.Toast.makeText(
+                        context.applicationContext, text,
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
     /** Write a terminal status unless the job was paused in
      *  the meantime (a pause landing between an engine's
      *  terminal write and the user's Resume would otherwise
@@ -814,6 +830,17 @@ object Downloads {
             // record starts at once when a slot is free and waits
             // (oldest first) when the limit is reached.
             promoteQueued(appCtx, store)
+            // alpha.27: the toast is honest only now — routing
+            // has run, so the record says what actually
+            // happened: started, finished (a tiny blob), failed,
+            // or still queued. The shell no longer toasts
+            // "Download started" up front.
+            when (statusOf(store, id)) {
+                "failed" -> postToast(appCtx, "Download failed")
+                "complete" -> postToast(appCtx, "Download complete")
+                "downloading" -> postToast(appCtx, "Download started")
+                else -> postToast(appCtx, "Download queued")
+            }
         }
         return id
     }
