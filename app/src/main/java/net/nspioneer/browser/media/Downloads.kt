@@ -66,8 +66,8 @@ import java.net.URL
  *
  * What is kept verbatim in behaviour: filename resolution
  * (HEAD honours Content-Disposition + real content type),
- * `sanitize()`, routing (Wi-Fi-only → queued, DASH →
- * DashDownloadWorker, HLS → HlsDownloadWorker, segmented-
+ * `sanitize()`, routing (Wi-Fi-only → queued, blob:/data: → staged bytes written straight to the destination,
+ * DASH → DashDownloadWorker, HLS → HlsDownloadWorker, segmented-
  * eligible → SegmentedDownloadWorker, else DownloadManager),
  * MAX_CONCURRENT_DOWNLOADS = 3 oldest-first, pause/resume
  * only for resumable engines, cancel, retry through the
@@ -490,8 +490,10 @@ object Downloads {
             val contentType = bundle["contentType"]?.takeIf { it.isNotBlank() }
             val referer = bundle["referer"]?.takeIf { it.isNotBlank() }
             val media = bundle["media"] == "true"
+            val stagedFile = bundle["stagedFile"]?.takeIf { it.isNotBlank() }
+                ?.let { File(it) }
             store.updateDownloadState(rec.id, "downloading")
-            routeNewDownload(appCtx, store, rec, url, contentType, referer, media)
+            routeNewDownload(appCtx, store, rec, url, contentType, referer, media, stagedFile)
         }
     }
 
@@ -511,6 +513,41 @@ object Downloads {
         updateJobBundle(store, rec.id, mapOf("engine" to "dm"))
         store.updateDownloadState(rec.id, "downloading", dmId)
     }
+
+    /** Blob/data: download: write the staged response bytes
+     *  straight to the destination — no probe, no
+     *  DownloadManager, neither of which can fetch a blob:
+     *  URL. A missing staged file (bytes never captured, or
+     *  the staging was swept) fails honestly: retry can never
+     *  re-fetch a blob, so the label says to tap Download on
+     *  the page again. Retry reuses the staged bytes when
+     *  they are still there (the file is only consumed on a
+     *  successful finish). */
+    private fun routeBlobDownload(
+        appCtx: Context,
+        store: PioneerStore,
+        rec: DownloadRecord,
+        stagedFile: File?
+    ) {
+        if (stagedFile == null || !stagedFile.exists()) {
+            failDownload(
+                appCtx, store, rec,
+                Exception("the page's download expired — tap Download on the page again")
+            )
+            return
+        }
+        store.updateDownloadProgress(rec.id, 0)
+        updateJobBundle(store, rec.id, mapOf("engine" to "blob"))
+        if (!finishDownload(appCtx, store, rec, stagedFile)) {
+            failDownload(appCtx, store, rec, Exception("Download failed"))
+        }
+    }
+
+    /** True for blob: and data: URLs — schemes no downloader
+     *  can re-fetch. Pure, for tests. */
+    internal fun isBlobLike(url: String): Boolean =
+        url.startsWith("blob:", ignoreCase = true) ||
+            url.startsWith("data:", ignoreCase = true)
 
     /** Pause a resumable download: the worker sees the flag
      *  between segments/chunks and stops, keeping staging +
@@ -563,7 +600,8 @@ object Downloads {
         url: String,
         contentType: String?,
         referer: String?,
-        media: Boolean
+        media: Boolean,
+        stagedFile: File? = null
     ) {
         // With Wi-Fi-only on and a metered network active,
         // don't even probe — leave the record queued (the row
@@ -573,6 +611,15 @@ object Downloads {
             isNetworkMetered(appCtx)
         ) {
             store.updateDownloadState(rec.id, "queued")
+            return
+        }
+        // Blob/data: downloads: the bytes were captured from
+        // the response body at onExternalResponse time — a
+        // blob: URL cannot be re-fetched by any downloader,
+        // so the staged file is the only copy. Skip the probe
+        // and DownloadManager entirely.
+        if (isBlobLike(url)) {
+            routeBlobDownload(appCtx, store, rec, stagedFile)
             return
         }
         val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
@@ -703,7 +750,8 @@ object Downloads {
         isPrivate: Boolean = false,
         location: String? = null,
         fileNameOverride: String? = null,
-        variantBandwidth: Long? = null
+        variantBandwidth: Long? = null,
+        stagedFile: File? = null
     ): Long {
         val id = nextDownloadId(store)
         val appCtx = context.applicationContext
@@ -759,7 +807,8 @@ object Downloads {
                 "isPrivate" to isPrivate.toString(),
                 "location" to (if (isPrivate) "app" else (location ?: "")),
                 "fileName" to fileName,
-                "variantBandwidth" to (variantBandwidth?.toString() ?: "")
+                "variantBandwidth" to (variantBandwidth?.toString() ?: ""),
+                "stagedFile" to (stagedFile?.absolutePath ?: "")
             ))
             // The queue gate lives in promoteQueued alone: the
             // record starts at once when a slot is free and waits
@@ -1487,6 +1536,92 @@ object Downloads {
         noteError(store, rec, e)
         writeTerminalIfNotPaused(store, rec.id, "failed")
         notifyFailed(context, store, rec, errorLabel(e))
+    }
+
+    /** Human file name for a blob/data: download: the URL's
+     *  last segment is a bare UUID, so prefer the page title
+     *  plus the extension for the response MIME type. */
+    internal fun humanNameFromTitle(title: String, contentType: String?): String {
+        val stem = sanitize(title).ifBlank { "download" }
+        val mime = contentType?.substringBefore(';')?.trim()?.lowercase()
+        val ext = mime?.let { mimeExtension(it) } ?: ""
+        return stem + ext
+    }
+
+    /** Extension for a MIME type: the system map first, then
+     *  a small built-in table (the system map is an Android
+     *  stub on the plain-JVM test classpath, so the table
+     *  keeps this testable there too). */
+    private fun mimeExtension(mime: String): String? {
+        val fromMap = runCatching {
+            MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { ".$it" }
+        if (fromMap != null) return fromMap
+        return when (mime) {
+            "application/json" -> ".json"
+            "text/plain" -> ".txt"
+            "text/csv" -> ".csv"
+            "text/html" -> ".html"
+            "application/pdf" -> ".pdf"
+            "application/zip" -> ".zip"
+            "image/png" -> ".png"
+            "image/jpeg" -> ".jpg"
+            "video/mp4" -> ".mp4"
+            "audio/mpeg" -> ".mp3"
+            else -> null
+        }
+    }
+
+    /** Directory staged blob bodies live in: the same
+     *  staging root the workers use, so cancel/wipe/sweep
+     *  cover it. */
+    internal fun blobStagingDir(context: Context): File =
+        File(
+            context.getExternalFilesDir(Environment.DIRECTORY_MOVIES),
+            "notscape-staging"
+        )
+
+    /** Fresh staging file for one blob/data: download. */
+    internal fun blobStagingFile(context: Context): File =
+        File(blobStagingDir(context), "blob-${java.util.UUID.randomUUID()}.bin")
+
+    /** Stream a response body to a staging file on disk, not
+     *  memory, so a large blob cannot OOM; the stream is
+     *  always closed. Null when the copy fails (a partial
+     *  file is deleted). */
+    internal fun stageResponseBody(
+        context: Context, body: java.io.InputStream
+    ): File? {
+        val staged = runCatching { blobStagingFile(context) }.getOrNull()
+            ?: return null
+        return try {
+            staged.parentFile?.mkdirs()
+            body.use { input ->
+                staged.outputStream().use { out -> input.copyTo(out) }
+            }
+            staged
+        } catch (e: Exception) {
+            runCatching { staged.delete() }
+            null
+        }
+    }
+
+    /** Delete staged blob files no download references any
+     *  more (dialog dismissed, process died mid-download):
+     *  anything named blob-*.bin under the staging dir whose
+     *  path appears in no current job bundle. */
+    fun sweepOrphanBlobStaging(context: Context, store: PioneerStore) {
+        val dir = runCatching { blobStagingDir(context) }.getOrNull() ?: return
+        val referenced = store.downloadsSnapshot()
+            .mapNotNull { readJobBundle(store, it.id)?.get("stagedFile") }
+            .filter { it.isNotBlank() }.toSet()
+        runCatching {
+            dir.listFiles()?.forEach { f ->
+                if (f.name.startsWith("blob-") && f.absolutePath !in referenced) {
+                    runCatching { f.delete() }
+                }
+            }
+        }
     }
 
     // ---------- HLS ----------

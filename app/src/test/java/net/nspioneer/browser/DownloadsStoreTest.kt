@@ -14,6 +14,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Scorecard row F (store half): the download helpers that need a
@@ -43,9 +44,10 @@ class DownloadsStoreTest {
         id: Long,
         status: String = "queued",
         isPrivate: Boolean = false,
-        fileName: String = "f.bin"
+        fileName: String = "f.bin",
+        url: String = "https://example.com/f.bin"
     ): DownloadRecord = DownloadRecord(
-        id = id, title = "t", url = "https://example.com/f.bin",
+        id = id, title = "t", url = url,
         fileName = fileName, dmId = -1, status = status,
         addedAt = 0L, isPrivate = isPrivate
     )
@@ -218,5 +220,115 @@ class DownloadsStoreTest {
         val done = store.downloadsSnapshot().first { it.id == 1052L }
         assertEquals("complete", done.status)
         assertEquals(100, done.progress)
+    }
+
+    // ---------- blob downloads (alpha.27) ----------
+
+    private fun blobBundle(url: String, staged: File?, fileName: String) =
+        mapOf(
+            "url" to url,
+            "title" to "Adblock test",
+            "media" to "false",
+            "contentType" to "application/json",
+            "location" to "public",
+            "fileName" to fileName,
+            "stagedFile" to (staged?.absolutePath ?: "")
+        )
+
+    @Test
+    fun blobDownloadCompletesFromStagedFile() {
+        val app = RuntimeEnvironment.getApplication()
+        val staged = File(
+            Downloads.blobStagingDir(app), "blob-test-complete.bin"
+        ).apply {
+            parentFile?.mkdirs()
+            writeText("hello-blob")
+        }
+        val url = "blob:https://d3ward.com/63efe48b-5427-4abb-94a6-0d66b378f924"
+        store.addDownload(rec(2001L, url = url, fileName = "report-2001.json"))
+        Downloads.saveJobBundle(store, 2001L, blobBundle(url, staged, "report-2001.json"))
+        Downloads.promoteQueued(app, store)
+        val done = store.downloadsSnapshot().first { it.id == 2001L }
+        assertEquals("complete", done.status)
+        assertEquals(100, done.progress)
+        assertTrue(done.contentUri.isNotBlank())
+        val dest = File(done.contentUri)
+        try {
+            assertEquals("hello-blob", dest.readText())
+        } finally {
+            runCatching { dest.delete() }
+        }
+        assertFalse(staged.exists())
+    }
+
+    @Test
+    fun blobDownloadWithoutStagedFileFailsHonestly() {
+        val app = RuntimeEnvironment.getApplication()
+        val url = "blob:https://d3ward.com/63efe48b-5427-4abb-94a6-0d66b378f924"
+        store.addDownload(rec(2002L, url = url, fileName = "report-2002.json"))
+        Downloads.saveJobBundle(store, 2002L, blobBundle(url, null, "report-2002.json"))
+        Downloads.promoteQueued(app, store)
+        val failed = store.downloadsSnapshot().first { it.id == 2002L }
+        assertEquals("failed", failed.status)
+        assertEquals(
+            "the page's download expired — tap Download on the page again",
+            store.setting("dlerror:2002", "")
+        )
+    }
+
+    @Test
+    fun blobRetryReusesStagedBytes() {
+        val app = RuntimeEnvironment.getApplication()
+        val staged = File(
+            Downloads.blobStagingDir(app), "blob-test-retry.bin"
+        ).apply {
+            parentFile?.mkdirs()
+            writeText("hello-retry")
+        }
+        val url = "blob:https://d3ward.com/63efe48b-5427-4abb-94a6-0d66b378f924"
+        val record = rec(
+            2003L, status = "failed", url = url, fileName = "report-2003.json"
+        )
+        store.addDownload(record)
+        Downloads.saveJobBundle(store, 2003L, blobBundle(url, staged, "report-2003.json"))
+        assertTrue(Downloads.retry(app, store, record))
+        val done = store.downloadsSnapshot().first { it.id == 2003L }
+        assertEquals("complete", done.status)
+        val dest = File(done.contentUri)
+        try {
+            assertEquals("hello-retry", dest.readText())
+        } finally {
+            runCatching { dest.delete() }
+        }
+    }
+
+    @Test
+    fun stageResponseBodyWritesBytesToDisk() {
+        val app = RuntimeEnvironment.getApplication()
+        val staged = Downloads.stageResponseBody(app, "blob-bytes".byteInputStream())
+        assertTrue(staged != null)
+        try {
+            assertEquals("blob-bytes", staged!!.readText())
+            assertTrue(staged.name.startsWith("blob-"))
+        } finally {
+            runCatching { staged?.delete() }
+        }
+    }
+
+    @Test
+    fun sweepOrphanBlobStagingDeletesUnreferencedFiles() {
+        val app = RuntimeEnvironment.getApplication()
+        val dir = Downloads.blobStagingDir(app).apply { mkdirs() }
+        val orphan = File(dir, "blob-orphan.bin").apply { writeText("orphan") }
+        val kept = File(dir, "blob-kept.bin").apply { writeText("kept") }
+        store.addDownload(rec(2004L, url = "blob:https://example.com/x", fileName = "k.json"))
+        Downloads.saveJobBundle(store, 2004L, mapOf("stagedFile" to kept.absolutePath))
+        try {
+            Downloads.sweepOrphanBlobStaging(app, store)
+            assertFalse(orphan.exists())
+            assertTrue(kept.exists())
+        } finally {
+            runCatching { kept.delete() }
+        }
     }
 }

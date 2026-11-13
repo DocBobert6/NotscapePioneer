@@ -439,4 +439,53 @@ class DownloadsTest {
             Downloads.clearCancelled(7002L)
         }
     }
+
+    // ---------- humanNameFromTitle (alpha.27) ----------
+
+    @Test
+    fun humanNameFromTitleUsesPageTitleAndMime() {
+        assertEquals(
+            "Adblock_test.json",
+            Downloads.humanNameFromTitle("Adblock test", "application/json")
+        )
+    }
+
+    @Test
+    fun humanNameFromTitleBlankTitleFallsBackToDownload() {
+        assertEquals(
+            "download.json",
+            Downloads.humanNameFromTitle("   ", "application/json")
+        )
+    }
+
+    @Test
+    fun humanNameFromTitleNoTypeHasNoExtension() {
+        assertEquals(
+            "Adblock_test",
+            Downloads.humanNameFromTitle("Adblock test", null)
+        )
+    }
+
+    @Test
+    fun humanNameFromTitleUnknownTypeHasNoExtension() {
+        assertEquals(
+            "Adblock_test",
+            Downloads.humanNameFromTitle("Adblock test", "application/x-unknown-thing")
+        )
+    }
+
+    // ---------- isBlobLike (alpha.27) ----------
+
+    @Test
+    fun isBlobLikeMatchesBlobAndData() {
+        assertTrue(Downloads.isBlobLike("blob:https://d3ward.com/63efe48b-5427-4abb-94a6-0d66b378f924"))
+        assertTrue(Downloads.isBlobLike("data:application/json;base64,abcd"))
+        assertTrue(Downloads.isBlobLike("BLOB:https://example.com/x"))
+    }
+
+    @Test
+    fun isBlobLikeRejectsHttp() {
+        assertFalse(Downloads.isBlobLike("https://example.com/f.bin"))
+        assertFalse(Downloads.isBlobLike("http://example.com/f.bin"))
+    }
 }

@@ -71,6 +71,11 @@ Three facts drive the rest of the design:
    `Downloads.kt` ported to run on Pioneer's store, plus the manifest and
    dependency pieces Pioneer does not have yet (WorkManager, Media3,
    notification permission, foreground service).
+   Blob/data: downloads are the exception to re-fetching: a
+   blob: URL only exists inside the page, so the engine
+   stages the response body to disk at onExternalResponse
+   time and the download writes those bytes straight to the
+   destination (alpha.27) — no probe, no DownloadManager.
 
 ## Rules for every worker on this phase
 
