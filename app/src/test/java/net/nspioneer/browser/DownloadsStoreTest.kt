@@ -45,11 +45,12 @@ class DownloadsStoreTest {
         status: String = "queued",
         isPrivate: Boolean = false,
         fileName: String = "f.bin",
-        url: String = "https://example.com/f.bin"
+        url: String = "https://example.com/f.bin",
+        addedAt: Long = 0L
     ): DownloadRecord = DownloadRecord(
         id = id, title = "t", url = url,
         fileName = fileName, dmId = -1, status = status,
-        addedAt = 0L, isPrivate = isPrivate
+        addedAt = addedAt, isPrivate = isPrivate
     )
 
     @Before
@@ -224,13 +225,16 @@ class DownloadsStoreTest {
 
     // ---------- blob downloads (alpha.27) ----------
 
-    private fun blobBundle(url: String, staged: File?, fileName: String) =
+    private fun blobBundle(
+        url: String, staged: File?, fileName: String,
+        location: String = "public"
+    ) =
         mapOf(
             "url" to url,
             "title" to "Adblock test",
             "media" to "false",
             "contentType" to "application/json",
-            "location" to "public",
+            "location" to location,
             "fileName" to fileName,
             "stagedFile" to (staged?.absolutePath ?: "")
         )
@@ -246,7 +250,13 @@ class DownloadsStoreTest {
         }
         val url = "blob:https://d3ward.com/63efe48b-5427-4abb-94a6-0d66b378f924"
         store.addDownload(rec(2001L, url = url, fileName = "report-2001.json"))
-        Downloads.saveJobBundle(store, 2001L, blobBundle(url, staged, "report-2001.json"))
+        // App location: the finished file is a real path, so the
+        // test can read the bytes back. (The public location
+        // goes through MediaStore, whose URI is not a file.)
+        Downloads.saveJobBundle(
+            store, 2001L,
+            blobBundle(url, staged, "report-2001.json", location = "app")
+        )
         Downloads.promoteQueued(app, store)
         val done = store.downloadsSnapshot().first { it.id == 2001L }
         assertEquals("complete", done.status)
@@ -258,6 +268,26 @@ class DownloadsStoreTest {
         } finally {
             runCatching { dest.delete() }
         }
+        assertFalse(staged.exists())
+    }
+
+    @Test
+    fun blobDownloadCompletesToPublicLocation() {
+        val app = RuntimeEnvironment.getApplication()
+        val staged = File(
+            Downloads.blobStagingDir(app), "blob-test-public.bin"
+        ).apply {
+            parentFile?.mkdirs()
+            writeText("hello-public")
+        }
+        val url = "blob:https://d3ward.com/63efe48b-5427-4abb-94a6-0d66b378f924"
+        store.addDownload(rec(2005L, url = url, fileName = "report-2005.json"))
+        Downloads.saveJobBundle(store, 2005L, blobBundle(url, staged, "report-2005.json"))
+        Downloads.promoteQueued(app, store)
+        val done = store.downloadsSnapshot().first { it.id == 2005L }
+        assertEquals("complete", done.status)
+        assertEquals(100, done.progress)
+        assertTrue(done.contentUri.isNotBlank())
         assertFalse(staged.exists())
     }
 
@@ -286,11 +316,17 @@ class DownloadsStoreTest {
             writeText("hello-retry")
         }
         val url = "blob:https://d3ward.com/63efe48b-5427-4abb-94a6-0d66b378f924"
+        // A "failed" record with addedAt=0 would be pruned by
+        // addDownload's 90-day retention cap before retry runs.
         val record = rec(
-            2003L, status = "failed", url = url, fileName = "report-2003.json"
+            2003L, status = "failed", url = url, fileName = "report-2003.json",
+            addedAt = System.currentTimeMillis()
         )
         store.addDownload(record)
-        Downloads.saveJobBundle(store, 2003L, blobBundle(url, staged, "report-2003.json"))
+        Downloads.saveJobBundle(
+            store, 2003L,
+            blobBundle(url, staged, "report-2003.json", location = "app")
+        )
         assertTrue(Downloads.retry(app, store, record))
         val done = store.downloadsSnapshot().first { it.id == 2003L }
         assertEquals("complete", done.status)
