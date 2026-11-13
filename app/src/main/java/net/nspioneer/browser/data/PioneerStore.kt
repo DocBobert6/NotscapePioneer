@@ -339,6 +339,33 @@ class PioneerStore private constructor(context: Context) {
         }
     }
 
+    /** Bulk remove from the Favorites page (alpha.29): remove
+     *  the favorites with the given ids, in one lock, and
+     *  return the removed rows so the Undo snackbar can
+     *  restore them. Mirrors `removeBookmark`, but on the
+     *  favourites list and returning what was removed. */
+    fun removeFavourites(ids: Set<Long>): List<Bookmark> {
+        synchronized(lock) {
+            val removed = favourites.filter { it.id in ids }
+            favourites.removeAll { it.id in ids }
+            mutated(Part.FAVOURITES)
+            return removed
+        }
+    }
+
+    /** Undo for bulk favorite removal (alpha.29): the exact
+     *  objects, ids and order are kept, then the list is
+     *  sorted newest-first — mirroring `restoreBookmarks`. */
+    fun restoreFavourites(items: List<Bookmark>) {
+        synchronized(lock) {
+            for (b in items) {
+                if (favourites.none { it.id == b.id }) favourites.add(b)
+            }
+            favourites.sortByDescending { it.createdAt }
+            mutated(Part.FAVOURITES)
+        }
+    }
+
     /** Mirrors Mariner `updateBookmark`: edit title and URL
      *  in place. A blank URL is a no-op; a blank title falls
      *  back to the URL. */
