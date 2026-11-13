@@ -48,7 +48,7 @@ fun answerEffect(choice: PopupChoice): PopupAnswerEffect = when (choice) {
     PopupChoice.ALLOW_ONCE -> PopupAnswerEffect(AllowOrDeny.ALLOW, true, false, null, null)
     PopupChoice.DENY_ONCE -> PopupAnswerEffect(AllowOrDeny.DENY, false, true, null, null)
     PopupChoice.TRUST -> PopupAnswerEffect(AllowOrDeny.ALLOW, true, false, true, false)
-    PopupChoice.DONT_TRUST -> PopupAnswerEffect(AllowOrDeny.DENY, false, true, false, true)
+    PopupChoice.DONT_TRUST -> PopupAnswerEffect(AllowOrDeny.DENY, false, false, false, true)
 }
 
 /** A gesture link (target=_blank, no popup prompt) is blocked
