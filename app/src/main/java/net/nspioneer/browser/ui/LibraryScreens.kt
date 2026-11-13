@@ -1143,9 +1143,29 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
 }
 
 @Composable
+/** Favorites sort (alpha.29): the same three orders as
+ *  Bookmarks — newest, oldest, title. Pure, so it is
+ *  unit-testable; the page applies it to the filtered list. */
+internal fun sortFavourites(
+    list: List<Bookmark>, sort: String
+): List<Bookmark> = when (sort) {
+    "oldest" -> list.sortedBy { it.createdAt }
+    "title" -> list.sortedBy { it.title.lowercase() }
+    else -> list.sortedByDescending { it.createdAt }
+}
+
+@Composable
 fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
     val rev = store.revision
     var query by remember { mutableStateOf("") }
+    // Alpha.29: Sort + Select, the same pattern as Bookmarks
+    // and History — Sort cycles newest → oldest → title,
+    // Select toggles multi-select with a bulk Remove.
+    var favSort by remember { mutableStateOf("newest") }
+    var favSelecting by remember { mutableStateOf(false) }
+    var favSelected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    val favSnackHost = remember { SnackbarHostState() }
+    val favSnackScope = rememberCoroutineScope()
     SubScreen(title = "Favorites", onBack = onBack) {
         Column(modifier = Modifier.fillMaxSize()) {
             FrostSearchBar(
@@ -1153,11 +1173,52 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                 onValueChange = { query = it },
                 placeholder = "Search favorites"
             )
-            val shown = store.favourites.filter { f ->
-                query.isBlank() ||
-                    f.title.contains(query, ignoreCase = true) ||
-                    f.url.contains(query, ignoreCase = true)
+            LibraryActionBar {
+                TextButton(onClick = {
+                    favSort = when (favSort) {
+                        "newest" -> "oldest"
+                        "oldest" -> "title"
+                        else -> "newest"
+                    }
+                }) {
+                    Text(
+                        when (favSort) {
+                            "oldest" -> "Sort: oldest"
+                            "title" -> "Sort: title"
+                            else -> "Sort: newest"
+                        }
+                    )
+                }
+                TextButton(onClick = {
+                    favSelecting = !favSelecting
+                    if (!favSelecting) favSelected = emptySet()
+                }) { Text(if (favSelecting) "Done" else "Select") }
+                if (favSelected.isNotEmpty()) {
+                    TextButton(onClick = {
+                        val deleted = store.removeFavourites(favSelected)
+                        favSelected = emptySet()
+                        favSelecting = false
+                        favSnackScope.launch {
+                            if (favSnackHost.showSnackbar(
+                                    if (deleted.size == 1) "Removed 1 favorite"
+                                    else "Removed ${deleted.size} favorites",
+                                    actionLabel = "Undo"
+                                ) == SnackbarResult.ActionPerformed
+                            ) {
+                                store.restoreFavourites(deleted)
+                            }
+                        }
+                    }) { Text("Remove (${favSelected.size})") }
+                }
             }
+            val shown = sortFavourites(
+                store.favourites.filter { f ->
+                    query.isBlank() ||
+                        f.title.contains(query, ignoreCase = true) ||
+                        f.url.contains(query, ignoreCase = true)
+                },
+                favSort
+            )
             if (shown.isEmpty()) {
                 LibraryEmptyState(
                     icon = Icons.Filled.Favorite,
@@ -1167,22 +1228,39 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(shown, key = { it.id }) { f ->
                         KitGroupedRow(
-                            onClick = { onOpenUrl(f.url) },
+                            onClick = {
+                                if (favSelecting) {
+                                    favSelected =
+                                        if (f.id in favSelected) favSelected - f.id
+                                        else favSelected + f.id
+                                } else onOpenUrl(f.url)
+                            },
                             leading = {
-                                val fav = rememberSiteFavicon(store, f.url)
-                                if (fav != null) {
-                                    Image(
-                                        bitmap = fav.asImageBitmap(),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(20.dp)
+                                if (favSelecting) {
+                                    Checkbox(
+                                        checked = f.id in favSelected,
+                                        onCheckedChange = {
+                                            favSelected =
+                                                if (f.id in favSelected) favSelected - f.id
+                                                else favSelected + f.id
+                                        }
                                     )
                                 } else {
-                                    Icon(
-                                        Icons.Filled.Star,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(20.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                    val fav = rememberSiteFavicon(store, f.url)
+                                    if (fav != null) {
+                                        Image(
+                                            bitmap = fav.asImageBitmap(),
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            Icons.Filled.Star,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             },
                             trailing = {
@@ -1200,6 +1278,15 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                 }
             }
         }
+    }
+
+    // Undo snackbar. Zero height while idle — the host only
+    // lays out while a snackbar is showing.
+    Box(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        SnackbarHost(hostState = favSnackHost)
     }
 }
 
