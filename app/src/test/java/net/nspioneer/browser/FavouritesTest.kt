@@ -113,7 +113,7 @@ class FavouritesTest {
             listOf(fav(1, "a", 1000), fav(2, "b", 2000), fav(3, "c", 3000))
         )
         val removed = store.removeFavourites(setOf(2L, 3L))
-        assertEquals(listOf(2L), store.favourites.map { it.id })
+        assertEquals(listOf(1L), store.favourites.map { it.id })
         store.restoreFavourites(removed)
         assertEquals(listOf(3L, 2L, 1L), store.favourites.map { it.id })
     }
