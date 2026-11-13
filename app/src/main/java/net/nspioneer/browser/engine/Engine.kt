@@ -1,6 +1,7 @@
 package net.nspioneer.browser.engine
 import androidx.compose.runtime.State
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import java.io.File
 import org.mozilla.geckoview.GeckoSession
 import net.nspioneer.browser.media.DetectedMedia  // defined in C's
     // MediaLog.kt (design §5, with the `source` field) — do NOT
@@ -353,6 +354,13 @@ data class ExternalDownload(
     val suggestedName: String?,       // parsed Content-Disposition, may be null
     val statusCode: Int,
     val isSecure: Boolean,
+    // alpha.27: staged response body for blob:/data: downloads
+    // (the body stream is the only copy — the URL cannot be
+    // re-fetched). Null for ordinary downloads.
+    val stagedFile: File? = null,
+    // alpha.27: true when suggestedName came from a
+    // Content-Disposition header rather than the URL path.
+    val hasDispositionName: Boolean = false,
 )
 
 // ---- Phase 3: permissions + file chooser ----

@@ -187,6 +187,7 @@ import net.nspioneer.browser.engine.PermPrompt
 import net.nspioneer.browser.engine.PopupChoice
 import net.nspioneer.browser.engine.UserBlockRules
 import net.nspioneer.browser.media.Downloads
+import java.io.File
 import net.nspioneer.browser.media.MediaLog
 import net.nspioneer.browser.media.PageActions
 import net.nspioneer.browser.media.PlayerActivity
@@ -300,6 +301,10 @@ private data class PendingDownload(
     val isPrivate: Boolean,
     val videoUrl: String? = null,
     val audioUrl: String? = null,
+    // alpha.27: staged response body for a blob/data: download;
+    // null for ordinary downloads. Owned by the dialog until
+    // the Download button hands it to Downloads.start.
+    val stagedFile: File? = null,
 )
 
 /** Mariner's permission resource words ("Allow $host to
@@ -902,11 +907,13 @@ fun BrowserScreen(
     fun beginDownload(
         title: String, url: String, media: Boolean,
         contentType: String?, suggestedName: String?,
-        referer: String?, isPrivate: Boolean
+        referer: String?, isPrivate: Boolean,
+        stagedFile: File? = null
     ) {
         if (store.setting("confirmDownloads", "true") == "true") {
             pendingDownload = PendingDownload(
-                title, url, media, contentType, suggestedName, referer, isPrivate
+                title, url, media, contentType, suggestedName, referer, isPrivate,
+                stagedFile = stagedFile
             )
             confirmName = suggestedName
                 ?: Uri.parse(url).lastPathSegment
@@ -918,10 +925,21 @@ fun BrowserScreen(
             Downloads.start(
                 context, store, title, url, media = media,
                 contentType = contentType, suggestedName = suggestedName,
-                referer = referer, isPrivate = isPrivate
+                referer = referer, isPrivate = isPrivate,
+                stagedFile = stagedFile
             )
             Toast.makeText(context, "Download started", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /** Drop a pending download without starting it: a staged
+     *  blob body is deleted with it, so a dismissed dialog
+     *  never orphans a staging file. (The Download button
+     *  hands the file to Downloads.start instead, so it
+     *  clears pendingDownload directly.) */
+    fun discardPendingDownload() {
+        pendingDownload?.stagedFile?.let { f -> runCatching { f.delete() } }
+        pendingDownload = null
     }
 
     /** Merge confirmation (Mariner BrowserScreen.kt:626-650):
@@ -1081,9 +1099,20 @@ fun BrowserScreen(
             }
         }
         engine.onExternalDownload = { t, dl ->
+            // alpha.27: a blob/data: download has no real name
+            // — the URL's last segment is a bare UUID. Prefer
+            // a human name from the page title when no
+            // Content-Disposition gave one.
+            val name = if (
+                (dl.url.startsWith("blob:", ignoreCase = true) ||
+                    dl.url.startsWith("data:", ignoreCase = true)) &&
+                !dl.hasDispositionName
+            ) Downloads.humanNameFromTitle(t.title.value, dl.contentType)
+            else dl.suggestedName
             beginDownload(
                 t.title.value, dl.url, false, dl.contentType,
-                dl.suggestedName, t.url.value, t.isPrivate
+                name, t.url.value, t.isPrivate,
+                stagedFile = dl.stagedFile
             )
         }
         engine.onPermissionPrompt = { prompt -> permPrompt = prompt }
@@ -2919,7 +2948,7 @@ fun BrowserScreen(
     // BrowserScreen.kt:5882-6010, verbatim).
     pendingDownload?.let { pending ->
         FrostDialog(
-            onDismissRequest = { pendingDownload = null },
+            onDismissRequest = { discardPendingDownload() },
             title = { Text("Download file") },
             text = {
                 Column {
@@ -3041,7 +3070,8 @@ fun BrowserScreen(
                                 isPrivate = pending.isPrivate,
                                 location = confirmLocation,
                                 fileNameOverride = confirmName,
-                                variantBandwidth = chosen?.bandwidth
+                                variantBandwidth = chosen?.bandwidth,
+                                stagedFile = pending.stagedFile
                             )
                         }
                         pendingDownload = null
@@ -3052,7 +3082,7 @@ fun BrowserScreen(
                 ) { Text("Download") }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDownload = null }) {
+                TextButton(onClick = { discardPendingDownload() }) {
                     Text("Cancel")
                 }
             }

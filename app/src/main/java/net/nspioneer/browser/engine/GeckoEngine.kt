@@ -21,6 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.media.DetectedMedia
 import net.nspioneer.browser.media.Downloads
@@ -804,7 +805,8 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         val contentType = header("Content-Type")
             ?.substringBefore(';')?.trim()?.takeIf { it.isNotBlank() }
         val contentLength = header("Content-Length")?.trim()?.toLongOrNull() ?: -1L
-        val suggestedName = parseContentDisposition(header("Content-Disposition"))
+        val dispositionName = parseContentDisposition(header("Content-Disposition"))
+        val suggestedName = dispositionName
             ?: Uri.parse(response.uri).lastPathSegment
         return ExternalDownload(
             url = response.uri,
@@ -813,6 +815,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             suggestedName = suggestedName,
             statusCode = response.statusCode,
             isSecure = response.isSecure,
+            hasDispositionName = dispositionName != null,
         )
     }
 
@@ -1637,12 +1640,33 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 // Downloads.start. The response body MUST be
                 // closed even when ignored, or the connection
                 // stays open until GC (API doc §1a).
-                runCatching { response.body?.close() }
+                //
+                // alpha.27: blob:/data: downloads are the
+                // exception — the body stream IS the download
+                // (a blob: URL cannot be re-fetched), so stage
+                // it to disk on a background thread BEFORE
+                // closing, and hand the staged file to the shell
+                // with the headers. Ordinary downloads keep the
+                // old path: close unread, report headers only.
+                val uri = response.uri
+                val body = response.body
                 val download = externalDownloadFrom(response)
                 statusPanel.status(
                     "tab ${n()}: external response: ${download.url} " +
                         "(${download.contentType ?: "?"}, ${download.contentLength})"
                 )
+                if ((uri.startsWith("blob:", ignoreCase = true) ||
+                        uri.startsWith("data:", ignoreCase = true)) && body != null
+                ) {
+                    engineScope.launch(Dispatchers.IO) {
+                        val staged = Downloads.stageResponseBody(appContext, body)
+                        withContext(Dispatchers.Main) {
+                            onExternalDownload?.invoke(tab, download.copy(stagedFile = staged))
+                        }
+                    }
+                    return
+                }
+                runCatching { body?.close() }
                 onExternalDownload?.invoke(tab, download)
             }
 

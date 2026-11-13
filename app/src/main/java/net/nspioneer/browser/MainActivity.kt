@@ -36,6 +36,7 @@ import net.nspioneer.browser.media.PageActions
 import net.nspioneer.browser.ui.BookmarksScreen
 import net.nspioneer.browser.ui.BrowserScreen
 import net.nspioneer.browser.ui.DiagnosticsScreen
+import net.nspioneer.browser.media.Downloads
 import net.nspioneer.browser.ui.DownloadsScreen
 import net.nspioneer.browser.ui.FavoritesScreen
 import net.nspioneer.browser.ui.FrostDialog
@@ -141,6 +142,11 @@ class MainActivity : ComponentActivity() {
                 engine.noteStatus("recovered trace from previous run")
             }
         }
+
+        // alpha.27: staged blob files no download references
+        // any more (dialog dismissed, process died) are swept
+        // so the staging dir never fills with orphans.
+        runCatching { Downloads.sweepOrphanBlobStaging(this, store) }
 
         // alpha.10: Save offline — the probe's `page-html`
         // answer arrives here; save the snapshot + record it,
