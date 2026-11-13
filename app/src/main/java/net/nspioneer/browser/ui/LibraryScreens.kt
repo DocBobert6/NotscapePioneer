@@ -1142,7 +1142,6 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
     }
 }
 
-@Composable
 /** Favorites sort (alpha.29): the same three orders as
  *  Bookmarks — newest, oldest, title. Pure, so it is
  *  unit-testable; the page applies it to the filtered list. */
