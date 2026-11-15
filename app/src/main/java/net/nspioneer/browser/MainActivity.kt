@@ -57,7 +57,7 @@ import java.io.File
  * and the screen navigation: Browser | Library (Bookmarks /
  * History / Favourites) | Settings | Licences | Diagnostics.
  * Everything that renders lives in the ui package; this file
- * owns tabs, session persistence, the uBlock install prompt and
+ * owns tabs, session persistence, the extension install prompt and
  * the back chain's last step (exit).
  *
  * The spike's brown/gold values survive as the activity theme
@@ -69,7 +69,7 @@ import java.io.File
  * close tab); only when it reports false does the app exit.
  */
 
-private data class UBlockPrompt(
+private data class ExtensionPrompt(
     val name: String,
     val permissions: List<String>,
     val decide: (Boolean) -> Unit
@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
     private val closedTabs = mutableStateListOf<TabSnapshot>()
     private val homeTabIds = mutableStateSetOf<Int>()
     private var browserBackHandler: (() -> Boolean)? = null
-    private var uBlockPrompt by mutableStateOf<UBlockPrompt?>(null)
+    private var extensionPrompt by mutableStateOf<ExtensionPrompt?>(null)
     private var longPressTarget by mutableStateOf<LongPressTarget?>(null)
     // Batch 4: first-run welcome (shown until "onboarded" is
     // set) and app mode (the id of the pinned-site tab).
@@ -165,11 +165,16 @@ class MainActivity : ComponentActivity() {
             ).show()
         }
 
-        // uBlock Origin: the install goes through a real dialog
+        // Extensions: the install goes through a real dialog
         // (name + permissions, Install / Later). NEVER auto-approved.
         engine.onExtensionInstallPrompt = { name, permissions, decide ->
-            store.putSetting("uBlockPrompted", "true")
-            uBlockPrompt = UBlockPrompt(name, permissions, decide)
+            // uBlockPrompted is the "already been prompted about
+            // uBlock" marker the welcome seeding uses for
+            // upgraders — only uBlock sets it.
+            if (name == "uBlock Origin") {
+                store.putSetting("uBlockPrompted", "true")
+            }
+            extensionPrompt = ExtensionPrompt(name, permissions, decide)
         }
 
         // Tabs the engine creates itself (window.open /
@@ -242,14 +247,10 @@ class MainActivity : ComponentActivity() {
         // chromeless tab).
         handleAppModeOrViewIntent(intent)
 
-        // First launch (or until the prompt has been shown once):
-        // ask about uBlock Origin. installUBlock checks first — if
-        // it is already installed it just reports the version and
-        // no prompt appears. "Later" is remembered via
-        // uBlockPrompted, so the menu Install row is the retry.
-        if (store.setting("uBlockPrompted", "false") != "true") {
-            engine.installUBlock()
-        }
+        // alpha.33: no first-launch install prompt any more —
+        // extensions are offered in the welcome flow instead
+        // (and later from Settings > Extensions or the menu
+        // Install row). Nothing here installs anything.
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -393,17 +394,17 @@ class MainActivity : ComponentActivity() {
                         )
                     }
 
-                    // The uBlock install prompt: a real dialog, never
+                    // The extension install prompt: a real dialog, never
                     // auto-approved. Install grants, Later declines.
                     // Batch 3: a FrostDialog, like every other dialog
                     // in the app — not a plain AlertDialog.
-                    uBlockPrompt?.let { prompt ->
+                    extensionPrompt?.let { prompt ->
                         FrostDialog(
                             onDismissRequest = {
                                 prompt.decide(false)
-                                uBlockPrompt = null
+                                extensionPrompt = null
                             },
-                            title = { Text("Install uBlock Origin?") },
+                            title = { Text("Install ${prompt.name}?") },
                             text = {
                                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                                     Text(prompt.name)
@@ -430,13 +431,13 @@ class MainActivity : ComponentActivity() {
                             confirmButton = {
                                 Button(onClick = {
                                     prompt.decide(true)
-                                    uBlockPrompt = null
+                                    extensionPrompt = null
                                 }) { Text("Install") }
                             },
                             dismissButton = {
                                 TextButton(onClick = {
                                     prompt.decide(false)
-                                    uBlockPrompt = null
+                                    extensionPrompt = null
                                 }) { Text("Later") }
                             }
                         )
