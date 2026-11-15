@@ -74,6 +74,43 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
          *  profile — so the last-private-close wipe below
          *  deletes exactly the private data and nothing else. */
         private const val PRIVATE_CONTEXT_ID = "pioneer-private"
+
+        /** Fingerprinting protection (alpha.44): on unless
+         *  the stored ETP level explicitly lowers it. The
+         *  "on unless basic/off" shape matches
+         *  [GeckoEngine.setTrackingProtection]'s ETP mapping,
+         *  where an unknown level falls back to STRICT — FPP
+         *  follows the level actually applied, not the raw
+         *  string. */
+        internal fun fingerprintingProtectionEnabled(level: String): Boolean =
+            level != "basic" && level != "off"
+
+        /** Fingerprinting protection (alpha.44): the standard
+         *  FPP setters (GeckoView v130), gated on [enabled].
+         *  Normal tabs follow the level both ways. Private
+         *  tabs are only ever turned ON here, never off:
+         *  GeckoView's pbmode default is already on
+         *  (geckoview-prefs.js sets
+         *  privacy.fingerprintingProtection.pbmode true, and
+         *  the getters went @Nullable in v137 precisely
+         *  because the value is engine-controlled when the
+         *  embedder does not set it) — an explicit `false`
+         *  would strip protection private tabs already have.
+         *  Deliberately NOT the baseline setters
+         *  (setBaselineFingerprintingProtection, v141): those
+         *  control the baseline protections "via Nimbus", and
+         *  the v160 changelog carries no entry about the
+         *  rollout completing, so calling them gives no
+         *  deterministic on-device effect on 160. */
+        internal fun applyFingerprintingProtection(
+            settings: GeckoRuntimeSettings,
+            enabled: Boolean,
+        ) {
+            settings.setFingerprintingProtection(enabled)
+            if (enabled) {
+                settings.setFingerprintingProtectionPrivateBrowsing(true)
+            }
+        }
     }
 
     private val appContext = context.applicationContext
@@ -316,7 +353,21 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 store.setting("gpc", "true") == "true"
             )
             .build()
-        return GeckoRuntime.create(appContext, settings)
+        val runtime = GeckoRuntime.create(appContext, settings)
+        // alpha.44: fingerprinting protection, gated on the
+        // stored ETP level. This is the only place a
+        // default-strict launch gets it: MainActivity calls
+        // setTrackingProtection only when the stored level
+        // is not "strict", so the live path below never runs
+        // for the default. Applied here, before any session
+        // exists, so no page ever loads unprotected.
+        applyFingerprintingProtection(
+            runtime.settings,
+            fingerprintingProtectionEnabled(
+                store.setting("trackingProtection", "strict")
+            ),
+        )
+        return runtime
     }
 
     /** The cookie behaviour the stored settings mean
@@ -660,7 +711,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // produces ACCEPT_ALL.
         applyCookieSettings()
         cb.setEnhancedTrackingProtectionLevel(etp)
-        statusPanel.status("tracking protection: $level")
+        // alpha.44: fingerprinting protection follows the
+        // level actually applied, live, the same way.
+        val fpp = fingerprintingProtectionEnabled(level)
+        applyFingerprintingProtection(runtime.settings, fpp)
+        statusPanel.status(
+            "tracking protection: $level" +
+                if (fpp) " (fingerprinting protection on)" else ""
+        )
         // Reload the current tab to be safe (level changes may not
         // apply to an already-loaded page without one).
         currentTab?.let { tab ->
