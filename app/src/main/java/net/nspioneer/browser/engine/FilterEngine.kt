@@ -781,6 +781,99 @@ object FilterEngine {
         }
     }
 
+    // ---- Conditional refresh (alpha.36, audit E-A2) ----
+    // A refresh used to re-download every list in full every
+    // 24 h, even when nothing had changed — multi-MB a day on a
+    // metered connection (the Phishing Army list alone is
+    // ~3-4 MB per refresh). Each list now keeps a small `.meta`
+    // sidecar beside its file with the validators the server
+    // sent with the last download (ETag / Last-Modified) and
+    // the parsed total of the committed candidate. A refresh
+    // sends those back as If-None-Match / If-Modified-Since;
+    // a 304 means "unchanged" and the body is never fetched.
+    // The stored total also replaces the second parse: the
+    // collapse guard compares the candidate against the total
+    // recorded at commit time instead of re-parsing the
+    // on-disk copy (a missing meta — first refresh after the
+    // upgrade — falls back to the old re-parse, once).
+
+    /** Validators + parsed total recorded for one list at
+     *  commit time. `total` is null when no total was recorded
+     *  (a meta file from before the total was stored — never
+     *  written by this code; defensive only). */
+    internal data class ListValidators(
+        val etag: String? = null,
+        val lastModified: String? = null,
+        val total: Int? = null
+    )
+
+    internal fun formatValidators(v: ListValidators): String = buildString {
+        v.etag?.let { append("etag=").append(it).append('\n') }
+        v.lastModified?.let { append("last-modified=").append(it).append('\n') }
+        v.total?.let { append("total=").append(it).append('\n') }
+    }
+
+    internal fun parseValidators(text: String): ListValidators {
+        var etag: String? = null
+        var lastModified: String? = null
+        var total: Int? = null
+        text.lineSequence().forEach { raw ->
+            val line = raw.trim()
+            when {
+                line.startsWith("etag=") ->
+                    etag = line.removePrefix("etag=").trim().ifEmpty { null }
+                line.startsWith("last-modified=") ->
+                    lastModified = line.removePrefix("last-modified=")
+                        .trim().ifEmpty { null }
+                line.startsWith("total=") ->
+                    total = line.removePrefix("total=").trim().toIntOrNull()
+                // Unknown lines are ignored: a future field
+                // must not break an old reader.
+            }
+        }
+        return ListValidators(etag, lastModified, total)
+    }
+
+    internal fun readValidatorsFile(f: File): ListValidators =
+        runCatching { parseValidators(f.readText()) }
+            .getOrDefault(ListValidators())
+
+    internal fun writeValidatorsFile(f: File, v: ListValidators) {
+        runCatching {
+            val tmp = File(f.parentFile, f.name + ".tmp")
+            tmp.writeText(formatValidators(v))
+            if (!tmp.renameTo(f)) {
+                tmp.copyTo(f, overwrite = true)
+                tmp.delete()
+            }
+        }
+    }
+
+    /** Conditional request headers for the stored validators:
+     *  ETag goes back as If-None-Match, Last-Modified as
+     *  If-Modified-Since. Both are sent verbatim — the server's
+     *  own strings, never re-parsed. */
+    internal fun conditionalHeaders(v: ListValidators): Map<String, String> =
+        buildMap {
+            v.etag?.takeIf { it.isNotBlank() }?.let {
+                put("If-None-Match", it)
+            }
+            v.lastModified?.takeIf { it.isNotBlank() }?.let {
+                put("If-Modified-Since", it)
+            }
+        }
+
+    /** The collapse guard, against the total recorded when the
+     *  on-disk copy was committed: the candidate must not be
+     *  less than half the committed set — the same comparison
+     *  the old re-parse used (`candidate < current / 2`), kept
+     *  verbatim so the guard changes in no case. No stored
+     *  total (pre-alpha.36 list, first refresh after the
+     *  upgrade) means no guard here; the caller falls back to
+     *  the old re-parse comparison. */
+    internal fun candidateAcceptable(candidateTotal: Int, storedTotal: Int?): Boolean =
+        storedTotal == null || candidateTotal >= storedTotal / 2
+
     private fun refresh(context: Context) {
         if (updating) return
         updating = true
@@ -789,69 +882,121 @@ object FilterEngine {
             var ok = false
             listUrls.forEachIndexed { i, url ->
                 runCatching {
+                    // E-A2: send the validators recorded at
+                    // the last download; a 304 means the list
+                    // is unchanged and the body is never fetched.
+                    val metaFile = File(d, "list$i.txt.meta")
+                    val validators = readValidatorsFile(metaFile)
                     val conn = URL(url).openConnection() as HttpURLConnection
                     conn.connectTimeout = 20_000
                     conn.readTimeout = 30_000
                     conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android) NotscapePioneer")
-                    val text = conn.inputStream.bufferedReader().readText()
-                    conn.disconnect()
-                    // Per-format sanity: a captive-portal HTML page or an
-                    // error body must not replace a good list on disk.
-                    val sane = text.length > 50_000 && when (i) {
-                        2 -> text.contains("0.0.0.0")
-                        // 7: plain domains — the first real line
-                        // must look like a domain, so a captive
-                        // portal HTML page can never pass.
-                        7 -> text.lineSequence().map { it.trim() }
-                            .firstOrNull {
-                                it.isNotEmpty() && !it.startsWith("#") &&
-                                    !it.startsWith("!")
-                            }?.let { isDomainLine(it.lowercase()) }
-                            ?: false
-                        else -> text.contains("||") && !text.trimStart().startsWith("<")
+                    for ((name, value) in conditionalHeaders(validators)) {
+                        conn.setRequestProperty(name, value)
                     }
-                    if (!sane) return@runCatching
-                    // Validate-and-rollback (0.0.997): parse the
-                    // candidate BEFORE it touches disk. Commit
-                    // only if it parses to a real rule set and -
-                    // when a copy is already on disk - not to a
-                    // collapse versus that copy. The previous
-                    // good file is kept as .bak; the commit goes
-                    // through a staging file + rename so a crash
-                    // mid-write can't leave a torn list.
-                    val candidate = FilterData()
-                    parseInto(i, text, candidate)
-                    if (candidate.isEmpty()) return@runCatching
-                    val target = File(d, "list$i.txt")
-                    if (target.exists()) {
-                        val current = FilterData()
-                        runCatching {
-                            parseInto(i, target.readText(), current)
-                        }
-                        if (!current.isEmpty() &&
-                            candidate.total() < current.total() / 2
-                        ) {
+                    try {
+                        val code = conn.responseCode
+                        // Unchanged since the last download:
+                        // keep the on-disk copy, skip the body
+                        // entirely.
+                        if (code == HttpURLConnection.HTTP_NOT_MODIFIED) {
                             return@runCatching
                         }
-                        runCatching {
-                            target.copyTo(
-                                File(d, "list$i.txt.bak"),
-                                overwrite = true
-                            )
+                        if (code != HttpURLConnection.HTTP_OK) {
+                            return@runCatching
                         }
+                        val text = conn.inputStream.bufferedReader().readText()
+                        // Per-format sanity: a captive-portal HTML page or an
+                        // error body must not replace a good list on disk.
+                        val sane = text.length > 50_000 && when (i) {
+                            2 -> text.contains("0.0.0.0")
+                            // 7: plain domains — the first real line
+                            // must look like a domain, so a captive
+                            // portal HTML page can never pass.
+                            7 -> text.lineSequence().map { it.trim() }
+                                .firstOrNull {
+                                    it.isNotEmpty() && !it.startsWith("#") &&
+                                        !it.startsWith("!")
+                                }?.let { isDomainLine(it.lowercase()) }
+                                ?: false
+                            else -> text.contains("||") && !text.trimStart().startsWith("<")
+                        }
+                        if (!sane) return@runCatching
+                        // Validate-and-rollback (0.0.997): parse the
+                        // candidate BEFORE it touches disk. Commit
+                        // only if it parses to a real rule set and -
+                        // when a copy is already on disk - not to a
+                        // collapse versus that copy. The previous
+                        // good file is kept as .bak; the commit goes
+                        // through a staging file + rename so a crash
+                        // mid-write can't leave a torn list.
+                        val candidate = FilterData()
+                        parseInto(i, text, candidate)
+                        if (candidate.isEmpty()) return@runCatching
+                        val target = File(d, "list$i.txt")
+                        if (target.exists()) {
+                            // E-A2: compare against the total
+                            // recorded at commit time instead of
+                            // re-parsing the on-disk copy. Only a
+                            // list with no meta file yet (first
+                            // refresh after the upgrade) pays the
+                            // old re-parse, once.
+                            val storedTotal = validators.total
+                            if (storedTotal != null) {
+                                if (!candidateAcceptable(
+                                        candidate.total(), storedTotal
+                                    )
+                                ) {
+                                    return@runCatching
+                                }
+                            } else {
+                                val current = FilterData()
+                                runCatching {
+                                    parseInto(i, target.readText(), current)
+                                }
+                                if (!current.isEmpty() &&
+                                    candidate.total() < current.total() / 2
+                                ) {
+                                    return@runCatching
+                                }
+                            }
+                            runCatching {
+                                target.copyTo(
+                                    File(d, "list$i.txt.bak"),
+                                    overwrite = true
+                                )
+                            }
+                        }
+                        val tmp = File(d, "list$i.txt.tmp")
+                        tmp.writeText(text)
+                        if (!tmp.renameTo(target)) {
+                            tmp.copyTo(target, overwrite = true)
+                            tmp.delete()
+                        }
+                        // Record the validators the server sent
+                        // with this download, with the
+                        // candidate's total, so the next refresh
+                        // can ask conditionally and compare
+                        // without a second parse.
+                        writeValidatorsFile(
+                            metaFile,
+                            ListValidators(
+                                etag = conn.getHeaderField("ETag"),
+                                lastModified = conn.getHeaderField("Last-Modified"),
+                                total = candidate.total()
+                            )
+                        )
+                        ok = true
+                    } finally {
+                        conn.disconnect()
                     }
-                    val tmp = File(d, "list$i.txt.tmp")
-                    tmp.writeText(text)
-                    if (!tmp.renameTo(target)) {
-                        tmp.copyTo(target, overwrite = true)
-                        tmp.delete()
-                    }
-                    ok = true
                 }
             }
             // Audit P-m14: the custom list refreshes here too.
             if (customListUrl.isNotBlank()) {
                 runCatching {
+                    val customMeta = File(d, "custom.txt.meta")
+                    val validators = readValidatorsFile(customMeta)
                     val conn = URL(customListUrl).openConnection()
                         as HttpURLConnection
                     conn.connectTimeout = 20_000
@@ -859,24 +1004,54 @@ object FilterEngine {
                     conn.setRequestProperty(
                         "User-Agent", "Mozilla/5.0 (Android) NotscapePioneer"
                     )
-                    val text = conn.inputStream.bufferedReader().readText()
-                    conn.disconnect()
-                    val sane = text.isNotBlank() &&
-                        !text.trimStart().startsWith("<")
-                    if (sane) {
-                        val candidate = FilterData()
-                        parseInto(99, text, candidate)
-                        if (!candidate.isEmpty()) {
-                            val tmp = File(d, "custom.txt.tmp")
-                            tmp.writeText(text)
-                            if (!tmp.renameTo(File(d, "custom.txt"))) {
-                                tmp.copyTo(
-                                    File(d, "custom.txt"), overwrite = true
-                                )
-                                tmp.delete()
-                            }
-                            ok = true
+                    for ((name, value) in conditionalHeaders(validators)) {
+                        conn.setRequestProperty(name, value)
+                    }
+                    try {
+                        val code = conn.responseCode
+                        if (code == HttpURLConnection.HTTP_NOT_MODIFIED) {
+                            return@runCatching
                         }
+                        if (code != HttpURLConnection.HTTP_OK) {
+                            return@runCatching
+                        }
+                        val text = conn.inputStream.bufferedReader().readText()
+                        val sane = text.isNotBlank() &&
+                            !text.trimStart().startsWith("<")
+                        if (sane) {
+                            val candidate = FilterData()
+                            parseInto(99, text, candidate)
+                            if (!candidate.isEmpty()) {
+                                if (validators.total != null &&
+                                    !candidateAcceptable(
+                                        candidate.total(), validators.total
+                                    )
+                                ) {
+                                    return@runCatching
+                                }
+                                val tmp = File(d, "custom.txt.tmp")
+                                tmp.writeText(text)
+                                if (!tmp.renameTo(File(d, "custom.txt"))) {
+                                    tmp.copyTo(
+                                        File(d, "custom.txt"), overwrite = true
+                                    )
+                                    tmp.delete()
+                                }
+                                writeValidatorsFile(
+                                    customMeta,
+                                    ListValidators(
+                                        etag = conn.getHeaderField("ETag"),
+                                        lastModified = conn.getHeaderField(
+                                            "Last-Modified"
+                                        ),
+                                        total = candidate.total()
+                                    )
+                                )
+                                ok = true
+                            }
+                        }
+                    } finally {
+                        conn.disconnect()
                     }
                 }
             }
