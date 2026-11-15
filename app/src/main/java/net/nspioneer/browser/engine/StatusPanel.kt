@@ -137,8 +137,21 @@ class StatusPanel(context: Context) {
      * when a trace was recovered. A stale or empty file is
      * discarded, so it is not re-read on every launch.
      */
-    fun recoverCrashedTrace(crashStamp: String?): Boolean {
-        val lines = traceFile.readRecovered()
+    fun recoverCrashedTrace(crashStamp: String?): Boolean =
+        recoverCrashedTraceLines(readRecoveredTraceLines(), crashStamp)
+
+    /** P-A4 (alpha.38): read the unterminated trace file's
+     *  lines — disk I/O, call off the main thread — or null
+     *  when there is none (no file, or an empty file). The
+     *  caller hands the lines to [recoverCrashedTraceLines] on
+     *  the main thread. */
+    fun readRecoveredTraceLines(): List<String>? = traceFile.readRecovered()
+
+    /** P-A4 (alpha.38): populate the recovered-trace state from
+     *  lines already read (see [readRecoveredTraceLines]).
+     *  Main thread only — it writes snapshot state. A null or
+     *  empty list discards the file, as the no-file path did. */
+    fun recoverCrashedTraceLines(lines: List<String>?, crashStamp: String?): Boolean {
         if (lines.isNullOrEmpty()) {
             traceFile.discard()
             return false
