@@ -1398,6 +1398,24 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                             return GeckoResult.fromValue(AllowOrDeny.DENY)
                         }
                     }
+                    // De-AMP (alpha.34, Brave-style Layer 1):
+                    // an AMP URL rewrites to its canonical form
+                    // instead of loading the AMP page. Default
+                    // ON; the toggle is the escape. Runs after
+                    // Safe Browsing (a phishing AMP URL warns
+                    // first) and before HTTPS-only (the rewritten
+                    // load re-enters here, so an http canonical
+                    // still upgrades).
+                    if (store.setting(DE_AMP_KEY, "true") == "true") {
+                        val canonical = deAmpUrl(u)
+                        if (canonical != null) {
+                            mainHandler.post { tab.load(canonical) }
+                            statusPanel.status(
+                                "tab ${n()}: de-amp: $u -> $canonical"
+                            )
+                            return GeckoResult.fromValue(AllowOrDeny.DENY)
+                        }
+                    }
                     // HTTPS-only: in-page loads (not direct
                     // navigations — typed addresses / app loads /
                     // the user's confirmed "Continue for this
