@@ -259,24 +259,37 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override val recoveredTraceHeader get() = statusPanel.recoveredTraceHeader
     override fun recoverCrashedTrace(crashStamp: String?): Boolean =
         statusPanel.recoverCrashedTrace(crashStamp)
+    /** P-A4 (alpha.38): the crashed-trace recovery split — see
+     *  Engine.readRecoveredTraceLines. */
+    override fun readRecoveredTraceLines(): List<String>? =
+        statusPanel.readRecoveredTraceLines()
+    /** P-A4 (alpha.38): see Engine.recoverCrashedTraceLines. */
+    override fun recoverCrashedTraceLines(
+        lines: List<String>?,
+        crashStamp: String?,
+    ): Boolean = statusPanel.recoverCrashedTraceLines(lines, crashStamp)
     override fun clearRecoveredTrace() = statusPanel.clearRecoveredTrace()
     override val mediaLines get() = statusPanel.mediaLines
 
     private var mediaRouter: MediaRouter? = null
     private var castCallback: MediaRouter.Callback? = null
 
+    /** P-A4 (alpha.38): startCastDiscovery is idempotent — the
+     *  MediaRouter callback must be registered exactly once. */
+    private var castDiscoveryStarted = false
+
     /** Last Cast route signature (sorted names) — the dedupe key. */
     private var lastCastSignature: String? = null
 
     init {
         extensions.installProbeExtension()
-        probeCastRoutes()
+        // P-A4 (alpha.38): Cast discovery and the startup
+        // private-context wipe used to run here, on the launch
+        // path before setContent. They now run after the first
+        // frame — the shell calls startCastDiscovery() and
+        // wipePrivateContextAtStartup() from its deferred
+        // launch step.
         statusPanel.refreshStats()
-        // Batch 2: wipe the private context at startup, as
-        // Mariner wipes its private profile — a process that
-        // died with private tabs open must not leave their
-        // data behind.
-        wipePrivateData()
     }
 
     // ------------------------------------------------------------------
@@ -369,6 +382,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // Delegates are attached above either way — Gecko needs
         // them in place when it opens the session.
         openSession: Boolean = true,
+        // P-A4 (alpha.38): only for deferred restores — the URL
+        // to load when the session opens (null = state restore
+        // or home tab), and the snapshot URL/title pinned at
+        // creation so the bar and grid read them before the
+        // session opens.
+        deferredLoadUrl: String? = null,
+        initialUrl: String? = null,
+        initialTitle: String? = null,
     ): EngineTab {
         val session = if (isPrivate) {
             GeckoSession(
@@ -382,6 +403,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
         val tab = GeckoTab(nextTabId++, isPrivate, session, isPopupWin)
         attachDelegates(tab)
+        // P-A4: pin the snapshot's URL/title at creation for a
+        // deferred restore, so the bar and the tab grid show the
+        // tab as it was before its session opens (a frame later).
+        // The deferred open re-pins from the restored state, so
+        // a state whose current page differs still wins.
+        if (initialUrl != null) tab.url.value = initialUrl
+        if (initialTitle != null) tab.title.value = initialTitle
         // The session is fully open before any load can be issued
         // (first-load watch item: the spike loaded immediately after
         // open, before setActive/setFocused and before any view).
@@ -404,40 +432,112 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             tab.isDesktopMode.value = true
         }
         if (!restoreStateJson.isNullOrBlank()) {
-            // Batch 2: relaunch restore — history, scroll,
-            // zoom and form data in one call (Mariner's
-            // WebView restoreState bundle, Gecko-shaped).
-            session.setActive(true)
-            session.setFocused(true)
-            runCatching {
-                GeckoSession.SessionState.fromString(restoreStateJson)?.let { state ->
-                    session.restoreState(state)
-                    // The delegate may or may not re-fire
-                    // onLocationChange for a restore; pin the bar
-                    // state from the state itself so the tab never
-                    // reads as a home tab, and keep the restore
-                    // from re-recording history.
-                    val current = state.getOrNull(state.currentIndex)
-                    val uri = current?.uri
-                    if (!uri.isNullOrBlank() && uri != "about:blank") {
-                        tab.url.value = uri
-                        tab.title.value = current.title ?: ""
-                        tab.lastNavigatedUrl = uri
-                    }
-                }
-            }.onFailure { e ->
-                statusPanel.status(
-                    "tab ${tab.id}: restoreState failed: ${e.message}"
-                )
+            if (openSession) {
+                applyRestoreState(tab, restoreStateJson)
+            } else {
+                // P-A4: hold the restore for openDeferredTab —
+                // restoreState needs an open session.
+                tab.pendingRestoreStateJson = restoreStateJson
             }
         } else if (scrollY > 0) {
             // Batch 2: URL-only restore (pre-alpha.6 save) —
             // the scroll rides the probe port when it connects.
             tab.pendingScrollY = scrollY
         }
+        if (!openSession) {
+            // P-A4: hold the URL load for openDeferredTab — a
+            // load would open the session on demand.
+            tab.pendingRestoreUrl = deferredLoadUrl
+        }
         tabs += tab
         extensions.registerSession(session)
         return tab
+    }
+
+    /** Batch 2 relaunch restore, shared by createTabInternal
+     *  (synchronous path) and openDeferredTab (P-A4 deferred
+     *  path): history, scroll, zoom and form data in one call
+     *  (Mariner's WebView restoreState bundle, Gecko-shaped).
+     *  The session must already be open. */
+    private fun applyRestoreState(tab: GeckoTab, restoreStateJson: String) {
+        tab.session.setActive(true)
+        tab.session.setFocused(true)
+        runCatching {
+            GeckoSession.SessionState.fromString(restoreStateJson)?.let { state ->
+                tab.session.restoreState(state)
+                // The delegate may or may not re-fire
+                // onLocationChange for a restore; pin the bar
+                // state from the state itself so the tab never
+                // reads as a home tab, and keep the restore
+                // from re-recording history.
+                val current = state.getOrNull(state.currentIndex)
+                val uri = current?.uri
+                if (!uri.isNullOrBlank() && uri != "about:blank") {
+                    tab.url.value = uri
+                    tab.title.value = current.title ?: ""
+                    tab.lastNavigatedUrl = uri
+                }
+            }
+        }.onFailure { e ->
+            statusPanel.status(
+                "tab ${tab.id}: restoreState failed: ${e.message}"
+            )
+        }
+    }
+
+    /** P-A4 (alpha.38): a restored tab whose session is left
+     *  unopened — see Engine.createDeferredTab. The tab is
+     *  fully wired (delegates, probe registration) at creation;
+     *  only the native session open and the restore/load wait
+     *  for openDeferredTab. */
+    override fun createDeferredTab(
+        snapshotUrl: String,
+        snapshotTitle: String,
+        restoreStateJson: String?,
+        loadUrl: String?,
+        desktopMode: Boolean,
+        scrollY: Int,
+    ): EngineTab = createTabInternal(
+        isPrivate = false,
+        isPopupWin = false,
+        restoreStateJson = restoreStateJson,
+        desktopMode = desktopMode,
+        scrollY = scrollY,
+        openSession = false,
+        deferredLoadUrl = loadUrl,
+        initialUrl = snapshotUrl.ifBlank { null },
+        initialTitle = snapshotTitle,
+    )
+
+    /** P-A4 (alpha.38): open a deferred tab's session and apply
+     *  its held restore — see Engine.openDeferredTab. The held
+     *  values are consumed exactly once, so a second call after
+     *  the first is a no-op. */
+    override fun openDeferredTab(tab: EngineTab) {
+        val own = tab as? GeckoTab ?: return
+        // A load or a user action may already have opened this
+        // session (loadInternal opens on demand); the live state
+        // wins — restoring over it would clobber a navigation
+        // that already happened (e.g. an ACTION_VIEW intent that
+        // loaded into the active tab before this ran).
+        if (own.session.isOpen) return
+        val stateJson = own.pendingRestoreStateJson
+        val loadUrl = own.pendingRestoreUrl
+        own.pendingRestoreStateJson = null
+        own.pendingRestoreUrl = null
+        own.session.open(runtime)
+        own.sessionOpened.value = true
+        if (!stateJson.isNullOrBlank()) {
+            applyRestoreState(own, stateJson)
+        } else if (loadUrl != null) {
+            // URL-only restore (pre-alpha.6 save): the load
+            // itself needs nothing more — the session is open
+            // above — and the scroll rides the probe, as the
+            // synchronous path's pendingScrollY does.
+            own.load(loadUrl)
+        }
+        // Home tab (no state, no URL): nothing more — the shell
+        // shows the start page.
     }
 
     override fun destroyTab(tab: EngineTab) {
@@ -508,6 +608,22 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 "private: wipe failed: ${e.javaClass.simpleName}"
             )
         }
+    }
+
+    /** P-A4 (alpha.38): the startup private-context wipe, out
+     *  of the init — see Engine.wipePrivateContextAtStartup.
+     *  The wipe's purpose is leftovers from a process that died
+     *  with private tabs open (Mariner wipes its private
+     *  profile at startup for the same reason). When a private
+     *  tab already exists the data is live, not leftover —
+     *  wiping would destroy the current private session, and
+     *  the last-private-close path wipes when it closes
+     *  instead. The race (a private tab created in the
+     *  sub-second window between the first frame and this call)
+     *  is bounded the same way: the leftovers are cleared at
+     *  that tab's close. */
+    override fun wipePrivateContextAtStartup() {
+        if (tabs.none { it.isPrivate }) wipePrivateData()
     }
 
     override fun close() {
@@ -1199,6 +1315,15 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     // ------------------------------------------------------------------
     // Cast probe (discovery only — no session is ever launched)
     // ------------------------------------------------------------------
+
+    /** P-A4 (alpha.38): Cast discovery, out of the init — see
+     *  Engine.startCastDiscovery. Idempotent: the MediaRouter
+     *  callback must be registered exactly once. */
+    override fun startCastDiscovery() {
+        if (castDiscoveryStarted) return
+        castDiscoveryStarted = true
+        probeCastRoutes()
+    }
 
     private fun probeCastRoutes() {
         try {
@@ -1927,6 +2052,15 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
          *  restore (pre-alpha.6 save): posted to the probe
          *  port when it connects, then cleared. */
         var pendingScrollY: Int = 0
+
+        /** P-A4 (alpha.38): a restore held for openDeferredTab
+         *  — the session-state JSON (or null) and the URL to load
+         *  when the session opens (null = state restore or home
+         *  tab). Set by createTabInternal for a tab created
+         *  without opening its session; consumed exactly once by
+         *  openDeferredTab. */
+        var pendingRestoreStateJson: String? = null
+        var pendingRestoreUrl: String? = null
 
         override fun goToHistoryIndex(index: Int) {
             runCatching { session.gotoHistoryIndex(index) }

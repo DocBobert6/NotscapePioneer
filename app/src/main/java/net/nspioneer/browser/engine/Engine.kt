@@ -154,6 +154,28 @@ interface Engine {
         // when its port connects.
         scrollY: Int = 0,
     ): EngineTab
+    // P-A4 (alpha.38): a tab restored from a saved snapshot whose
+    // session is NOT opened yet. The snapshot's URL/title are
+    // pinned at once (the bar and the tab grid read them before
+    // the session opens); the state restore — or the URL load
+    // when there is no state — is held on the tab for
+    // [openDeferredTab]. Restored tabs are never private.
+    // loadUrl is null for a home tab (blank snapshot URL).
+    fun createDeferredTab(
+        snapshotUrl: String,
+        snapshotTitle: String,
+        restoreStateJson: String?,
+        loadUrl: String?,
+        desktopMode: Boolean,
+        scrollY: Int,
+    ): EngineTab
+    // P-A4 (alpha.38): open a deferred tab's session and apply
+    // its held restore (state JSON, or the URL load) exactly
+    // once. A tab whose session is already open — a load or a
+    // user action opened it first — is left alone: the live
+    // state wins over the held restore, so a restore can never
+    // clobber a navigation that already happened.
+    fun openDeferredTab(tab: EngineTab)
     // Batch 2: flush every tab's session state (onPause,
     // before the shell persists the session).
     fun flushSessionStates()
@@ -225,6 +247,26 @@ interface Engine {
     val recoveredTraceLines: SnapshotStateList<String>
     val recoveredTraceHeader: State<String?>
     fun recoverCrashedTrace(crashStamp: String?): Boolean
+    // P-A4 (alpha.38): the crashed-trace recovery split, so its
+    // disk read can run off the main thread. read… returns the
+    // unterminated trace file's lines (null when there is none);
+    // recover… populates the recovered-trace state from
+    // already-read lines — main thread only, it writes snapshot
+    // state. recoverCrashedTrace above is the synchronous pair,
+    // kept for callers that already hold the main thread.
+    fun readRecoveredTraceLines(): List<String>?
+    fun recoverCrashedTraceLines(lines: List<String>?, crashStamp: String?): Boolean
+    // P-A4 (alpha.38): Cast discovery used to start in the
+    // engine's init, on the launch path. The shell starts it
+    // after the first frame instead; idempotent, so calling it
+    // twice is a no-op.
+    fun startCastDiscovery()
+    // P-A4 (alpha.38): the startup private-context wipe, also
+    // out of the engine init — the shell runs it after the
+    // first frame. Skipped when a private tab already exists:
+    // wiping then would destroy a live private session, and
+    // the last-private-close path wipes when it closes.
+    fun wipePrivateContextAtStartup()
     fun clearRecoveredTrace()
     fun refreshStats()              // recomputes the "stats: APK … | PSS …"
         // line (cold start, PSS, APK size).
