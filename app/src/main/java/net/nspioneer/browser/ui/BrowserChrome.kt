@@ -57,6 +57,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -83,6 +84,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.engine.EngineTab
+import net.nspioneer.browser.engine.TranslatePageState
 
 /**
  * Browser chrome carried from Mariner's BrowserChrome.kt, adapted
@@ -378,6 +380,9 @@ internal object BrowserMenuRows {
         "scanQr" to "Scan QR code",
         "screenshot" to "Screenshot",
         "desktopSite" to "Desktop site",
+        // alpha.45: translate the page (into-English only).
+        // sectionOf falls through to PAGE for it.
+        "translatePage" to "Translate page",
         "bookmarks" to "Bookmarks",
         "favoritesManager" to "Favorites",
         "history" to "History",
@@ -657,7 +662,13 @@ internal fun LazyListScope.BrowserMenuRowsContent(
     onSavePdf: () -> Unit,
     onSaveOffline: () -> Unit,
     onScreenshot: () -> Unit,
-    onScanQr: () -> Unit
+    onScanQr: () -> Unit,
+    // alpha.45: translate the page. The row is dynamic —
+    // hidden unless the selected tab can be translated
+    // right now (Offer / Translating / Translated).
+    translatePageState: TranslatePageState,
+    onTranslatePage: () -> Unit,
+    onRestorePageTranslation: () -> Unit
 ) {
     val rev = store.revision
     val url = tab.url.value
@@ -777,6 +788,35 @@ internal fun LazyListScope.BrowserMenuRowsContent(
                     val next = !store.siteDesktop(host)
                     store.putSiteDesktop(host, next)
                     tab.setDesktopMode(next)
+                }
+            }
+        },
+        // alpha.45: translate the page. Hidden unless the
+        // tab is offerable / translating / translated — the
+        // state comes from the engine, not the row. While a
+        // translation is running the row reads "Translating…"
+        // and does nothing; a translated page offers
+        // "Show original" instead.
+        MenuSlot(
+            "translatePage",
+            shows("translatePage", hasPage) &&
+                translatePageState != TranslatePageState.Hidden
+        ) {
+            MenuRowVisible(store, "translatePage",
+                when (translatePageState) {
+                    is TranslatePageState.Offer -> "Translate page"
+                    TranslatePageState.Translating -> "Translating…"
+                    is TranslatePageState.Translated -> "Show original"
+                    TranslatePageState.Hidden -> "Translate page"
+                },
+                Icons.Filled.Translate
+            ) {
+                onDismiss()
+                when (translatePageState) {
+                    is TranslatePageState.Translated ->
+                        onRestorePageTranslation()
+                    is TranslatePageState.Offer -> onTranslatePage()
+                    else -> Unit
                 }
             }
         },
@@ -933,7 +973,11 @@ internal fun BrowserMenuSheet(
     onSavePdf: () -> Unit,
     onSaveOffline: () -> Unit,
     onScreenshot: () -> Unit,
-    onScanQr: () -> Unit
+    onScanQr: () -> Unit,
+    // alpha.45: translate the page (dynamic row).
+    translatePageState: TranslatePageState,
+    onTranslatePage: () -> Unit,
+    onRestorePageTranslation: () -> Unit
 ) {
     // alpha.24: the list state is hoisted here so the
     // scroll position survives rows-content recomposition
@@ -995,7 +1039,10 @@ internal fun BrowserMenuSheet(
                 onSavePdf = onSavePdf,
                 onSaveOffline = onSaveOffline,
                 onScreenshot = onScreenshot,
-                onScanQr = onScanQr
+                onScanQr = onScanQr,
+                translatePageState = translatePageState,
+                onTranslatePage = onTranslatePage,
+                onRestorePageTranslation = onRestorePageTranslation
             )
         }
     }

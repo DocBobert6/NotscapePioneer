@@ -95,6 +95,7 @@ import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -190,6 +191,8 @@ import net.nspioneer.browser.engine.GeckoEngine
 import net.nspioneer.browser.engine.LongPressTarget
 import net.nspioneer.browser.engine.PermPrompt
 import net.nspioneer.browser.engine.PopupChoice
+import net.nspioneer.browser.engine.TranslateChoice
+import net.nspioneer.browser.engine.TranslationLanguages
 import net.nspioneer.browser.engine.UserBlockRules
 import net.nspioneer.browser.media.Downloads
 import java.io.File
@@ -1158,6 +1161,13 @@ fun BrowserScreen(
             // dismisses it without choosing — Deny (once) +
             // capture, never a hang.
             engine.pendingPopupDecision.value != null -> { engine.dismissPopupDecision(); true }
+            // alpha.45: back dismisses the translate offer
+            // as Not now — the menu row still offers it.
+            // Only when the offer is for this tab (an offer
+            // for a background tab is not showing).
+            engine.translateOffer.value?.tabId == tab.id -> {
+                engine.answerTranslateOffer(TranslateChoice.NOT_NOW); true
+            }
             showPopupNotice -> { showPopupNotice = false; clearPendingPopups(); true }
             customizeOpen -> { customizeOpen = false; true }
             menuOpen -> { menuOpen = false; true }
@@ -2207,6 +2217,89 @@ fun BrowserScreen(
                 }
             }
         }
+
+        // Translate offer (alpha.45): a foreign-language page
+        // the toolkit offered to translate. Same floating
+        // pattern and place as the popup prompt above. The
+        // dialog states the download size plainly and gets
+        // the user's word before anything downloads; after
+        // the one-time download, translation works offline.
+        // Dismissing (X / back) counts as Not now — the menu
+        // row still offers the translation. Only for the
+        // current tab: an offer for a background tab stays
+        // hidden until that tab is selected again. (If a
+        // popup prompt is up at the same time, this card
+        // draws over it — both stay dismissible, and the
+        // held popup is still there underneath.)
+        engine.translateOffer.value?.takeIf { it.tabId == tab.id }?.let { offer ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 92.dp)
+                    .fillMaxWidth()
+            ) {
+                Surface(
+                    shape = Frost.CardShape,
+                    color = Frost.cardColor(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.Translate, contentDescription = "Translate",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Translate this page from ${offer.fromName} to English?",
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Text(
+                                    if (offer.modelDownloaded) {
+                                        "Ready — translates on your device."
+                                    } else {
+                                        "Downloads the ${offer.fromName} model once " +
+                                            "(about ${TranslationLanguages.formatSize(offer.pairSizeBytes)}). " +
+                                            "After that, translation works offline — " +
+                                            "nothing about the page is sent anywhere."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { engine.answerTranslateOffer(TranslateChoice.NOT_NOW) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(onClick = {
+                                engine.answerTranslateOffer(TranslateChoice.TRANSLATE)
+                            }) {
+                                Text(if (offer.modelDownloaded) "Translate" else "Download & translate")
+                            }
+                            OutlinedButton(onClick = {
+                                engine.answerTranslateOffer(TranslateChoice.NOT_NOW)
+                            }) { Text("Not now") }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = {
+                                engine.answerTranslateOffer(TranslateChoice.NEVER_SITE)
+                            }) { Text("Never on this site") }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Batch 2 — tab grid (Mariner BrowserScreen.kt:4573-5030):
@@ -2897,7 +2990,11 @@ fun BrowserScreen(
                     }
                 }
             },
-            onScanQr = { qrPermLauncher.launch(Manifest.permission.CAMERA) }
+            onScanQr = { qrPermLauncher.launch(Manifest.permission.CAMERA) },
+            // alpha.45: translate the page (dynamic row).
+            translatePageState = engine.translatePageState.value,
+            onTranslatePage = { engine.translatePage() },
+            onRestorePageTranslation = { engine.restorePageTranslation() }
         )
     }
 
