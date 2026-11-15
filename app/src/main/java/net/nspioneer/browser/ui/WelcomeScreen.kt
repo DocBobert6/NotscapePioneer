@@ -56,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import net.nspioneer.browser.data.PioneerStore
+import net.nspioneer.browser.engine.ApprovedExtension
 import net.nspioneer.browser.engine.ApprovedExtensions
 import net.nspioneer.browser.engine.Engine
 
