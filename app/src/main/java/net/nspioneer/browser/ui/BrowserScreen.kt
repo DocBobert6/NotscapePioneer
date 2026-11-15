@@ -140,6 +140,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.Key
@@ -176,6 +178,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.nspioneer.browser.APP_MODE_EXTRA
 import net.nspioneer.browser.R
+import net.nspioneer.browser.data.Bookmark
+import net.nspioneer.browser.data.HistoryEntry
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.TabSnapshot
 import net.nspioneer.browser.engine.Engine
@@ -313,6 +317,155 @@ private fun permResourceWord(resource: String): String = when (resource) {
     "camera" -> "your camera"
     "microphone" -> "your microphone"
     else -> "your location"
+}
+
+// ------------------------------------------------------------------
+// P-A1: recomposition scoping for the browser screen.
+// `BrowserScreen` used to read the tab's scroll position, its load
+// progress, and the store's global `revision` in its own body, so
+// every scroll event, every load-progress tick, and every store
+// mutation re-ran the whole ~2,950-line composition. Those reads
+// now live in small leaf composables below — only the leaf
+// recomposes when its value changes — and the decisions are
+// top-level pure functions so unit tests can pin them down.
+// ------------------------------------------------------------------
+
+/** Scroll-hide decision (Mariner thresholds, verbatim): down
+ *  past 80px hides the bar, any up-scroll shows it. Null means
+ *  "keep the current state". */
+internal fun scrollHideDecision(y: Int, lastY: Int): Boolean? = when {
+    y > lastY + 6 && y > 80 -> true
+    y < lastY - 6 -> false
+    else -> null
+}
+
+/** A load is in flight while progress is strictly between 0
+ *  and 100 — the same range the pill fill and the Stop button
+ *  used inline. */
+internal fun isLoadingProgress(progress: Int): Boolean = progress in 1..99
+
+/** Address suggestions for a query: bookmark hits first, then
+ *  history hits, de-duplicated by URL, at most 6. The triple is
+ *  (title, url, isBookmark), exactly as the inline code built
+ *  it. */
+internal fun matchSuggestions(
+    bookmarks: List<Bookmark>,
+    history: List<HistoryEntry>,
+    query: String
+): List<Triple<String, String, Boolean>> {
+    val q = query.trim()
+    if (q.isBlank()) return emptyList()
+    val bookmarkHits = bookmarks.filter {
+        it.title.contains(q, ignoreCase = true) ||
+            it.url.contains(q, ignoreCase = true)
+    }.map { Triple(it.title.ifBlank { it.url }, it.url, true) }
+    val historyHits = history.filter {
+        it.title.contains(q, ignoreCase = true) ||
+            it.url.contains(q, ignoreCase = true)
+    }.distinctBy { it.url }
+        .map { Triple(it.title.ifBlank { it.url }, it.url, false) }
+    return (bookmarkHits + historyHits).distinctBy { it.second }.take(6)
+}
+
+/** Scroll-hide watcher: owns the last-scroll reference and the
+ *  two effects that used to live in `BrowserScreen`'s body, so
+ *  only this leaf subscribes to `tab.scrollY`. The bar's hidden
+ *  state itself stays in the caller and is set through the
+ *  callback. */
+@Composable
+private fun ScrollHideWatcher(
+    tab: EngineTab,
+    onHiddenChange: (Boolean) -> Unit
+) {
+    var lastScrollY by remember { mutableIntStateOf(0) }
+    // A tab switch resets the reference point and shows the
+    // bar again.
+    LaunchedEffect(tab.id) {
+        lastScrollY = tab.scrollY.value
+        onHiddenChange(false)
+    }
+    LaunchedEffect(tab.scrollY.value) {
+        val y = tab.scrollY.value
+        scrollHideDecision(y, lastScrollY)?.let { onHiddenChange(it) }
+        lastScrollY = y
+    }
+}
+
+/** Load-finished watcher: a finished load ends a
+ *  pull-to-refresh. Only this leaf subscribes to
+ *  `tab.progress`. */
+@Composable
+private fun LoadFinishedWatcher(
+    tab: EngineTab,
+    onLoadFinished: () -> Unit
+) {
+    LaunchedEffect(tab.progress.value) {
+        if (tab.progress.value >= 100) onLoadFinished()
+    }
+}
+
+/** The loading-progress fill inside the address pill: the
+ *  theme's ink sweeping across the pill while a load is in
+ *  flight. Only this leaf reads `tab.progress`. */
+@Composable
+private fun ProgressPillFill(tab: EngineTab, pillShape: Shape) {
+    val progress = tab.progress.value
+    if (isLoadingProgress(progress)) {
+        Box(modifier = Modifier.matchParentSize().clip(pillShape)) {
+            Box(
+                modifier = Modifier.fillMaxHeight()
+                    .fillMaxWidth(progress / 100f)
+                    .background(
+                        Brush.horizontalGradient(
+                            0f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.30f),
+                            0.7f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.30f),
+                            1f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0f)
+                        )
+                    )
+            )
+        }
+    }
+}
+
+/** The Stop button beside the tab count: visible only while a
+ *  page is loading. Only this leaf reads `tab.progress`. */
+@Composable
+private fun StopLoadingButton(
+    tab: EngineTab,
+    frost: Modifier,
+    contentColor: Color
+) {
+    if (isLoadingProgress(tab.progress.value)) {
+        Box(
+            modifier = Modifier.size(44.dp).then(frost)
+                .clickable { tab.stop() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Filled.Close, contentDescription = "Stop loading",
+                tint = contentColor, modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+/** Address suggestions: the bookmark/history lookup that used
+ *  to run in `BrowserScreen`'s body with `store.revision` as a
+ *  remember key. The revision subscription now lives here, in
+ *  this leaf, so a store mutation recomposes only this leaf —
+ *  and the list still refreshes when bookmarks or history
+ *  change while the user is typing. */
+@Composable
+private fun AddressSuggestions(
+    query: String,
+    editing: Boolean,
+    store: PioneerStore
+): List<Triple<String, String, Boolean>> {
+    val revision = store.revision
+    return remember(query, editing, revision) {
+        if (!editing) emptyList()
+        else matchSuggestions(store.bookmarks, store.history, query)
+    }
 }
 
 @Composable
@@ -462,18 +615,19 @@ fun BrowserScreen(
     }
 
     // ---- Batch 1: floating address bar ----
-    // Reading revision subscribes this screen to store
-    // mutations, so a barPosition change in Settings
-    // moves the bar the moment the user comes back.
-    @Suppress("UNUSED_VARIABLE")
-    val storeRev = store.revision
+    // P-A1: no global revision subscription here any
+    // more. barAtBottom reads the setting out of the
+    // store's snapshot state map, so it already
+    // subscribes to the "barPosition" key alone — a
+    // change in Settings still moves the bar the
+    // moment the user comes back, without every store
+    // mutation recomposing this screen.
     val barAtBottom = store.setting("barPosition", "bottom") != "top"
     // Scroll-hide (Mariner BrowserScreen.kt:2604-2607):
     // down past 80px hides the bar, any up-scroll shows
     // it. The bar never hides while typing or on the
     // start page (the AnimatedVisibility condition).
     var barHidden by remember { mutableStateOf(false) }
-    var lastScrollY by remember { mutableIntStateOf(0) }
     // Pull-to-refresh (Mariner BrowserScreen.kt:2200-2246):
     // measured on the GeckoView itself; pullOffsetPx
     // drives the frost indicator.
@@ -557,23 +711,14 @@ fun BrowserScreen(
     // tab.scrollY; Mariner's thresholds, verbatim
     // (BrowserScreen.kt:2604-2607). A tab switch resets
     // the reference point and shows the bar again.
-    LaunchedEffect(tab.id) {
-        lastScrollY = tab.scrollY.value
-        barHidden = false
-    }
-    LaunchedEffect(tab.scrollY.value) {
-        val y = tab.scrollY.value
-        when {
-            y > lastScrollY + 6 && y > 80 -> barHidden = true
-            y < lastScrollY - 6 -> barHidden = false
-        }
-        lastScrollY = y
-    }
+    // P-A1: the effects live in ScrollHideWatcher, so
+    // only that leaf subscribes to tab.scrollY.
+    ScrollHideWatcher(tab) { barHidden = it }
     // A finished load ends a pull-to-refresh (Mariner
-    // BrowserScreen.kt:3172).
-    LaunchedEffect(tab.progress.value) {
-        if (tab.progress.value >= 100) pullRefreshing = false
-    }
+    // BrowserScreen.kt:3172). P-A1: the effect lives in
+    // LoadFinishedWatcher, so only that leaf subscribes
+    // to tab.progress.
+    LoadFinishedWatcher(tab) { pullRefreshing = false }
 
     fun openUrl(url: String) {
         homeTabIds.remove(tab.id)
@@ -745,25 +890,14 @@ fun BrowserScreen(
         if (tabSwitcherOpen) captureTabPreview(tab.id)
     }
 
-    val suggestions = remember(fieldValue.text, editingAddress, store.revision) {
-        if (!editingAddress) emptyList()
-        else {
-            val q = fieldValue.text.trim()
-            if (q.isBlank()) emptyList()
-            else {
-                val bookmarkHits = store.bookmarks.filter {
-                    it.title.contains(q, ignoreCase = true) ||
-                        it.url.contains(q, ignoreCase = true)
-                }.map { Triple(it.title.ifBlank { it.url }, it.url, true) }
-                val historyHits = store.history.filter {
-                    it.title.contains(q, ignoreCase = true) ||
-                        it.url.contains(q, ignoreCase = true)
-                }.distinctBy { it.url }
-                    .map { Triple(it.title.ifBlank { it.url }, it.url, false) }
-                (bookmarkHits + historyHits).distinctBy { it.second }.take(6)
-            }
-        }
-    }
+    // P-A1: the revision subscription for suggestions lives
+    // in AddressSuggestions now — only that leaf recomposes
+    // on a store mutation.
+    val suggestions = AddressSuggestions(
+        query = fieldValue.text,
+        editing = editingAddress,
+        store = store
+    )
     val uBlockInstalled = engine.uBlockState.value.startsWith("installed")
 
     // ---- Phase 3: downloads / permissions / file chooser / popups ----
@@ -1260,22 +1394,8 @@ fun BrowserScreen(
             ) {
                 // Loading progress fills the pill itself, in the
                 // theme's ink (Mariner BrowserScreen.kt:3741).
-                val progress = tab.progress.value
-                if (progress in 1..99) {
-                    Box(modifier = Modifier.matchParentSize().clip(pillShape)) {
-                        Box(
-                            modifier = Modifier.fillMaxHeight()
-                                .fillMaxWidth(progress / 100f)
-                                .background(
-                                    Brush.horizontalGradient(
-                                        0f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.30f),
-                                        0.7f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.30f),
-                                        1f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0f)
-                                    )
-                                )
-                        )
-                    }
-                }
+                // P-A1: only the leaf reads tab.progress.
+                ProgressPillFill(tab, pillShape)
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1452,18 +1572,8 @@ fun BrowserScreen(
                 // While a page is loading, the bar offers Stop
                 // next to the tab count; it hides the moment
                 // nothing is loading (progress 100 or idle).
-                if (tab.progress.value in 1..99) {
-                    Box(
-                        modifier = Modifier.size(44.dp).then(frost)
-                            .clickable { tab.stop() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Filled.Close, contentDescription = "Stop loading",
-                            tint = contentColor, modifier = Modifier.size(22.dp)
-                        )
-                    }
-                }
+                // P-A1: only the leaf reads tab.progress.
+                StopLoadingButton(tab, frost, contentColor)
                 Box(
                     modifier = Modifier.size(44.dp).then(frost)
                         .combinedClickable(
