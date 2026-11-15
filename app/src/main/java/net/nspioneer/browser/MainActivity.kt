@@ -30,6 +30,7 @@ import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.data.TabSnapshot
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.EngineTab
+import net.nspioneer.browser.engine.FilterEngine
 import net.nspioneer.browser.engine.GeckoEngine
 import net.nspioneer.browser.engine.LongPressTarget
 import net.nspioneer.browser.media.PageActions
@@ -113,6 +114,17 @@ class MainActivity : ComponentActivity() {
         installCrashHandler()
         store = PioneerStore.get(this)
         engine = GeckoEngine(this)
+
+        // P-A5 (alpha.35): FilterEngine.initAsync had no caller,
+        // so the filter lists only loaded when Blocking Settings
+        // was opened — blocking was inert on a fresh launch.
+        // The engine is created first so its BlockingObserver
+        // has already chained FilterEngine.onListsChanged, and
+        // the load's completion pushes the rules to the probe
+        // and refreshes the filter-lists status line.
+        // initAsync spawns its own thread; nothing here blocks
+        // the main thread or setContent.
+        FilterEngine.initAsync(this)
 
         // A previous run crashed: surface the crash line in the
         // status panel so Copy status carries it (the app keeps
