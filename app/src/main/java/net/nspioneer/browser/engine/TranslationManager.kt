@@ -217,8 +217,11 @@ class TranslationManager(
 
         override fun onTranslationStateChange(
             session: GeckoSession,
-            state: SessionTranslation.TranslationState,
+            state: SessionTranslation.TranslationState?,
         ) {
+            // The toolkit can deliver a null state; there is
+            // nothing to learn from it.
+            if (state == null) return
             handleStateChange(session, state)
         }
     }
@@ -366,7 +369,7 @@ class TranslationManager(
             RuntimeTranslation.listModelDownloadStates().accept(
                 { models ->
                     val model = models?.firstOrNull {
-                        it.language.code.equals(from, ignoreCase = true)
+                        it.language?.code?.equals(from, ignoreCase = true) == true
                     }
                     val downloaded = model?.isDownloaded == true
                     val size = model?.size?.takeIf { it > 0 }
@@ -451,7 +454,7 @@ class TranslationManager(
                 }
                 session?.let {
                     runCatching {
-                        it.sessionTranslation.setNeverTranslateSiteSetting(true)
+                        it.sessionTranslation?.setNeverTranslateSiteSetting(true)
                     }
                 }
                 if (selectedTab?.id == current.tabId) {
@@ -500,7 +503,7 @@ class TranslationManager(
             RuntimeTranslation.listModelDownloadStates().accept(
                 { models ->
                     val downloaded = models?.firstOrNull {
-                        it.language.code.equals(from, ignoreCase = true)
+                        it.language?.code?.equals(from, ignoreCase = true) == true
                     }?.isDownloaded == true
                     postToMain {
                         val current = tabForSession(tab.session) ?: return@postToMain
@@ -568,13 +571,13 @@ class TranslationManager(
     private fun doTranslate(tab: TranslateTab, from: String) {
         val lang = TranslationLanguages.languageFor(from) ?: return
         runCatching {
-            tab.session.sessionTranslation.translate(
+            tab.session.sessionTranslation?.translate(
                 from,
                 TARGET_LANGUAGE,
                 SessionTranslation.TranslationOptions.Builder()
                     .downloadModel(false)
                     .build(),
-            ).accept(
+            )?.accept(
                 {
                     // The state change (hasVisibleChange) is
                     // the source of truth, but mark it here
@@ -609,7 +612,7 @@ class TranslationManager(
         val tab = selectedTab ?: return
         val from = translatedFrom[tab.id] ?: return
         runCatching {
-            tab.session.sessionTranslation.restoreOriginalPage().accept(
+            tab.session.sessionTranslation?.restoreOriginalPage()?.accept(
                 {
                     translatedFrom.remove(tab.id)
                     if (selectedTab?.id == tab.id) {
@@ -720,7 +723,7 @@ class TranslationManager(
     ) {
         _modelStates.value = TranslationLanguages.SUPPORTED.map { lang ->
             val model = models?.firstOrNull {
-                it.language.code.equals(lang.code, ignoreCase = true)
+                it.language?.code?.equals(lang.code, ignoreCase = true) == true
             }
             TranslateModelState(
                 code = lang.code,
