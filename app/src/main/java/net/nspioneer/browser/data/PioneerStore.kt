@@ -502,7 +502,17 @@ class PioneerStore private constructor(context: Context) {
      *  entry. Mariner recorded every visit as its own row
      *  with no dedupe; Pioneer keeps one row per consecutive
      *  visit so a reload does not stack identical rows.
-     *  New visits go at the front (newest first). */
+     *  New visits go at the front (newest first).
+     *
+     *  P-A3: history is capped on add, mirroring
+     *  [addDownload] — entries older than 90 days go, and
+     *  the list never keeps more than 500 entries (oldest
+     *  first). Without the cap the history file grows
+     *  monotonically, so the cold-start parse and every
+     *  full-file re-serialization grow with it. A file
+     *  that predates the cap is pruned down by the next
+     *  visit, since the cap removes all excess, not just
+     *  the one new row. */
     fun addHistory(title: String, url: String) {
         if (url.isBlank()) return
         if (!url.startsWith("http://") && !url.startsWith("https://")) return
@@ -512,6 +522,11 @@ class PioneerStore private constructor(context: Context) {
                 0,
                 HistoryEntry(newId(), title.ifBlank { url }, url, System.currentTimeMillis())
             )
+            val cutoff = System.currentTimeMillis() - 90L * 24 * 3600 * 1000
+            history.removeAll { it.visitedAt < cutoff }
+            if (history.size > 500) {
+                history.removeAll(history.takeLast(history.size - 500).toSet())
+            }
             mutated(Part.HISTORY)
         }
     }
