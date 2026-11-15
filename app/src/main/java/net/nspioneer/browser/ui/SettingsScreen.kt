@@ -1540,6 +1540,28 @@ fun SettingsScreen(
                         onClick = { engine.uninstallUBlock() }
                     )
                 }
+                // alpha.33: second approved extension — same
+                // install / remove pattern as uBlock, so an
+                // extension installed from onboarding can be
+                // managed (and removed) here afterwards.
+                val gsfState = engine.googleSearchFixerState.value
+                val gsfInstalled = gsfState.startsWith("installed")
+                InsetDivider()
+                ActionRow(
+                    label = "Google Search Fixer",
+                    supporting = gsfState,
+                    actionLabel = if (gsfInstalled) "Check again" else "Install",
+                    onClick = { engine.installGoogleSearchFixer() }
+                )
+                if (gsfInstalled) {
+                    InsetDivider()
+                    ActionRow(
+                        label = "Remove Google Search Fixer",
+                        supporting = "Removes the extension from Pioneer",
+                        actionLabel = "Remove",
+                        onClick = { engine.uninstallGoogleSearchFixer() }
+                    )
+                }
             }
 
             GroupTitle("About")
