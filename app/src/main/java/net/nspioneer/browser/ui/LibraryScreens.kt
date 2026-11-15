@@ -1042,7 +1042,6 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
         val groupedHistory = remember(shownHistory) {
             groupHistoryByDay(shownHistory)
         }
-        }
         if (store.history.isEmpty()) {
             LibraryEmptyState(
                 icon = Icons.Filled.History,
