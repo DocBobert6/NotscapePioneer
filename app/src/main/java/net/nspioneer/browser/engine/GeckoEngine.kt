@@ -466,7 +466,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             // alpha.45: let the toolkit offer translation on
             // foreign-language pages (the offer itself is
             // gated by TranslationManager — engine support,
-            // the six-language setting, never-translate).
+            // the eight-language setting, never-translate).
             .translationsOfferPopup(true)
             .build()
         val runtime = GeckoRuntime.create(appContext, settings)

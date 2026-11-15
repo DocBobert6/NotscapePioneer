@@ -13,9 +13,10 @@ import org.mozilla.geckoview.TranslationsController.SessionTranslation
  * verified against the pinned 160 AAR — see
  * TRANSLATE-SPIKE-REPORT.md).
  *
- * Scope, as decided 2026-11-14: into-English only, six
- * languages (Spanish, French, German, Italian, Portuguese,
- * Russian). Models download once on demand from Mozilla's
+ * Scope, as decided 2026-11-14 and expanded 2026-11-15
+ * (alpha.55): into-English only, eight languages
+ * (Spanish, French, German, Italian, Portuguese, Russian,
+ * Mandarin Chinese, Hindi). Models download once on demand from Mozilla's
  * servers, then live in the profile — after that, no page
  * text ever leaves the device. Nothing is bundled in the
  * APK (unsupported, and it would triple it).
@@ -25,8 +26,9 @@ import org.mozilla.geckoview.TranslationsController.SessionTranslation
  * pair-level download API (ModelManagementOptions has
  * LANGUAGE / CACHE / ALL only). So downloading Spanish
  * fetches the Spanish pack (both directions, ~74 MB), and
- * all six together are ~440 MB, not the ~228 MB into-English
- * pair total the spike quoted. The first-use prompt shows
+ * all eight together are ~590 MB, not the ~228 MB into-English
+ * pair total the spike quoted. Packs range from ~44 MB
+ * (Hindi) to ~105 MB (Mandarin Chinese) per language. The first-use prompt shows
  * the real per-language size from listModelDownloadStates,
  * so the user is never misled at the point of download.
  * The translate call itself never downloads silently:
@@ -38,7 +40,7 @@ import org.mozilla.geckoview.TranslationsController.SessionTranslation
  * before offering, and this manager gates on it too.
  * Per-language Always/Offer/Never toolkit settings
  * (setLanguageSettings) are deliberately NOT used:
- * Pioneer's own six-language store setting is the single
+ * Pioneer's own eight-language store setting is the single
  * source of truth for what gets offered.
  */
 
@@ -62,13 +64,19 @@ object TranslationLanguages {
         TranslateLanguage("it", "Italian", 37.1, 73.6),
         TranslateLanguage("pt", "Portuguese", 37.0, 73.3),
         TranslateLanguage("ru", "Russian", 36.9, 72.1),
+        // alpha.55: Mandarin Chinese (zh-en 54.6 MB +
+        // en-zh 49.9 MB) and Hindi (hi-en 22.7 MB +
+        // en-hi 21.6 MB) — Mozilla registry mirror,
+        // runonweb MODELS.md, generated 2026-10-24.
+        TranslateLanguage("zh", "Mandarin Chinese", 54.6, 104.5),
+        TranslateLanguage("hi", "Hindi", 22.7, 44.3),
     )
     val CODES: Set<String> = SUPPORTED.map { it.code }.toSet()
 
     fun languageFor(code: String): TranslateLanguage? =
         SUPPORTED.firstOrNull { it.code.equals(code, ignoreCase = true) }
 
-    /** True when [code] is one of the six (case-insensitive,
+    /** True when [code] is one of the eight (case-insensitive,
      *  region suffix stripped: "es-ES" counts as "es"). */
     fun isOfferable(code: String): Boolean =
         languageFor(normalizeCode(code)) != null
@@ -77,13 +85,13 @@ object TranslationLanguages {
     fun normalizeCode(code: String): String =
         code.substringBefore("-").substringBefore("_").lowercase()
 
-    /** The stored six-language setting
+    /** The stored eight-language setting
      *  ("translateLanguages", comma-separated codes):
-     *  null/blank means all six; a lone "-" means none
+     *  null/blank means all eight; a lone "-" means none
      *  (setLanguageEnabled's sentinel — an empty set must
-     *  stay empty, not parse back to all six). Unknown
+     *  stay empty, not parse back to all eight). Unknown
      *  codes are dropped, duplicates removed — the setting
-     *  can never enable a language outside the six. */
+     *  can never enable a language outside the eight. */
     fun parseEnabledLanguages(raw: String?): Set<String> {
         if (raw.isNullOrBlank()) return CODES
         if (raw.trim() == "-") return emptySet()
@@ -172,8 +180,8 @@ class TranslationManager(
     },
 ) {
     companion object {
-        /** Stored six-language setting: comma-separated codes;
-         *  absent means all six. */
+        /** Stored eight-language setting: comma-separated codes;
+         *  absent means all eight. */
         const val LANGUAGES_KEY = "translateLanguages"
         const val TARGET_LANGUAGE = "en"
     }
@@ -315,7 +323,7 @@ class TranslationManager(
 
     /** The gating decision (pure, unit-tested): offer only
      *  when the engine is supported, the detected language is
-     *  one of the six AND enabled in settings, the host is
+     *  one of the eight AND enabled in settings, the host is
      *  not never-translate, and the page is not already
      *  translated. */
     internal fun shouldOffer(
@@ -681,7 +689,7 @@ class TranslationManager(
 
     // ---------- settings surfaces ----------
 
-    /** One language on/off in the six-language setting. */
+    /** One language on/off in the eight-language setting. */
     fun setLanguageEnabled(code: String, enabled: Boolean) {
         val normalized = TranslationLanguages.normalizeCode(code)
         if (normalized !in TranslationLanguages.CODES) return
@@ -691,7 +699,7 @@ class TranslationManager(
         val next = if (enabled) current + normalized else current - normalized
         // The store setting is the single source of truth;
         // an empty set is stored as "" and parses back to
-        // all six (parseEnabledLanguages treats blank as
+        // all eight (parseEnabledLanguages treats blank as
         // "all") — so an explicit empty set is kept as a
         // sentinel instead: a single "-" means "none".
         store.putSetting(
@@ -717,7 +725,7 @@ class TranslationManager(
     }
 
     /** Pure handler: map the toolkit's per-language models
-     *  onto the six Settings rows. */
+     *  onto the eight Settings rows. */
     internal fun onModelStatesLoaded(
         models: List<RuntimeTranslation.LanguageModel>?,
     ) {

@@ -984,12 +984,12 @@ fun SettingsScreen(
 
             // alpha.45: on-device page translation
             // (Bergamot/WASM via GeckoView's
-            // TranslationsController). Into-English only, six
+            // TranslationsController). Into-English only, eight
             // languages. Models download once per language
             // from Mozilla's servers, then live in the
             // profile — after that, no page text leaves the
-            // device. The six toggles ARE the setting: all
-            // six off means no offers.
+            // device. The eight toggles ARE the setting: all
+            // eight off means no offers.
             GroupTitle("Translate")
             SettingsCard {
                 // Load the model states + never-translate list
@@ -1021,7 +1021,7 @@ fun SettingsScreen(
                         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
                     )
                     Text(
-                        "Each language downloads once, the first time you translate a page in it (about 74 MB each, about 440 MB for all six), then works offline.",
+                        "Each language downloads once, the first time you translate a page in it (about 44-105 MB each, about 590 MB for all eight), then works offline.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(bottom = 4.dp)
