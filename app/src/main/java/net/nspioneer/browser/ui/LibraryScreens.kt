@@ -27,8 +27,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -284,6 +286,48 @@ fun SettingsCard(content: @Composable () -> Unit) {
     GroupedCard {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
             content()
+        }
+    }
+}
+
+/**
+ * P-A2 (alpha.41): one segment of a grouped card, so a
+ * LazyColumn can virtualize the rows instead of composing
+ * the whole list eagerly inside a single item. The segments
+ * stack with no gap and wear the same material as
+ * [SettingsCard], so they read as the single card they
+ * replace: the first segment keeps the top corners (20.dp,
+ * matching [Frost.CardShape]) and the top 8dp padding, the
+ * last keeps the bottom corners and the bottom 8dp padding,
+ * middle segments are square with no vertical padding, and
+ * the divider sits at the top of every segment after the
+ * first — the same vertical sequence as the eager card
+ * (pad, row, divider, row, …, row, pad).
+ */
+@Composable
+private fun GroupedRowCard(
+    isFirst: Boolean,
+    isLast: Boolean,
+    content: @Composable () -> Unit
+) {
+    val shape = when {
+        isFirst && isLast -> Frost.CardShape
+        isFirst -> RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+        isLast -> RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
+        else -> RoundedCornerShape(0.dp)
+    }
+    Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+        GroupedCard(shape = shape) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(
+                    start = 14.dp, end = 14.dp,
+                    top = if (isFirst) 8.dp else 0.dp,
+                    bottom = if (isLast) 8.dp else 0.dp
+                )
+            ) {
+                if (!isFirst) InsetDivider()
+                content()
+            }
         }
     }
 }
@@ -574,17 +618,11 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                 }
             }
         }
-        val shown = store.bookmarks.filter { b ->
-            (folderFilter == null || b.folder == folderFilter) &&
-                (bookmarkQuery.isBlank() ||
-                    b.title.contains(bookmarkQuery, ignoreCase = true) ||
-                    b.url.contains(bookmarkQuery, ignoreCase = true))
-        }.let { list ->
-            when (bookmarkSort) {
-                "oldest" -> list.sortedBy { it.createdAt }
-                "title" -> list.sortedBy { it.title.lowercase() }
-                else -> list.sortedByDescending { it.createdAt }
-            }
+        // P-A2 (alpha.41): filter + sort remembered, so a
+        // recomposition the list does not depend on (a scroll,
+        // a store tick) does not re-run them.
+        val shown = remember(rev, folderFilter, bookmarkQuery, bookmarkSort) {
+            filterBookmarks(store.bookmarks, folderFilter, bookmarkQuery, bookmarkSort)
         }
         if (store.bookmarks.isEmpty()) {
             LibraryEmptyState(
@@ -600,7 +638,7 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
         }
         if (shown.isNotEmpty()) {
             LazyColumn {
-                item {
+                item(key = "group-title") {
                     Column(
                         modifier = Modifier.padding(horizontal = 16.dp)
                     ) {
@@ -611,74 +649,75 @@ fun BookmarksScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                                 else -> folderFilter!!
                             }
                         )
-                        SettingsCard {
-                            shown.forEachIndexed { i, b ->
-                                if (i > 0) InsetDivider()
-                                KitGroupedRow(
-                                    onClick = {
-                                        if (bookmarkSelecting) {
+                    }
+                }
+                itemsIndexed(shown, key = { _, b -> b.id }) { i, b ->
+                    GroupedRowCard(isFirst = i == 0, isLast = i == shown.lastIndex) {
+                        KitGroupedRow(
+                            onClick = {
+                                if (bookmarkSelecting) {
+                                    bookmarkSelected =
+                                        if (b.id in bookmarkSelected) bookmarkSelected - b.id
+                                        else bookmarkSelected + b.id
+                                } else onOpenUrl(b.url)
+                            },
+                            leading = {
+                                if (bookmarkSelecting) {
+                                    Checkbox(
+                                        checked = b.id in bookmarkSelected,
+                                        onCheckedChange = {
                                             bookmarkSelected =
                                                 if (b.id in bookmarkSelected) bookmarkSelected - b.id
                                                 else bookmarkSelected + b.id
-                                        } else onOpenUrl(b.url)
-                                    },
-                                    leading = {
-                                        if (bookmarkSelecting) {
-                                            Checkbox(
-                                                checked = b.id in bookmarkSelected,
-                                                onCheckedChange = {
-                                                    bookmarkSelected =
-                                                        if (b.id in bookmarkSelected) bookmarkSelected - b.id
-                                                        else bookmarkSelected + b.id
-                                                }
-                                            )
-                                        } else {
-                                            RowFavicon(store, b.url)
                                         }
-                                    },
-                                    title = {
-                                        Text(
-                                            b.title, maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.bodyLarge
-                                        )
-                                    },
-                                    supporting = {
-                                        Column {
-                                            Text(
-                                                b.url, maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            if (folderFilter == null && b.folder.isNotBlank()) {
-                                                Text(
-                                                    b.folder, maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-                                        }
-                                    },
-                                    trailing = {
-                                        Row {
-                                            IconButton(onClick = { editBookmark = b }) {
-                                                Icon(Icons.Filled.Edit, contentDescription = "Edit bookmark")
-                                            }
-                                            IconButton(onClick = { moveTarget = b }) {
-                                                Icon(Icons.Filled.MoreVert, contentDescription = "Move to folder")
-                                            }
-                                            IconButton(onClick = { store.toggleBookmark(b.title, b.url) }) {
-                                                Icon(Icons.Filled.Delete, contentDescription = "Remove")
-                                            }
-                                        }
-                                    },
+                                    )
+                                } else {
+                                    RowFavicon(store, b.url)
+                                }
+                            },
+                            title = {
+                                Text(
+                                    b.title, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyLarge
                                 )
-                            }
-                        }
-                        Spacer(Modifier.height(24.dp))
+                            },
+                            supporting = {
+                                Column {
+                                    Text(
+                                        b.url, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (folderFilter == null && b.folder.isNotBlank()) {
+                                        Text(
+                                            b.folder, maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            },
+                            trailing = {
+                                Row {
+                                    IconButton(onClick = { editBookmark = b }) {
+                                        Icon(Icons.Filled.Edit, contentDescription = "Edit bookmark")
+                                    }
+                                    IconButton(onClick = { moveTarget = b }) {
+                                        Icon(Icons.Filled.MoreVert, contentDescription = "Move to folder")
+                                    }
+                                    IconButton(onClick = { store.toggleBookmark(b.title, b.url) }) {
+                                        Icon(Icons.Filled.Delete, contentDescription = "Remove")
+                                    }
+                                }
+                            },
+                        )
                     }
+                }
+                item(key = "group-spacer") {
+                    Spacer(Modifier.height(24.dp))
                 }
             }
         }
@@ -993,16 +1032,16 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
                 }) { Text("Delete (${historySelected.size})") }
             }
         }
-        val shownHistory = store.history.filter { h ->
-            historyQuery.isBlank() ||
-                h.title.contains(historyQuery, ignoreCase = true) ||
-                h.url.contains(historyQuery, ignoreCase = true)
-        }.let { list ->
-            when (historySort) {
-                "oldest" -> list.sortedBy { it.visitedAt }
-                "title" -> list.sortedBy { it.title.lowercase() }
-                else -> list.sortedByDescending { it.visitedAt }
-            }
+        // P-A2 (alpha.41): filter + sort remembered (see
+        // Bookmarks); the day groups are remembered off the
+        // filtered list so groupBy does not re-run per
+        // composition either.
+        val shownHistory = remember(rev, historyQuery, historySort) {
+            filterHistory(store.history, historyQuery, historySort)
+        }
+        val groupedHistory = remember(shownHistory) {
+            groupHistoryByDay(shownHistory)
+        }
         }
         if (store.history.isEmpty()) {
             LibraryEmptyState(
@@ -1017,80 +1056,80 @@ fun HistoryScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -
         }
         if (shownHistory.isNotEmpty()) {
             LazyColumn {
-                shownHistory.groupBy { dayLabel(it.visitedAt) }
-                    .forEach { (day, entries) ->
-                        item(key = "day-$day") {
-                            Column(
-                                modifier = Modifier.padding(horizontal = 16.dp)
-                            ) {
-                                GroupTitle(
-                                    if (entries.size == 1) "$day (1 visit)"
-                                    else "$day (${entries.size} visits)"
-                                )
-                                SettingsCard {
-                                    entries.forEachIndexed { i, h ->
-                                        if (i > 0) InsetDivider()
-                                        KitGroupedRow(
-                                            onClick = {
-                                                if (historySelecting) {
-                                                    historySelected =
-                                                        if (h.id in historySelected) historySelected - h.id
-                                                        else historySelected + h.id
-                                                } else onOpenUrl(h.url)
-                                            },
-                                            leading = {
-                                                if (historySelecting) {
-                                                    Checkbox(
-                                                        checked = h.id in historySelected,
-                                                        onCheckedChange = {
-                                                            historySelected =
-                                                                if (h.id in historySelected) historySelected - h.id
-                                                                else historySelected + h.id
-                                                        }
-                                                    )
-                                                } else {
-                                                    RowFavicon(store, h.url)
-                                                }
-                                            },
-                                            trailing = {
-                                                IconButton(onClick = {
-                                                    val deleted = listOf(h)
-                                                    store.removeHistory(h.id)
-                                                    historySnackScope.launch {
-                                                        if (historySnackHost.showSnackbar(
-                                                                "Deleted 1 entry",
-                                                                actionLabel = "Undo"
-                                                            ) == SnackbarResult.ActionPerformed
-                                                        ) {
-                                                            undoDelete(deleted)
-                                                        }
-                                                    }
-                                                }) {
-                                                    Icon(Icons.Filled.Delete, contentDescription = "Delete entry")
-                                                }
-                                            },
-                                            title = {
-                                                Text(
-                                                    h.title, maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    style = MaterialTheme.typography.bodyLarge
-                                                )
-                                            },
-                                            supporting = {
-                                                Text(
-                                                    h.url, maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            },
-                                        )
-                                    }
-                                }
-                                Spacer(Modifier.height(8.dp))
-                            }
+                groupedHistory.forEach { (day, entries) ->
+                    item(key = "day-title-$day") {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        ) {
+                            GroupTitle(
+                                if (entries.size == 1) "$day (1 visit)"
+                                else "$day (${entries.size} visits)"
+                            )
                         }
                     }
+                    itemsIndexed(entries, key = { _, h -> h.id }) { i, h ->
+                        GroupedRowCard(isFirst = i == 0, isLast = i == entries.lastIndex) {
+                            KitGroupedRow(
+                                onClick = {
+                                    if (historySelecting) {
+                                        historySelected =
+                                            if (h.id in historySelected) historySelected - h.id
+                                            else historySelected + h.id
+                                    } else onOpenUrl(h.url)
+                                },
+                                leading = {
+                                    if (historySelecting) {
+                                        Checkbox(
+                                            checked = h.id in historySelected,
+                                            onCheckedChange = {
+                                                historySelected =
+                                                    if (h.id in historySelected) historySelected - h.id
+                                                    else historySelected + h.id
+                                            }
+                                        )
+                                    } else {
+                                        RowFavicon(store, h.url)
+                                    }
+                                },
+                                trailing = {
+                                    IconButton(onClick = {
+                                        val deleted = listOf(h)
+                                        store.removeHistory(h.id)
+                                        historySnackScope.launch {
+                                            if (historySnackHost.showSnackbar(
+                                                    "Deleted 1 entry",
+                                                    actionLabel = "Undo"
+                                                ) == SnackbarResult.ActionPerformed
+                                            ) {
+                                                undoDelete(deleted)
+                                            }
+                                        }
+                                    }) {
+                                        Icon(Icons.Filled.Delete, contentDescription = "Delete entry")
+                                    }
+                                },
+                                title = {
+                                    Text(
+                                        h.title, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyLarge
+                                    )
+                                },
+                                supporting = {
+                                    Text(
+                                        h.url, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    item(key = "day-spacer-$day") {
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
             }
         }
     }
@@ -1153,6 +1192,69 @@ internal fun sortFavourites(
     else -> list.sortedByDescending { it.createdAt }
 }
 
+/**
+ * P-A2 (alpha.41): the library filter + sort, as pure
+ * functions so the remembered lists are unit-testable.
+ * Each is a byte-identical transcription of the inline
+ * computation it replaces — same predicate, same order.
+ * [filterDownloads] covers all three download lists: the
+ * (media, isPrivate) pair selects the list, so the media,
+ * file and private predicates stay one function.
+ */
+internal fun filterBookmarks(
+    bookmarks: List<Bookmark>, folderFilter: String?,
+    query: String, sort: String
+): List<Bookmark> = bookmarks.filter { b ->
+    (folderFilter == null || b.folder == folderFilter) &&
+        (query.isBlank() ||
+            b.title.contains(query, ignoreCase = true) ||
+            b.url.contains(query, ignoreCase = true))
+}.let { list ->
+    when (sort) {
+        "oldest" -> list.sortedBy { it.createdAt }
+        "title" -> list.sortedBy { it.title.lowercase() }
+        else -> list.sortedByDescending { it.createdAt }
+    }
+}
+
+internal fun filterHistory(
+    history: List<HistoryEntry>, query: String, sort: String
+): List<HistoryEntry> = history.filter { h ->
+    query.isBlank() ||
+        h.title.contains(query, ignoreCase = true) ||
+        h.url.contains(query, ignoreCase = true)
+}.let { list ->
+    when (sort) {
+        "oldest" -> list.sortedBy { it.visitedAt }
+        "title" -> list.sortedBy { it.title.lowercase() }
+        else -> list.sortedByDescending { it.visitedAt }
+    }
+}
+
+internal fun filterDownloads(
+    snapshot: List<DownloadRecord>, media: Boolean, isPrivate: Boolean,
+    query: String, sort: String
+): List<DownloadRecord> = snapshot.filter { rec ->
+    rec.media == media && rec.isPrivate == isPrivate &&
+        (query.isBlank() ||
+            rec.title.contains(query, ignoreCase = true) ||
+            rec.fileName.contains(query, ignoreCase = true))
+}.let { list ->
+    when (sort) {
+        "oldest" -> list.sortedBy { it.addedAt }
+        "title" -> list.sortedBy { it.title.lowercase() }
+        else -> list.sortedByDescending { it.addedAt }
+    }
+}
+
+/** The History day groups, in first-seen order (groupBy
+ *  keeps encounter order, so a newest-first list groups
+ *  newest day first). */
+internal fun groupHistoryByDay(
+    shownHistory: List<HistoryEntry>
+): Map<String, List<HistoryEntry>> =
+    shownHistory.groupBy { dayLabel(it.visitedAt) }
+
 @Composable
 fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String) -> Unit) {
     val rev = store.revision
@@ -1210,14 +1312,18 @@ fun FavoritesScreen(store: PioneerStore, onBack: () -> Unit, onOpenUrl: (String)
                     }) { Text("Remove (${favSelected.size})") }
                 }
             }
-            val shown = sortFavourites(
-                store.favourites.filter { f ->
-                    query.isBlank() ||
-                        f.title.contains(query, ignoreCase = true) ||
-                        f.url.contains(query, ignoreCase = true)
-                },
-                favSort
-            )
+            // P-A2 (alpha.41): the filtered + sorted list,
+            // remembered — the screen already uses keyed items.
+            val shown = remember(rev, query, favSort) {
+                sortFavourites(
+                    store.favourites.filter { f ->
+                        query.isBlank() ||
+                            f.title.contains(query, ignoreCase = true) ||
+                            f.url.contains(query, ignoreCase = true)
+                    },
+                    favSort
+                )
+            }
             if (shown.isEmpty()) {
                 LibraryEmptyState(
                     icon = Icons.Filled.Favorite,
@@ -1594,6 +1700,11 @@ fun LibraryScreen(
             onValueChange = { downloadQuery = it },
             placeholder = "Search downloads"
         )
+        // P-A2 (alpha.41): one snapshot per composition —
+        // the screen called downloadsSnapshot() three times
+        // (action bar, delete, list); the list below is
+        // remembered off it.
+        val downloadSnapshot = remember(rev, progressRev) { store.downloadsSnapshot() }
         LibraryActionBar {
             TextButton(onClick = {
                 mediaSort = when (mediaSort) {
@@ -1630,7 +1741,7 @@ fun LibraryScreen(
                 }
             ) { Text(if (refreshing) "Refreshing…" else "Refresh status") }
             // Audit P-p4: records only — files stay.
-            if (store.downloadsSnapshot().any { it.media && it.status == "complete" }) {
+            if (downloadSnapshot.any { it.media && it.status == "complete" }) {
                 TextButton(onClick = { Downloads.clearCompletedRecords(store, true) }) {
                     Text("Clear completed")
                 }
@@ -1643,7 +1754,7 @@ fun LibraryScreen(
                 // Records only, files stay — same rule
                 // as "Clear completed" (audit P-p4).
                 TextButton(onClick = {
-                    store.downloadsSnapshot()
+                    downloadSnapshot
                         .filter { it.id in dlSelected && it.media == dlScreenMedia }
                         .forEach { rec ->
                             Downloads.deleteEngineStaging(context, store, rec)
@@ -1658,18 +1769,9 @@ fun LibraryScreen(
         // The offline library is for media downloads only; ordinary file
         // and image downloads live in the phone's Downloads folder
         // and on the Downloads page.
-        val mediaDownloads = store.downloadsSnapshot().filter { rec ->
-            rec.media && !rec.isPrivate &&
-                (downloadQuery.isBlank() ||
-                    rec.title.contains(downloadQuery, ignoreCase = true) ||
-                    rec.fileName.contains(downloadQuery, ignoreCase = true))
-        }.let { list ->
-            // Beta.64 #21: sort the offline library.
-            when (mediaSort) {
-                "oldest" -> list.sortedBy { it.addedAt }
-                "title" -> list.sortedBy { it.title.lowercase() }
-                else -> list.sortedByDescending { it.addedAt }
-            }
+        // Beta.64 #21: sort the offline library.
+        val mediaDownloads = remember(downloadSnapshot, downloadQuery, mediaSort) {
+            filterDownloads(downloadSnapshot, true, false, downloadQuery, mediaSort)
         }
         if (mediaDownloads.isEmpty()) {
             LibraryEmptyState(
@@ -1679,37 +1781,38 @@ fun LibraryScreen(
         }
         if (mediaDownloads.isNotEmpty()) {
             LazyColumn {
-                item {
+                item(key = "group-title") {
                     Column(
                         modifier = Modifier.padding(horizontal = 16.dp)
                     ) {
                         GroupTitle("Downloads")
-                        SettingsCard {
-                            mediaDownloads.forEachIndexed { i, rec ->
-                                if (i > 0) InsetDivider()
-                                DownloadRow(
-                                    rec = rec,
-                                    store = store,
-                                    selecting = dlSelecting,
-                                    selected = rec.id in dlSelected,
-                                    onToggleSelect = {
-                                        dlSelected =
-                                            if (rec.id in dlSelected) dlSelected - rec.id
-                                            else dlSelected + rec.id
-                                    },
-                                    showPlay = true,
-                                    showOpen = false,
-                                    showExport = true,
-                                    onExport = { target ->
-                                        exportTarget = target
-                                        exportLauncher.launch(target.fileName)
-                                    },
-                                    askDownloadNotif = askDownloadNotif,
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(24.dp))
                     }
+                }
+                itemsIndexed(mediaDownloads, key = { _, rec -> rec.id }) { i, rec ->
+                    GroupedRowCard(isFirst = i == 0, isLast = i == mediaDownloads.lastIndex) {
+                        DownloadRow(
+                            rec = rec,
+                            store = store,
+                            selecting = dlSelecting,
+                            selected = rec.id in dlSelected,
+                            onToggleSelect = {
+                                dlSelected =
+                                    if (rec.id in dlSelected) dlSelected - rec.id
+                                    else dlSelected + rec.id
+                            },
+                            showPlay = true,
+                            showOpen = false,
+                            showExport = true,
+                            onExport = { target ->
+                                exportTarget = target
+                                exportLauncher.launch(target.fileName)
+                            },
+                            askDownloadNotif = askDownloadNotif,
+                        )
+                    }
+                }
+                item(key = "group-spacer") {
+                    Spacer(Modifier.height(24.dp))
                 }
             }
         }
@@ -1827,6 +1930,11 @@ fun DownloadsScreen(
             android.os.Build.VERSION.SDK_INT >= 33 &&
                 !downloadNotificationsEnabled(context)
         }
+        // P-A2 (alpha.41): one snapshot per composition —
+        // the screen called downloadsSnapshot() four times
+        // (action bar, delete, both lists); the lists below
+        // are remembered off it.
+        val downloadSnapshot = remember(rev, progressRev) { store.downloadsSnapshot() }
         LibraryActionBar(
             notification = if (notifOff) {
                 {
@@ -1876,7 +1984,7 @@ fun DownloadsScreen(
                 }
             ) { Text(if (refreshing) "Refreshing…" else "Refresh status") }
             // Audit P-p4: records only — files stay.
-            if (store.downloadsSnapshot().any { !it.media && it.status == "complete" }) {
+            if (downloadSnapshot.any { !it.media && it.status == "complete" }) {
                 TextButton(onClick = { Downloads.clearCompletedRecords(store, false) }) {
                     Text("Clear completed")
                 }
@@ -1895,7 +2003,7 @@ fun DownloadsScreen(
                 // Records only, files stay — same rule
                 // as "Clear completed" (audit P-p4).
                 TextButton(onClick = {
-                    store.downloadsSnapshot()
+                    downloadSnapshot
                         .filter { it.id in dlSelected && it.media == dlScreenMedia }
                         .forEach { rec ->
                             Downloads.deleteEngineStaging(context, store, rec)
@@ -1910,33 +2018,15 @@ fun DownloadsScreen(
         // The Downloads page is for ordinary file and
         // image downloads only; media downloads live
         // in the Offline library.
-        val fileDownloads = store.downloadsSnapshot().filter { rec ->
-            !rec.media && !rec.isPrivate &&
-                (downloadQuery.isBlank() ||
-                    rec.title.contains(downloadQuery, ignoreCase = true) ||
-                    rec.fileName.contains(downloadQuery, ignoreCase = true))
-        }.let { list ->
-            // Beta.64 #21: sort file downloads.
-            when (fileSort) {
-                "oldest" -> list.sortedBy { it.addedAt }
-                "title" -> list.sortedBy { it.title.lowercase() }
-                else -> list.sortedByDescending { it.addedAt }
-            }
+        // Beta.64 #21: sort file downloads (and the private
+        // list below, same order).
+        val fileDownloads = remember(downloadSnapshot, downloadQuery, fileSort) {
+            filterDownloads(downloadSnapshot, false, false, downloadQuery, fileSort)
         }
         // Beta.64 #20: private file downloads, shown only
         // behind the confirm gate below.
-        val privateDownloads = store.downloadsSnapshot().filter { rec ->
-            !rec.media && rec.isPrivate &&
-                (downloadQuery.isBlank() ||
-                    rec.title.contains(downloadQuery, ignoreCase = true) ||
-                    rec.fileName.contains(downloadQuery, ignoreCase = true))
-        }.let { list ->
-            // Beta.64 #21: same order as the file list.
-            when (fileSort) {
-                "oldest" -> list.sortedBy { it.addedAt }
-                "title" -> list.sortedBy { it.title.lowercase() }
-                else -> list.sortedByDescending { it.addedAt }
-            }
+        val privateDownloads = remember(downloadSnapshot, downloadQuery, fileSort) {
+            filterDownloads(downloadSnapshot, false, true, downloadQuery, fileSort)
         }
         if (fileDownloads.isEmpty() && privateDownloads.isEmpty()) {
             LibraryEmptyState(
@@ -1946,45 +2036,63 @@ fun DownloadsScreen(
         }
         if (fileDownloads.isNotEmpty() || privateDownloads.isNotEmpty()) {
             LazyColumn {
-                item {
+                item(key = "group-title") {
                     Column(
                         modifier = Modifier.padding(horizontal = 16.dp)
                     ) {
                         GroupTitle("Downloads")
-                        SettingsCard {
-                            fileDownloads.forEachIndexed { i, rec ->
-                                if (i > 0) InsetDivider()
-                                DownloadRow(
-                                    rec = rec,
-                                    store = store,
-                                    selecting = dlSelecting,
-                                    selected = rec.id in dlSelected,
-                                    onToggleSelect = {
-                                        dlSelected =
-                                            if (rec.id in dlSelected) dlSelected - rec.id
-                                            else dlSelected + rec.id
-                                    },
-                                    showPlay = false,
-                                    showOpen = true,
-                                    showExport = false,
-                                    askDownloadNotif = askDownloadNotif,
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(24.dp))
                     }
                 }
+                if (fileDownloads.isEmpty()) {
+                    // The eager list rendered an empty card
+                    // here when only private downloads existed;
+                    // keep that render instead of dropping it.
+                    item(key = "group-empty-card") {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        ) {
+                            SettingsCard { }
+                        }
+                    }
+                }
+                itemsIndexed(fileDownloads, key = { _, rec -> rec.id }) { i, rec ->
+                    GroupedRowCard(isFirst = i == 0, isLast = i == fileDownloads.lastIndex) {
+                        DownloadRow(
+                            rec = rec,
+                            store = store,
+                            selecting = dlSelecting,
+                            selected = rec.id in dlSelected,
+                            onToggleSelect = {
+                                dlSelected =
+                                    if (rec.id in dlSelected) dlSelected - rec.id
+                                    else dlSelected + rec.id
+                            },
+                            showPlay = false,
+                            showOpen = true,
+                            showExport = false,
+                            askDownloadNotif = askDownloadNotif,
+                        )
+                    }
+                }
+                item(key = "group-spacer") {
+                    Spacer(Modifier.height(24.dp))
+                }
                 if (privateDownloads.isNotEmpty()) {
-                    item {
+                    item(key = "private-title") {
                         Column(
                             modifier = Modifier.padding(horizontal = 16.dp)
                         ) {
                             GroupTitle("Private downloads")
-                            if (!store.privateDownloadsGate.unlocked) {
-                                // Beta.64 #20: private content
-                                // stays hidden until the user
-                                // explicitly confirms, this
-                                // session only.
+                        }
+                    }
+                    if (!store.privateDownloadsGate.unlocked) {
+                        // Beta.64 #20: private content stays
+                        // hidden until the user explicitly
+                        // confirms, this session only.
+                        item(key = "private-gate") {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 16.dp)
+                            ) {
                                 PanelCard {
                                     Row(
                                         modifier = Modifier.fillMaxWidth()
@@ -2000,30 +2108,37 @@ fun DownloadsScreen(
                                         }
                                     }
                                 }
-                            } else {
-                                SettingsCard {
-                                    privateDownloads.forEachIndexed { i, rec ->
-                                        if (i > 0) InsetDivider()
-                                        DownloadRow(
-                                            rec = rec,
-                                            store = store,
-                                            selecting = false,
-                                            selected = false,
-                                            onToggleSelect = {},
-                                            showPlay = false,
-                                            showOpen = true,
-                                            showExport = false,
-                                            showStatusDetail = false,
-                                            askDownloadNotif = askDownloadNotif,
-                                        )
-                                    }
-                                }
+                            }
+                        }
+                    } else {
+                        itemsIndexed(privateDownloads, key = { _, rec -> rec.id }) { i, rec ->
+                            GroupedRowCard(isFirst = i == 0, isLast = i == privateDownloads.lastIndex) {
+                                DownloadRow(
+                                    rec = rec,
+                                    store = store,
+                                    selecting = false,
+                                    selected = false,
+                                    onToggleSelect = {},
+                                    showPlay = false,
+                                    showOpen = true,
+                                    showExport = false,
+                                    showStatusDetail = false,
+                                    askDownloadNotif = askDownloadNotif,
+                                )
+                            }
+                        }
+                        item(key = "private-hide") {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 16.dp)
+                            ) {
                                 TextButton(onClick = { store.privateDownloadsGate.hide() }) {
                                     Text("Hide private downloads")
                                 }
                             }
-                            Spacer(Modifier.height(24.dp))
                         }
+                    }
+                    item(key = "private-spacer") {
+                        Spacer(Modifier.height(24.dp))
                     }
                 }
             }
