@@ -14,7 +14,7 @@ import org.robolectric.annotation.Config
 /**
  * Import and Open (alpha.56): the player gains an explicit
  * entry that opens the system picker for a local video file
- * and plays it in the same player (OpenDocument, video/* —
+ * and plays it in the same player (OpenDocument, video/ only —
  * the same contract as the subtitle picker).
  *
  * What the harness can express without a real picker:
