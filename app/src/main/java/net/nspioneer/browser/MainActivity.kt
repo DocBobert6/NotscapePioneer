@@ -40,6 +40,7 @@ import net.nspioneer.browser.engine.EngineTab
 import net.nspioneer.browser.engine.FilterEngine
 import net.nspioneer.browser.engine.GeckoEngine
 import net.nspioneer.browser.engine.LongPressTarget
+import net.nspioneer.browser.engine.UpdateCheck
 import net.nspioneer.browser.media.PageActions
 import net.nspioneer.browser.ui.BookmarksScreen
 import net.nspioneer.browser.ui.BrowserScreen
@@ -862,6 +863,33 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching { Downloads.sweepOrphanBlobStaging(this@MainActivity, store) }
             runCatching { Downloads.sweepStaging(this@MainActivity, store) }
+            // alpha.43: opt-in update check — only when enabled,
+            // at most once a day; a newer version is a status
+            // line, nothing more. A failed check is silent.
+            if (store.setting(UpdateCheck.SETTING_ENABLED, "false") == "true" &&
+                UpdateCheck.isStale(
+                    store.setting(UpdateCheck.SETTING_LAST, ""),
+                    System.currentTimeMillis()
+                )
+            ) {
+                runCatching {
+                    when (val result = UpdateCheck.check()) {
+                        is UpdateCheck.Result.Available -> {
+                            UpdateCheck.saveLastCheck(store, result.remote)
+                            withContext(Dispatchers.Main) {
+                                engine.noteStatus(
+                                    "update available: " +
+                                        "${result.remote.versionName} — " +
+                                        "see Settings → About"
+                                )
+                            }
+                        }
+                        is UpdateCheck.Result.UpToDate ->
+                            UpdateCheck.saveLastCheck(store, result.remote)
+                        UpdateCheck.Result.Failed -> Unit
+                    }
+                }
+            }
             readCrashFileAndRecoverTrace()
         }
     }

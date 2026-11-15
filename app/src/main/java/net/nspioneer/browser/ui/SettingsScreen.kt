@@ -69,6 +69,7 @@ import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.engine.DE_AMP_KEY
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.SearchTemplate
+import net.nspioneer.browser.engine.UpdateCheck
 import net.nspioneer.browser.media.Downloads
 import org.mozilla.geckoview.StorageController
 import java.io.File
@@ -237,6 +238,14 @@ fun SettingsScreen(
     var confirmImport by remember { mutableStateOf<String?>(null) }
     var confirmClearAll by remember { mutableStateOf(false) }
     var confirmRenew by remember { mutableStateOf(false) }
+
+    // alpha.43: opt-in update check — the last stored result,
+    // refreshed by a manual check or the launch check.
+    var lastCheck by remember {
+        mutableStateOf(UpdateCheck.loadLastCheck(store))
+    }
+    var updateChecking by remember { mutableStateOf(false) }
+    var updateCheckFailed by remember { mutableStateOf(false) }
 
     // Backup export/import (alpha.10, Mariner's flow):
     // plain JSON through the document picker. No encrypted
@@ -1575,6 +1584,20 @@ fun SettingsScreen(
                 }
             }
 
+            // alpha.43: update-check row state — derived from
+            // the last stored check, not a live fetch.
+            val last = lastCheck
+            val updateAvailable = last != null &&
+                last.remote.versionCode > BuildConfig.VERSION_CODE
+            val checkNowSupporting = when {
+                updateChecking -> "Checking…"
+                updateCheckFailed -> "Last check failed — no connection"
+                last == null -> "Never checked"
+                updateAvailable ->
+                    "Version ${last.remote.versionName} is available"
+                else -> "Up to date — latest is ${last.remote.versionName}"
+            }
+
             GroupTitle("About")
             SettingsCard {
                 ActionRow(
@@ -1587,6 +1610,57 @@ fun SettingsScreen(
                     label = "Version",
                     supporting = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
                     onClick = { }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Check for updates",
+                    supporting = "Tell me when a new Pioneer version is available",
+                    checked = store.setting(
+                        UpdateCheck.SETTING_ENABLED, "false"
+                    ) == "true",
+                    onCheckedChange = {
+                        store.putSetting(
+                            UpdateCheck.SETTING_ENABLED, it.toString()
+                        )
+                    }
+                )
+                InsetDivider()
+                ActionRow(
+                    label = "Check now",
+                    supporting = checkNowSupporting,
+                    actionLabel = if (updateAvailable) "View" else "Check",
+                    onClick = {
+                        when {
+                            updateAvailable ->
+                                onOpenUrl(UpdateCheck.ACTIONS_URL)
+                            updateChecking -> Unit
+                            else -> {
+                                updateChecking = true
+                                updateCheckFailed = false
+                                scope.launch(Dispatchers.IO) {
+                                    val result = UpdateCheck.check()
+                                    withContext(Dispatchers.Main) {
+                                        updateChecking = false
+                                        when (result) {
+                                            is UpdateCheck.Result.Available,
+                                            is UpdateCheck.Result.UpToDate -> {
+                                                UpdateCheck.saveLastCheck(
+                                                    store, result.remote
+                                                )
+                                                lastCheck =
+                                                    UpdateCheck.LastCheck(
+                                                        result.remote,
+                                                        System.currentTimeMillis()
+                                                    )
+                                            }
+                                            UpdateCheck.Result.Failed ->
+                                                updateCheckFailed = true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 )
                 InsetDivider()
                 ActionRow(
