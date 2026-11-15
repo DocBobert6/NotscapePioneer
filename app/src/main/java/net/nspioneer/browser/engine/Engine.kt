@@ -298,6 +298,9 @@ interface Engine {
     // engine init, from the Settings toggle when the flag
     // flips on, and from the next page load as a fallback.
     fun installMainWorldExperiment()
+    // alpha.52: "probe MAIN world: off/unknown/accepted/
+    // rejected" — for Diagnostics
+    val mainWorldState: State<String>
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result
     // alpha.33: remove Google Search Fixer; its state reports it.

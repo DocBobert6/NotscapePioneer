@@ -346,6 +346,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 MainWorldExperiment.isEnabled(store)
             )
         )
+    override val mainWorldState: State<String> get() = _mainWorldState
 
     /** Refresh the MAIN-world experiment status line from the
      *  verdict (alpha.52: `mainWorldState` ←

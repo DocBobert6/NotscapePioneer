@@ -3694,6 +3694,13 @@ fun DiagnosticsScreen(
                 engine.mediaNetState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
+            // alpha.52: the MAIN-world experiment verdict —
+            // off until the flag flips on, unknown until the
+            // first report, then accepted or rejected.
+            Text(
+                engine.mainWorldState.value,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Text(
                 "— status —",
                 style = MaterialTheme.typography.labelLarge,
