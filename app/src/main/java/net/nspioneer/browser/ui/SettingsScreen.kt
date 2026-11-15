@@ -2177,6 +2177,8 @@ private fun PerSiteControlsContent(
                         InsetDivider()
                         ToggleRow(
                             label = "Ad blocking",
+                            supporting = "Off also allows this site's " +
+                                "third-party cookies",
                             checked = !site.disableBlocking,
                             onCheckedChange = {
                                 engine.setBlockingEnabled(host, it)
