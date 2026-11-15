@@ -287,6 +287,9 @@ interface Engine {
                                           // (FilterEngine.refreshAsync equivalent)
     val filterListsState: State<String>   // "N lists • N rules • updated …" |
                                           // "updating…" | "failed: …" — for Settings
+    // alpha.47: "webRequest onHeadersReceived: on/off · N MIME hits"
+    // — for Diagnostics
+    val headersReceivedState: State<String>
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result
     // alpha.33: remove Google Search Fixer; its state reports it.

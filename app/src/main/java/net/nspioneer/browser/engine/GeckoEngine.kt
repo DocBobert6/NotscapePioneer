@@ -155,6 +155,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // the new set lands.
         val prev = FilterEngine.onListsChanged
         FilterEngine.onListsChanged = { prev?.invoke(); refreshFilterListsState() }
+        // alpha.47: the onHeadersReceived state line refreshes
+        // the same way when the background script reports its
+        // state or a MIME hit lands.
+        it.onHeadersStateChanged = { refreshHeadersReceivedState() }
     }
 
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -289,6 +293,21 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     private fun refreshFilterListsState() {
         mainHandler.post {
             _filterListsState.value = blockingObserver.filterListsStateText()
+        }
+    }
+
+    private val _headersReceivedState =
+        mutableStateOf(blockingObserver.headersReceivedStateText())
+    override val headersReceivedState: State<String> get() = _headersReceivedState
+
+    /** Refresh the onHeadersReceived status line from the
+     *  blocking bridge (alpha.47: `headersReceivedState` ←
+     *  `headersReceivedStateText()`). Posted to the main
+     *  thread: the state message / MIME hits can arrive off
+     *  it. */
+    private fun refreshHeadersReceivedState() {
+        mainHandler.post {
+            _headersReceivedState.value = blockingObserver.headersReceivedStateText()
         }
     }
 
@@ -1230,7 +1249,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
-    override fun noteNetMedia(session: GeckoSession?, url: String) {
+    override fun noteNetMedia(session: GeckoSession?, url: String, mime: String? = null) {
+        // alpha.47: a MIME-classified observation counts a
+        // MIME hit for Diagnostics, before attribution.
+        if (!mime.isNullOrBlank() && BlockingObserver.mediaKindForMime(mime) != null) {
+            blockingObserver.noteMimeHit()
+        }
         // Background-script observations arrive with a null
         // session: attribute to the tab whose current host
         // matches the URL's host, falling back to the active
@@ -1246,7 +1270,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             }
             ?: currentTab
             ?: return
-        MediaLog.inspect(tab.id, url)
+        MediaLog.inspect(tab.id, url, mime)
         refreshTabMedia(tab)
     }
 

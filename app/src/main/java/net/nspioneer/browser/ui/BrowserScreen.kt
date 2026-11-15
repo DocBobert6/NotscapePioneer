@@ -3680,6 +3680,13 @@ fun DiagnosticsScreen(
                 engine.castRoutes.value,
                 style = MaterialTheme.typography.bodyMedium
             )
+            // alpha.47: the probe's response-header observation
+            // state — whether onHeadersReceived registered, and
+            // how many observations matched by MIME.
+            Text(
+                engine.headersReceivedState.value,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Text(
                 "— status —",
                 style = MaterialTheme.typography.labelLarge,

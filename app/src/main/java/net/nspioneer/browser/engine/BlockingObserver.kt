@@ -97,11 +97,44 @@ class BlockingObserver(private val host: BlockingHost) {
         /** "video" / "audio" for a media URL, null when the URL
          *  is not reportable media (not a stream extension, or a
          *  blob: URL). Pure, so unit tests pin it down. */
-        fun mediaKindFor(url: String): String? {
+        fun mediaKindFor(url: String, mime: String? = null): String? {
+            // alpha.47: when a response MIME is present (an
+            // `onHeadersReceived` observation) the MIME
+            // decides — a media MIME reports even for an
+            // extension-less URL, a non-media MIME vetoes
+            // even a media-looking URL. With no MIME (an
+            // `onBeforeRequest` observation) the URL regex
+            // decides, exactly as before.
+            if (!mime.isNullOrBlank()) return mediaKindForMime(mime)
             if (url.startsWith("blob:")) return null
             if (!STREAM_RE.containsMatchIn(url)) return null
             val lower = url.lowercase()
             return if (AUDIO_RE.containsMatchIn(lower)) "audio" else "video"
+        }
+
+        /** Response-header classification (alpha.47): the MIME
+         *  companion to [STREAM_RE]. A response whose
+         *  Content-Type matches is media even when its URL has
+         *  no media extension (YouTube
+         *  `googlevideo.com/videoplayback`, Twitch /
+         *  Dailymotion CDN URLs). Parameters after ';' are
+         *  stripped before matching; the match is
+         *  case-insensitive. `video/mp2t` is covered by
+         *  `video/*`. Must agree with background.js
+         *  `MEDIA_MIME_RE` and MediaLog's copy. */
+        private val MEDIA_MIME_RE = Regex(
+            """^(video/|audio/|application/x-mpegurl|application/dash\+xml)""",
+            RegexOption.IGNORE_CASE
+        )
+
+        /** "video" / "audio" for a response MIME, null when the
+         *  MIME is not media. Pure, so unit tests pin it down. */
+        fun mediaKindForMime(mime: String?): String? {
+            if (mime.isNullOrBlank()) return null
+            val type = mime.substringBefore(";").trim().lowercase()
+            if (type.isEmpty()) return null
+            if (!MEDIA_MIME_RE.containsMatchIn(type)) return null
+            return if (type.startsWith("audio/")) "audio" else "video"
         }
     }
 
@@ -111,6 +144,41 @@ class BlockingObserver(private val host: BlockingHost) {
      *  change). Until it connects, the background script gets its
      *  rules from the `rules-request` reply instead. */
     private var backgroundPort: WebExtension.Port? = null
+
+    /** Response-header observation state (alpha.47): whether
+     *  the background script registered `onHeadersReceived`
+     *  (null = not reported yet), and how many observations
+     *  matched by MIME. Read by the engine for Diagnostics.
+     *  The count is exact: both `media-net` sinks (the live
+     *  Worker C routing via `noteNetMedia`, and [onMediaNet])
+     *  funnel through [noteMimeHit]. */
+    var headersReceivedOn: Boolean? = null
+        private set
+    var mimeHits: Int = 0
+        private set
+
+    /** Fired when the on/off state arrives or a MIME hit
+     *  lands, so the engine can refresh its Diagnostics
+     *  state text (same shape as
+     *  `FilterEngine.onListsChanged`). */
+    var onHeadersStateChanged: (() -> Unit)? = null
+
+    /** Count one MIME-classified media observation. */
+    fun noteMimeHit() {
+        mimeHits++
+        onHeadersStateChanged?.invoke()
+    }
+
+    /** "webRequest onHeadersReceived: on/off · N MIME hits"
+     *  ("unknown" until the background script reports). */
+    fun headersReceivedStateText(): String {
+        val state = when (headersReceivedOn) {
+            true -> "on"
+            false -> "off"
+            null -> "unknown"
+        }
+        return "webRequest onHeadersReceived: $state · $mimeHits MIME hits"
+    }
 
     init {
         // Whenever the compiled set lands (disk load, refresh,
@@ -128,10 +196,11 @@ class BlockingObserver(private val host: BlockingHost) {
      * Handle one native message from the probe. Returns a
      * [GeckoResult] only for messages that carry a reply
      * (`cosmetic-query`, `rules-request`); returns null for
-     * fire-and-forget observations (`media-net`, `blocked`) and
-     * for types this observer does not own (`video-popup-tap`,
-     * `video-popup-longpress` — Worker C; anything else) so the
-     * delegate chain can continue.
+     * fire-and-forget observations (`media-net`, `blocked`,
+     * `headers-state`) and for types this observer does not
+     * own (`video-popup-tap`, `video-popup-longpress` —
+     * Worker C; anything else) so the delegate chain can
+     * continue.
      */
     fun handleNativeMessage(
         message: JSONObject,
@@ -146,6 +215,13 @@ class BlockingObserver(private val host: BlockingHost) {
         return when (message.optString("type")) {
             "media-net" -> {
                 onMediaNet(message)
+                null
+            }
+            // alpha.47: the background script's `headers-state`
+            // report — whether it registered
+            // `onHeadersReceived`.
+            "headers-state" -> {
+                onHeadersState(message.optBoolean("on", false))
                 null
             }
             "blocked" -> {
@@ -165,7 +241,12 @@ class BlockingObserver(private val host: BlockingHost) {
 
     private fun onMediaNet(message: JSONObject) {
         val url = message.optString("url")
-        val kind = mediaKindFor(url) ?: return
+        val mime = message.optString("mime").takeIf { it.isNotEmpty() }
+        val kind = mediaKindFor(url, mime) ?: return
+        // alpha.47: a MIME-classified observation counts a
+        // MIME hit for Diagnostics (kind != null with a MIME
+        // present means the MIME was media).
+        if (mime != null) noteMimeHit()
         val pageHost = message.optString("pageHost")
         val tabId = attributeTab(pageHost, message.optInt("tabId", -1))
         if (tabId < 0) {
@@ -176,6 +257,19 @@ class BlockingObserver(private val host: BlockingHost) {
             return
         }
         host.onMediaObserved(tabId, url, kind)
+    }
+
+    /** The background script's `headers-state` report
+     *  (alpha.47): whether it registered
+     *  `onHeadersReceived`. A status line marks the arrival
+     *  (Copy status shows it); the Diagnostics state text
+     *  carries the live value. */
+    private fun onHeadersState(on: Boolean) {
+        headersReceivedOn = on
+        host.noteStatus(
+            "webRequest onHeadersReceived: ${if (on) "on" else "off"}"
+        )
+        onHeadersStateChanged?.invoke()
     }
 
     private fun onBlockedReport(message: JSONObject) {

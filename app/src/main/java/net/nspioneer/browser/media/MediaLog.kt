@@ -86,24 +86,63 @@ object MediaLog {
         RegexOption.IGNORE_CASE
     )
 
+    /** Response-header classification (alpha.47): the MIME
+     *  companion to [streamPattern]. Must agree with
+     *  background.js `MEDIA_MIME_RE` and BlockingObserver's
+     *  copy. */
+    private val mediaMimePattern = Regex(
+        """^(video/|audio/|application/x-mpegurl|application/dash\+xml)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** "video" / "audio" for a response MIME, null when the
+     *  MIME is not media. */
+    fun mediaKindForMime(mime: String?): String? {
+        if (mime.isNullOrBlank()) return null
+        val type = mime.substringBefore(";").trim().lowercase()
+        if (type.isEmpty()) return null
+        if (!mediaMimePattern.containsMatchIn(type)) return null
+        return if (type.startsWith("audio/")) "audio" else "video"
+    }
+
     /**
      * The net half (Mariner `MediaLog.inspect`): one `media-net`
      * observation from the background `webRequest` observer.
      * `blob:` excluded; deduped per tab; kind audio vs video by
      * extension; label "stream (HLS)" / "stream (DASH)".
+     *
+     * alpha.47: when [mime] is present (an `onHeadersReceived`
+     * observation) the MIME decides — a media MIME records
+     * the URL even with no media extension (YouTube
+     * `videoplayback`); a non-media MIME vetoes the
+     * observation (a .mp4 served as text/html is an error
+     * page, not media). With no MIME the URL regex decides,
+     * exactly as before.
      */
-    fun inspect(tabId: Int, url: String) {
-        if (!streamPattern.containsMatchIn(url)) return
+    fun inspect(tabId: Int, url: String, mime: String? = null) {
         if (url.contains("blob:")) return
         val lower = url.lowercase()
-        val kind = if (audioPattern.containsMatchIn(lower)) "audio" else "video"
+        val kind: String
+        val label: String
+        if (!mime.isNullOrBlank()) {
+            val mimeType = mime.substringBefore(";").trim().lowercase()
+            kind = mediaKindForMime(mime) ?: return
+            label = when {
+                lower.contains(".m3u8") || mimeType == "application/x-mpegurl" -> "stream (HLS)"
+                lower.contains(".mpd") || mimeType == "application/dash+xml" -> "stream (DASH)"
+                else -> ""
+            }
+        } else {
+            if (!streamPattern.containsMatchIn(url)) return
+            kind = if (audioPattern.containsMatchIn(lower)) "audio" else "video"
+            label = when {
+                lower.contains(".m3u8") -> "stream (HLS)"
+                lower.contains(".mpd") -> "stream (DASH)"
+                else -> ""
+            }
+        }
         val current = byTab[tabId] ?: emptyList()
         if (current.any { it.url == url }) return
-        val label = when {
-            lower.contains(".m3u8") -> "stream (HLS)"
-            lower.contains(".mpd") -> "stream (DASH)"
-            else -> ""
-        }
         byTab[tabId] = current + DetectedMedia(url, kind, label, source = "net")
         revision++
     }

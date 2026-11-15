@@ -190,8 +190,17 @@ class ExtensionManager(
             // sender.session is null — the engine attributes
             // the URL by host match, falling back to the
             // active tab (design §7). Routed into MediaLog.
+            // alpha.47: a `media-net` from `onHeadersReceived`
+            // carries the response Content-Type as `mime`;
+            // URL-only `onBeforeRequest` observations carry
+            // none — the engine classifies by MIME when one
+            // is present, by URL otherwise.
             if (type == "media-net") {
-                host.noteNetMedia(sender.session, message.optString("url"))
+                host.noteNetMedia(
+                    sender.session,
+                    message.optString("url"),
+                    message.optString("mime").takeIf { it.isNotEmpty() }
+                )
                 return null
             }
             // alpha.10: Save offline — the content script
@@ -424,8 +433,11 @@ interface ProbeHost {
 
     /** Phase 3 (Worker A): a `media-net` webRequest
      *  observation. [session] is null for background-script
-     *  messages — the engine attributes by host match. */
-    fun noteNetMedia(session: GeckoSession?, url: String)
+     *  messages — the engine attributes by host match. [mime]
+     *  is the response Content-Type when the observation came
+     *  from `onHeadersReceived` (alpha.47); null for URL-only
+     *  `onBeforeRequest` observations. */
+    fun noteNetMedia(session: GeckoSession?, url: String, mime: String? = null)
     /** Phase 3 (Worker C): the video pop-up watcher ▶ button
      *  was tapped / long-pressed in [session]'s page. */
     fun noteVideoPopupTap(session: GeckoSession?, url: String)
