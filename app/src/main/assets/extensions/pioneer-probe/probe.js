@@ -328,9 +328,14 @@
       if (window.__nsVideoPopupInstalled) return;
       window.__nsVideoPopupInstalled = true;
       window.__nsVideoPopupOff = false;
-      // Per-site opt-out, asked once per page load. The app
-      // answers {type:"video-popup-off", off: bool}; until it
-      // answers the button is allowed (default off = false).
+      // Per-site opt-out + the global button option, asked
+      // once per page load. The app answers
+      // {type:"video-popup-off", off: bool, showButton: bool};
+      // until it answers the button is allowed (default
+      // off = false, showButton = true). A reply from an
+      // older build carries no showButton — the button stays
+      // on, as before.
+      window.__nsVideoPopupButton = true;
       try {
         browser.runtime.sendNativeMessage("pioneer", {
           type: "video-popup-query",
@@ -338,8 +343,11 @@
         }).then(function (reply) {
           if (reply && typeof reply.off === "boolean") {
             window.__nsVideoPopupOff = reply.off;
-            place();
           }
+          if (reply && typeof reply.showButton === "boolean") {
+            window.__nsVideoPopupButton = reply.showButton;
+          }
+          if (reply) place();
         }).catch(function () { /* opt-out unknown — button stays */ });
       } catch (e) { /* native bridge not ready */ }
       var btn = null;
@@ -359,6 +367,11 @@
       }
       function pick() {
         if (window.__nsVideoPopupOff) return null;
+        // alpha.51: the global button option — when off, no
+        // button on any video. The per-site opt-out above
+        // stays as is. (The video long-press below is a
+        // deliberate gesture, so it is not gated here.)
+        if (window.__nsVideoPopupButton === false) return null;
         if (document.fullscreenElement) return null;
         var vids = document.querySelectorAll("video");
         var best = null;
@@ -456,6 +469,65 @@
       window.addEventListener("resize", place);
       document.addEventListener("fullscreenchange", place);
       document.addEventListener("visibilitychange", place);
+      // alpha.51: long-press on the video element itself
+      // opens the media sheet — the pill is not the only
+      // way in. Document-level capture listeners, so videos
+      // added after load are covered without per-element
+      // bookkeeping; the pill is a separate element on top
+      // of the video, so a press on it never reaches here
+      // (its target is the pill div, not the video). The
+      // gate mirrors pick() minus size/in-view: the video
+      // is right under the finger, so only "playing, with
+      // a real source" matters. Deliberate gesture, so it
+      // is NOT gated on the per-site opt-out or the button
+      // option — those govern the uninvited button, not a
+      // user holding a video. The report reuses
+      // video-popup-longpress and sendLongPress, so the
+      // pill's tap-suppression (lastLongPressAt) and the
+      // app's allowCheck both apply unchanged. A short tap
+      // cancels the timer and does nothing — the page's own
+      // controls keep working.
+      var videoPressTimer = null;
+      var videoPressUrl = null;
+      function videoPressSrc(v) {
+        try {
+          if (!v || v.paused || v.currentTime <= 0 || v.readyState < 2) return null;
+          var src = v.currentSrc || v.src || "";
+          if (!src || src.indexOf("blob:") === 0) return null;
+          return src;
+        } catch (e) { return null; }
+      }
+      function cancelVideoPress() {
+        if (videoPressTimer) { clearTimeout(videoPressTimer); videoPressTimer = null; }
+        videoPressUrl = null;
+      }
+      document.addEventListener("pointerdown", function (e) {
+        try {
+          if (!e.target || e.target.tagName !== "VIDEO") return;
+          var src = videoPressSrc(e.target);
+          if (!src) return;
+          videoPressUrl = src;
+          if (videoPressTimer) clearTimeout(videoPressTimer);
+          videoPressTimer = setTimeout(function () {
+            videoPressTimer = null;
+            if (videoPressUrl) sendLongPress(videoPressUrl);
+            videoPressUrl = null;
+          }, 500);
+        } catch (err) { cancelVideoPress(); }
+      }, true);
+      ["pointerup", "pointercancel"].forEach(function (ev) {
+        document.addEventListener(ev, cancelVideoPress, true);
+      });
+      document.addEventListener("contextmenu", function (e) {
+        try {
+          if (!e.target || e.target.tagName !== "VIDEO") return;
+          var src = videoPressSrc(e.target);
+          if (!src) return;
+          e.stopPropagation(); e.preventDefault();
+          if (Date.now() - lastLongPressAt < 1000) return;
+          sendLongPress(src);
+        } catch (err) { /* the page keeps its own menu */ }
+      }, true);
       place();
     } catch (e) { /* a locked-down page simply never shows the button */ }
   }
