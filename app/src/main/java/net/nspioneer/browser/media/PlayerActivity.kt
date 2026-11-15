@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.Forward5
@@ -541,6 +542,30 @@ internal fun parseDashVariants(text: String): List<ParsedQuality> {
     return out.sortedByDescending { it.bandwidth }.distinctBy { it.label }
 }
 
+
+/** The MIME types the Import-and-Open picker offers (alpha.56). */
+internal val LOCAL_VIDEO_MIME_TYPES: Array<String> = arrayOf("video/*")
+
+/** Video extensions accepted when a provider reports no MIME type (alpha.56). */
+internal val LOCAL_VIDEO_EXTENSIONS: Set<String> = setOf(
+    "mp4", "m4v", "webm", "mkv", "mov", "avi", "3gp", "3g2",
+    "flv", "ts", "m2ts", "mts", "wmv", "mpg", "mpeg", "ogv", "f4v"
+)
+
+/**
+ * Import and Open (alpha.56): is this picked file a video?
+ * A reported MIME type decides — only video/* passes. With
+ * no MIME type the file name's extension decides against
+ * the known video list; anything else is declined plainly
+ * rather than handed to the player to fail on.
+ */
+internal fun isVideoFile(mimeType: String?, fileName: String?): Boolean {
+    val mime = mimeType?.substringBefore(";")?.trim()?.lowercase()
+    if (!mime.isNullOrBlank()) return mime.startsWith("video/")
+    val ext = fileName?.substringAfterLast('.', "")?.lowercase() ?: return false
+    return ext in LOCAL_VIDEO_EXTENSIONS
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(
@@ -555,6 +580,13 @@ fun PlayerScreen(
     onEnterPip: () -> Unit
 ) {
     val context = LocalContext.current
+    // alpha.56: Import and Open — the playlist is state,
+    // not the launch intent's list, so a picked local file
+    // can replace it (a single item) and every reader
+    // (queue sheet, title/host, resume positions, sibling
+    // discovery) follows the swap.
+    var playUrls by remember { mutableStateOf(urls) }
+    var playTitles by remember { mutableStateOf(titles) }
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
     val activePlayer: Player? = exoPlayer
@@ -566,11 +598,11 @@ fun PlayerScreen(
     // the player is built asynchronously.
     val activePlayerState = rememberUpdatedState(activePlayer)
 
-    fun buildItems(): List<MediaItem> = urls.mapIndexed { i, u ->
+    fun buildItems(): List<MediaItem> = playUrls.mapIndexed { i, u ->
         MediaItem.Builder()
             .setUri(u)
             .setMediaId(u)
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(titles.getOrNull(i) ?: "").build())
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(playTitles.getOrNull(i) ?: "").build())
             .build()
     }
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
@@ -599,11 +631,11 @@ fun PlayerScreen(
     // sibling discovery below, so a manual pick is never
     // cleared by it and discovery re-runs per item.
     var sidecarAuto by remember { mutableStateOf(false) }
-    fun buildItemsFor(forIndex: Int): List<MediaItem> = urls.mapIndexed { i, u ->
+    fun buildItemsFor(forIndex: Int): List<MediaItem> = playUrls.mapIndexed { i, u ->
         MediaItem.Builder()
             .setUri(u)
             .setMediaId(u)
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(titles.getOrNull(i) ?: "").build())
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(playTitles.getOrNull(i) ?: "").build())
             .setSubtitleConfigurations(
                 if (i == forIndex) sidecarSubs else emptyList()
             )
@@ -652,7 +684,7 @@ fun PlayerScreen(
     // always wins, and discovery re-runs per item.
     LaunchedEffect(currentIndex) {
         if (sidecarAuto) sidecarSubs = emptyList()
-        val u = urls.getOrNull(currentIndex) ?: return@LaunchedEffect
+        val u = playUrls.getOrNull(currentIndex) ?: return@LaunchedEffect
         val path = when {
             u.startsWith("file://") -> u.removePrefix("file://")
             u.startsWith("/") -> u
@@ -923,7 +955,7 @@ fun PlayerScreen(
     // through WebKit CookieManager (see PlayerNet).
     LaunchedEffect(currentIndex) {
         parsedQualities = emptyList()
-        val u = urls.getOrNull(currentIndex)
+        val u = playUrls.getOrNull(currentIndex)
             ?: return@LaunchedEffect
         if (!u.startsWith("http", ignoreCase = true)) {
             return@LaunchedEffect
@@ -1032,13 +1064,77 @@ fun PlayerScreen(
         }
     }
 
+    // alpha.56: Import and Open — a local video file picked
+    // with the system picker, played in the same player. The
+    // contract mirrors the subtitle picker above: an
+    // OpenDocument launcher, and a persistable read grant so
+    // the file stays playable for the session (the subtitle
+    // picker copies its bytes instead; a video is played from
+    // its own URI — copying gigabytes into filesDir would be
+    // the wrong trade). Cancel is the launcher's null return:
+    // nothing happens. A non-video pick is declined with a
+    // toast, never handed to the player. An undecodable file
+    // fails through the player's own error overlay.
+    fun openLocalVideo(uri: android.net.Uri) {
+        val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull()
+        val name = runCatching {
+            context.contentResolver.query(
+                uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null, null, null
+            )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: "Local video"
+        if (!isVideoFile(mime, name)) {
+            Toast.makeText(
+                context, "That file doesn't look like a video",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        playerError = null
+        sidecarSubs = emptyList()
+        sidecarAuto = false
+        selectedParsedBw = null
+        selectedVideoId = null
+        playUrls = listOf(uri.toString())
+        playTitles = listOf(name)
+        currentIndex = 0
+        val p = activePlayer ?: return
+        // Built from the URI directly, not buildItemsFor(0):
+        // the playUrls assignment above is not visible until
+        // recomposition, so a rebuild here would still read
+        // the old list. Later rebuilds (stall watchdog,
+        // sidecar changes) read playUrls and agree.
+        val item = MediaItem.Builder()
+            .setUri(uri.toString())
+            .setMediaId(uri.toString())
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(name).build())
+            .build()
+        p.setMediaItems(listOf(item), 0, 0)
+        p.prepare()
+        p.play()
+    }
+    val localVideoPicker = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts
+            .OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        openLocalVideo(uri)
+    }
+
     // Local ExoPlayer only: Pioneer has no PlaybackService /
     // MediaController in Phase 3 (see the file doc). The
     // local player is built at once and starts the queue;
     // there is no service handover and no 6s fallback.
     LaunchedEffect(Unit) {
-        val idx = startIndex.coerceIn(0, (urls.size - 1).coerceAtLeast(0))
-        val resume = PlaybackPositions.get(context, urls.getOrNull(idx))
+        val idx = startIndex.coerceIn(0, (playUrls.size - 1).coerceAtLeast(0))
+        val resume = PlaybackPositions.get(context, playUrls.getOrNull(idx))
         val exo = PlayerNet.buildPlayer(context.applicationContext).apply {
             setPlaybackSpeed(speed)
             volume = playerVolume
@@ -1081,7 +1177,7 @@ fun PlayerScreen(
                         refreshTracks(c)
                     }
                     if (state == Player.STATE_ENDED) {
-                        urls.getOrNull(c.currentMediaItemIndex)?.let { PlaybackPositions.clear(context, it) }
+                        playUrls.getOrNull(c.currentMediaItemIndex)?.let { PlaybackPositions.clear(context, it) }
                         // Beta.67 (1b): a live item must never
                         // accept ENDED. With the playlist no
                         // longer cached (see PlayerNet), a live
@@ -1104,7 +1200,7 @@ fun PlayerScreen(
                 // Save resume point before leaving. A private
                 // session leaves no trace (0.0.960): nothing is
                 // written, so nothing can surface in Continue.
-                val u = urls.getOrNull(c.currentMediaItemIndex)
+                val u = playUrls.getOrNull(c.currentMediaItemIndex)
                 if (shouldSavePlaybackPosition(privateSession) && u != null && c.playbackState != Player.STATE_ENDED) {
                     PlaybackPositions.put(
                         context, u, c.currentPosition.coerceAtLeast(0)
@@ -1142,7 +1238,7 @@ fun PlayerScreen(
     // Audit P-m1: save the position when playback pauses and
     // when the player goes away, not just on the 30s tick.
     fun savePositionNow(c: androidx.media3.common.Player) {
-        val u = urls.getOrNull(c.currentMediaItemIndex) ?: return
+        val u = playUrls.getOrNull(c.currentMediaItemIndex) ?: return
         if (c.currentPosition <= 0) return
         if (shouldSavePlaybackPosition(privateSession) &&
             c.playbackState != androidx.media3.common.Player.STATE_ENDED
@@ -1169,7 +1265,7 @@ fun PlayerScreen(
             // Audit P-m1: 1s ticker, position saved every 30s
             // (was 500ms / 5s) — the bar doesn't need more.
             if (ticks % 30 == 0) {
-                val u = urls.getOrNull(c.currentMediaItemIndex)
+                val u = playUrls.getOrNull(c.currentMediaItemIndex)
                 if (shouldSavePlaybackPosition(privateSession) && u != null && c.playbackState != Player.STATE_ENDED) {
                     PlaybackPositions.put(context, u, c.currentPosition.coerceAtLeast(0))
                 }
@@ -1204,7 +1300,7 @@ fun PlayerScreen(
             title = { Text("Queue") },
             text = {
                 LazyColumn {
-                    items(urls.size) { i ->
+                    items(playUrls.size) { i ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.fillMaxWidth()
@@ -1215,7 +1311,7 @@ fun PlayerScreen(
                                 .padding(vertical = 10.dp)
                         ) {
                             Text(
-                                titles.getOrNull(i).orEmpty(),
+                                playTitles.getOrNull(i).orEmpty(),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 color = if (i == currentIndex) {
@@ -1296,7 +1392,7 @@ fun PlayerScreen(
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    titles.getOrNull(currentIndex) ?: "",
+                    playTitles.getOrNull(currentIndex) ?: "",
                     color = Color.White,
                     style = MaterialTheme.typography.titleLarge
                 )
@@ -1589,7 +1685,7 @@ fun PlayerScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
-                    if (urls.size > 1) {
+                    if (playUrls.size > 1) {
                         FrostCircle(size = 48.dp, onClick = {
                             pokeControls()
                             activePlayer?.seekToPreviousMediaItem()
@@ -1679,7 +1775,7 @@ fun PlayerScreen(
                             SkipForwardIcon(skipSec)
                         }
                     }
-                    if (urls.size > 1) {
+                    if (playUrls.size > 1) {
                         FrostCircle(size = 48.dp, onClick = {
                             pokeControls()
                             activePlayer?.seekToNextMediaItem()
@@ -1920,7 +2016,7 @@ fun PlayerScreen(
                         Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                             val host = remember(currentIndex) {
                                 runCatching {
-                                    android.net.Uri.parse(urls.getOrNull(currentIndex) ?: "").host ?: ""
+                                    android.net.Uri.parse(playUrls.getOrNull(currentIndex) ?: "").host ?: ""
                                 }.getOrDefault("")
                             }
                             if (host.isNotBlank()) {
@@ -1933,7 +2029,7 @@ fun PlayerScreen(
                                 )
                             }
                             Text(
-                                titles.getOrNull(currentIndex) ?: "",
+                                playTitles.getOrNull(currentIndex) ?: "",
                                 color = Color.White,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
@@ -1946,6 +2042,26 @@ fun PlayerScreen(
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // alpha.56: Import and Open — always
+                            // rendered, never gated on tracks, so a
+                            // local file can be opened even when no
+                            // remote video loaded (or the remote one
+                            // failed; this bottom capsule stays
+                            // visible on error, unlike the top one).
+                            IconButton(
+                                onClick = {
+                                    pokeControls()
+                                    localVideoPicker.launch(LOCAL_VIDEO_MIME_TYPES)
+                                },
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.FolderOpen,
+                                    contentDescription = "Import and Open",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                             IconButton(
                                 onClick = {
                                     pokeControls()
@@ -2022,7 +2138,7 @@ fun PlayerScreen(
                                     )
                                 }
                             }
-                            if (urls.size > 1) {
+                            if (playUrls.size > 1) {
                                 IconButton(
                                     onClick = {
                                         pokeControls()
