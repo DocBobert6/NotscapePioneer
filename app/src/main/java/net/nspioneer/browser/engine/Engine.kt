@@ -290,6 +290,9 @@ interface Engine {
     // alpha.47: "webRequest onHeadersReceived: on/off · N MIME hits"
     // — for Diagnostics
     val headersReceivedState: State<String>
+    // alpha.50: "media-net sightings: N (M manifests)"
+    // — for Diagnostics
+    val mediaNetState: State<String>
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result
     // alpha.33: remove Google Search Fixer; its state reports it.

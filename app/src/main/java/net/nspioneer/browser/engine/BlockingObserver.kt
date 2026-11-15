@@ -96,8 +96,24 @@ class BlockingObserver(private val host: BlockingHost) {
 
         /** "video" / "audio" for a media URL, null when the URL
          *  is not reportable media (not a stream extension, or a
-         *  blob: URL). Pure, so unit tests pin it down. */
-        fun mediaKindFor(url: String, mime: String? = null): String? {
+         *  blob: URL). Pure, so unit tests pin it down.
+         *
+         *  alpha.50: segment noise is never media, and the
+         *  10 KB size floor applies where a size is known
+         *  ([contentLength] — an `onHeadersReceived`
+         *  observation; null for URL-only `onBeforeRequest`
+         *  observations, which keep today's behaviour).
+         *  Must agree with background.js `mediaKindFor` and
+         *  MediaLog's copy. */
+        fun mediaKindFor(
+            url: String,
+            mime: String? = null,
+            contentLength: Long? = null
+        ): String? {
+            if (isSegmentNoise(url)) return null
+            if (contentLength != null && contentLength < MEDIA_SIZE_FLOOR_BYTES &&
+                !isManifest(url, mime)
+            ) return null
             // alpha.47: when a response MIME is present (an
             // `onHeadersReceived` observation) the MIME
             // decides — a media MIME reports even for an
@@ -111,6 +127,48 @@ class BlockingObserver(private val host: BlockingHost) {
             val lower = url.lowercase()
             return if (AUDIO_RE.containsMatchIn(lower)) "audio" else "video"
         }
+
+        /** Segment noise (alpha.50, gap plan row A-3):
+         *  observations that are fragments of a manifest
+         *  stream, not media in their own right — each one
+         *  became a media-sheet row of its own. A manifest
+         *  (.m3u8 / .mpd) is never noise, even if its path
+         *  happens to carry a noise-shaped token. Pure, so
+         *  unit tests pin it down. Must agree with
+         *  background.js `isSegmentNoise` and MediaLog's
+         *  copy. */
+        private val MANIFEST_URL_RE = Regex(
+            """\.(m3u8|mpd)(\?|#|$)""",
+            RegexOption.IGNORE_CASE
+        )
+        private val SEGMENT_NOISE_RE = Regex(
+            """\.m4s(\?|#|$)|segment-|fragment|bytes=""",
+            RegexOption.IGNORE_CASE
+        )
+
+        fun isSegmentNoise(url: String): Boolean {
+            if (url.isEmpty()) return false
+            if (MANIFEST_URL_RE.containsMatchIn(url)) return false
+            return SEGMENT_NOISE_RE.containsMatchIn(url)
+        }
+
+        /** True for a manifest observation: a manifest URL,
+         *  or a manifest MIME. The size floor never applies
+         *  to one: HLS / DASH manifests are routinely a few
+         *  KB, and flooring them would break the detection
+         *  the floor exists to clean up. Pure, so unit
+         *  tests pin it down. */
+        fun isManifest(url: String, mime: String?): Boolean {
+            if (MANIFEST_URL_RE.containsMatchIn(url)) return true
+            val type = mime?.substringBefore(";")?.trim()?.lowercase()
+                ?: return false
+            return type == "application/x-mpegurl" ||
+                type == "application/dash+xml"
+        }
+
+        /** 10 KB size floor (alpha.50): an observation whose
+         *  size is known and below this is not media. */
+        const val MEDIA_SIZE_FLOOR_BYTES: Long = 10240L
 
         /** Response-header classification (alpha.47): the MIME
          *  companion to [STREAM_RE]. A response whose
@@ -168,6 +226,36 @@ class BlockingObserver(private val host: BlockingHost) {
         mimeHits++
         onHeadersStateChanged?.invoke()
     }
+
+    /** media-net sightings (alpha.50): every media-classified
+     *  `webRequest` observation the live sink counted, and how
+     *  many of them were manifests. Read by the engine for
+     *  Diagnostics. The count is exact: both `media-net`
+     *  sinks (the live Worker C routing via `noteNetMedia`,
+     *  and [onMediaNet]) funnel through
+     *  [noteMediaNetSighting], exactly like [noteMimeHit].
+     *  Sightings are observation events, not distinct rows —
+     *  a manifest re-fetched on seek counts again. */
+    var mediaNetSightings: Int = 0
+        private set
+    var mediaNetManifests: Int = 0
+        private set
+
+    /** Fired when a media-net sighting lands, so the engine
+     *  can refresh its Diagnostics state text (same shape as
+     *  [onHeadersStateChanged]). */
+    var onMediaNetStateChanged: (() -> Unit)? = null
+
+    /** Count one media-classified media-net observation. */
+    fun noteMediaNetSighting(isManifest: Boolean) {
+        mediaNetSightings++
+        if (isManifest) mediaNetManifests++
+        onMediaNetStateChanged?.invoke()
+    }
+
+    /** "media-net sightings: N (M manifests)". */
+    fun mediaNetStateText(): String =
+        "media-net sightings: $mediaNetSightings ($mediaNetManifests manifests)"
 
     /** "webRequest onHeadersReceived: on/off · N MIME hits"
      *  ("unknown" until the background script reports). */
@@ -242,11 +330,20 @@ class BlockingObserver(private val host: BlockingHost) {
     private fun onMediaNet(message: JSONObject) {
         val url = message.optString("url")
         val mime = message.optString("mime").takeIf { it.isNotEmpty() }
-        val kind = mediaKindFor(url, mime) ?: return
+        // alpha.50: the size floor reads the response
+        // Content-Length when the observation carries one
+        // (an `onHeadersReceived` report); absent or
+        // unparseable means no size is known, no floor.
+        val contentLength = message.optString("contentLength").toLongOrNull()
+        val kind = mediaKindFor(url, mime, contentLength) ?: return
         // alpha.47: a MIME-classified observation counts a
         // MIME hit for Diagnostics (kind != null with a MIME
         // present means the MIME was media).
         if (mime != null) noteMimeHit()
+        // alpha.50: count the sighting (and the manifest)
+        // for Diagnostics, before attribution — like the
+        // MIME hit above.
+        noteMediaNetSighting(isManifest(url, mime))
         val pageHost = message.optString("pageHost")
         val tabId = attributeTab(pageHost, message.optInt("tabId", -1))
         if (tabId < 0) {

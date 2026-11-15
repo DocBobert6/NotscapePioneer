@@ -199,7 +199,8 @@ class ExtensionManager(
                 host.noteNetMedia(
                     sender.session,
                     message.optString("url"),
-                    message.optString("mime").takeIf { it.isNotEmpty() }
+                    message.optString("mime").takeIf { it.isNotEmpty() },
+                    message.optString("contentLength").toLongOrNull()
                 )
                 return null
             }
@@ -436,8 +437,15 @@ interface ProbeHost {
      *  messages — the engine attributes by host match. [mime]
      *  is the response Content-Type when the observation came
      *  from `onHeadersReceived` (alpha.47); null for URL-only
-     *  `onBeforeRequest` observations. */
-    fun noteNetMedia(session: GeckoSession?, url: String, mime: String? = null)
+     *  `onBeforeRequest` observations. [contentLength] is the
+     *  response Content-Length when known (alpha.50, same
+     *  split); null when the observation carries no size. */
+    fun noteNetMedia(
+        session: GeckoSession?,
+        url: String,
+        mime: String? = null,
+        contentLength: Long? = null
+    )
     /** Phase 3 (Worker C): the video pop-up watcher ▶ button
      *  was tapped / long-pressed in [session]'s page. */
     fun noteVideoPopupTap(session: GeckoSession?, url: String)

@@ -95,6 +95,38 @@ object MediaLog {
         RegexOption.IGNORE_CASE
     )
 
+    /** Segment noise (alpha.50, gap plan row A-3): must
+     *  agree with background.js `isSegmentNoise` and
+     *  BlockingObserver's copy. */
+    private val manifestUrlPattern = Regex(
+        """\.(m3u8|mpd)(\?|#|$)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val segmentNoisePattern = Regex(
+        """\.m4s(\?|#|$)|segment-|fragment|bytes=""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** 10 KB size floor (alpha.50). */
+    const val MEDIA_SIZE_FLOOR_BYTES: Long = 10240L
+
+    fun isSegmentNoise(url: String): Boolean {
+        if (url.isEmpty()) return false
+        if (manifestUrlPattern.containsMatchIn(url)) return false
+        return segmentNoisePattern.containsMatchIn(url)
+    }
+
+    /** True for a manifest observation: a manifest URL, or
+     *  a manifest MIME. The size floor never applies to
+     *  one. */
+    fun isManifest(url: String, mime: String?): Boolean {
+        if (manifestUrlPattern.containsMatchIn(url)) return true
+        val type = mime?.substringBefore(";")?.trim()?.lowercase()
+            ?: return false
+        return type == "application/x-mpegurl" ||
+            type == "application/dash+xml"
+    }
+
     /** "video" / "audio" for a response MIME, null when the
      *  MIME is not media. */
     fun mediaKindForMime(mime: String?): String? {
@@ -118,9 +150,19 @@ object MediaLog {
      * observation (a .mp4 served as text/html is an error
      * page, not media). With no MIME the URL regex decides,
      * exactly as before.
+     *
+     * alpha.50: segment noise is never recorded, and the
+     * 10 KB size floor applies where [contentLength] is
+     * known (an `onHeadersReceived` observation; null for
+     * URL-only observations, which keep today's behaviour).
+     * A manifest is never floored.
      */
-    fun inspect(tabId: Int, url: String, mime: String? = null) {
+    fun inspect(tabId: Int, url: String, mime: String? = null, contentLength: Long? = null) {
         if (url.contains("blob:")) return
+        if (isSegmentNoise(url)) return
+        if (contentLength != null && contentLength < MEDIA_SIZE_FLOOR_BYTES &&
+            !isManifest(url, mime)
+        ) return
         val lower = url.lowercase()
         val kind: String
         val label: String

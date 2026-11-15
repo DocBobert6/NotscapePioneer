@@ -159,6 +159,9 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // the same way when the background script reports its
         // state or a MIME hit lands.
         it.onHeadersStateChanged = { refreshHeadersReceivedState() }
+        // alpha.50: the media-net sightings line refreshes
+        // the same way when a sighting lands.
+        it.onMediaNetStateChanged = { refreshMediaNetState() }
     }
 
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -308,6 +311,20 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     private fun refreshHeadersReceivedState() {
         mainHandler.post {
             _headersReceivedState.value = blockingObserver.headersReceivedStateText()
+        }
+    }
+
+    private val _mediaNetState =
+        mutableStateOf(blockingObserver.mediaNetStateText())
+    override val mediaNetState: State<String> get() = _mediaNetState
+
+    /** Refresh the media-net sightings status line from the
+     *  blocking bridge (alpha.50: `mediaNetState` ←
+     *  `mediaNetStateText()`). Posted to the main thread:
+     *  sightings can arrive off it. */
+    private fun refreshMediaNetState() {
+        mainHandler.post {
+            _mediaNetState.value = blockingObserver.mediaNetStateText()
         }
     }
 
@@ -1249,11 +1266,26 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
-    override fun noteNetMedia(session: GeckoSession?, url: String, mime: String?) {
+    override fun noteNetMedia(
+        session: GeckoSession?,
+        url: String,
+        mime: String?,
+        contentLength: Long?
+    ) {
         // alpha.47: a MIME-classified observation counts a
         // MIME hit for Diagnostics, before attribution.
         if (!mime.isNullOrBlank() && BlockingObserver.mediaKindForMime(mime) != null) {
             blockingObserver.noteMimeHit()
+        }
+        // alpha.50: count the sighting for Diagnostics
+        // (before attribution, like the MIME hit above).
+        // The classifier is the same one MediaLog applies
+        // below, so the count and the sheet agree — a
+        // filtered observation counts in neither.
+        if (BlockingObserver.mediaKindFor(url, mime, contentLength) != null) {
+            blockingObserver.noteMediaNetSighting(
+                BlockingObserver.isManifest(url, mime)
+            )
         }
         // Background-script observations arrive with a null
         // session: attribute to the tab whose current host
@@ -1270,7 +1302,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             }
             ?: currentTab
             ?: return
-        MediaLog.inspect(tab.id, url, mime)
+        MediaLog.inspect(tab.id, url, mime, contentLength)
         refreshTabMedia(tab)
     }
 

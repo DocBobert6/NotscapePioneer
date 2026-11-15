@@ -3687,6 +3687,13 @@ fun DiagnosticsScreen(
                 engine.headersReceivedState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
+            // alpha.50: media-net sightings — total
+            // observations and how many were manifests, for
+            // the Gate 3 YouTube finder row.
+            Text(
+                engine.mediaNetState.value,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Text(
                 "— status —",
                 style = MaterialTheme.typography.labelLarge,
