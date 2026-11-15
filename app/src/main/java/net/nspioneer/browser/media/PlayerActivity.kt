@@ -554,7 +554,7 @@ internal val LOCAL_VIDEO_EXTENSIONS: Set<String> = setOf(
 
 /**
  * Import and Open (alpha.56): is this picked file a video?
- * A reported MIME type decides — only video/* passes. With
+ * A reported MIME type decides — only a video/ MIME passes. With
  * no MIME type the file name's extension decides against
  * the known video list; anything else is declined plainly
  * rather than handed to the player to fail on.
