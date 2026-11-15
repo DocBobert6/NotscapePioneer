@@ -15,6 +15,14 @@
  *     observed segment URLs are transient and signed. They are
  *     reported as-is, pass-through only; the app never re-fetches
  *     them without the page's cookies. Do not pretend otherwise.
+ *     Response-header classification (alpha.47): the URL-only
+ *     observer never matches extension-less media URLs
+ *     (YouTube googlevideo.com/videoplayback, Twitch /
+ *     Dailymotion CDN URLs). `onHeadersReceived` sees the
+ *     response Content-Type, which catches them — the MIME
+ *     decides when one is known, and a non-media MIME vetoes
+ *     even a media-looking URL (a .mp4 served as text/html is
+ *     an error page, not media).
  *
  *  2. BLOCK (Mariner's lists, second layer after uBlock Origin):
  *     `webRequestBlocking` cancels requests the compiled rule set
@@ -73,6 +81,15 @@
 
   var STREAM_RE = /\.(m3u8|mpd|mp4|webm|mkv|mov|mp3|m4a|aac|ogg|opus|flac|wav|m4v|ts)(\?|#|$)/i;
   var AUDIO_RE = /\.(mp3|m4a|aac|ogg|opus|flac|wav)(\?|#|$)/i;
+
+  /* Response-header classification (alpha.47): the MIME
+   * companion to STREAM_RE. A response whose Content-Type
+   * matches is media even when its URL has no media
+   * extension. Parameters after ';' are stripped before
+   * matching; the match is case-insensitive. `video/mp2t`
+   * is covered by `video/`. Must agree with the Kotlin
+   * copies in BlockingObserver and MediaLog. */
+  var MEDIA_MIME_RE = /^(video\/|audio\/|application\/x-mpegurl|application\/dash\+xml)/i;
 
   /* Registrable-domain heuristic, mirroring FilterEngine's
    * (no-Guava) sameSite: last two labels, unless they form a
@@ -340,7 +357,25 @@
     return documentCategory(url, pageHost) !== null;
   }
 
-  function mediaKindFor(url) {
+  /* "video" / "audio" for a response MIME, null when the
+   * MIME is not media. */
+  function mediaKindForMime(mime) {
+    if (!mime) return null;
+    var type = String(mime).split(";")[0].trim().toLowerCase();
+    if (!type) return null;
+    if (!MEDIA_MIME_RE.test(type)) return null;
+    return type.indexOf("audio/") === 0 ? "audio" : "video";
+  }
+
+  /* MIME-authoritative classification: when a response MIME
+   * is known (onHeadersReceived) the MIME decides — a media
+   * MIME reports, a non-media MIME vetoes even a
+   * media-looking URL. With no MIME (onBeforeRequest) the
+   * URL regex decides, exactly as before. */
+  function mediaKindFor(url, mime) {
+    if (mime !== null && mime !== undefined && String(mime).length > 0) {
+      return mediaKindForMime(mime);
+    }
     if (!url || url.indexOf("blob:") === 0) return null;
     if (!STREAM_RE.test(url)) return null;
     return AUDIO_RE.test(url.toLowerCase()) ? "audio" : "video";
@@ -367,10 +402,12 @@
     }).catch(function () { return fallbackHost || ""; });
   }
 
-  function reportObservation(type, url, kind, category, tabId, pageHost) {
+  function reportObservation(type, url, kind, category, tabId, pageHost, mime, contentLength) {
     var msg = { type: type, url: url, tabId: tabId, pageHost: pageHost || "" };
     if (kind) msg.kind = kind;
     if (category !== null && category !== undefined) msg.category = category;
+    if (mime) msg.mime = mime;
+    if (contentLength) msg.contentLength = contentLength;
     sendNative(msg);
   }
 
@@ -478,6 +515,38 @@
     return { requestHeaders: headers };
   }
 
+  /* Response-header observation (alpha.47): the
+   * onBeforeRequest observer is URL-only, so extension-less
+   * media URLs never match. onHeadersReceived sees the
+   * response Content-Type (and Content-Length), which
+   * catches them. The report is the same `media-net`
+   * message with two new fields: `mime` and
+   * `contentLength`. MediaLog dedupes by URL, so a URL
+   * already reported by onBeforeRequest is not listed
+   * twice. Observation only — nothing is cancelled or
+   * modified here. */
+  function onHeadersReceived(details) {
+    var url = details.url || "";
+    if (!url || (url.indexOf("http://") !== 0 && url.indexOf("https://") !== 0)) {
+      return {};
+    }
+    var headers = details.responseHeaders || [];
+    var contentType = "";
+    var contentLength = "";
+    for (var i = 0; i < headers.length; i++) {
+      var name = String(headers[i].name || "").toLowerCase();
+      if (name === "content-type") contentType = String(headers[i].value || "");
+      else if (name === "content-length") contentLength = String(headers[i].value || "");
+    }
+    var kind = mediaKindFor(url, contentType);
+    if (!kind) return {};
+    var pageHost = hostFromUrl(details.originUrl || details.documentUrl || "");
+    pageHostForTab(details.tabId, pageHost).then(function (host) {
+      reportObservation("media-net", url, kind, null, details.tabId, host, contentType, contentLength);
+    });
+    return {};
+  }
+
   /* ---- startup: native port + initial rules ---- */
 
   function requestRules() {
@@ -529,6 +598,28 @@
     );
   }
 
+  /* Response-header observation, guarded exactly like
+   * onBeforeRequest above: if GeckoView does not expose
+   * onHeadersReceived, nothing changes and the probe keeps
+   * working on URL-only observations. The registration is
+   * wrapped so a rejected listener cannot take down the
+   * state report below it. The app is told the outcome
+   * either way (headers-state), so Diagnostics can show
+   * `webRequest onHeadersReceived: on/off · N MIME hits`. */
+  var headersReceivedOn = false;
+  if (typeof browser !== "undefined" && browser.webRequest &&
+      browser.webRequest.onHeadersReceived) {
+    try {
+      browser.webRequest.onHeadersReceived.addListener(
+        onHeadersReceived,
+        { urls: ["<all_urls>"] },
+        ["responseHeaders"]
+      );
+      headersReceivedOn = true;
+    } catch (e) { /* listener rejected; probe keeps working URL-only */ }
+  }
+  sendNative({ type: "headers-state", on: headersReceivedOn });
+
   /* Node test harness: the matcher is exported without the
    * browser wiring, so the Kotlin↔JS agreement check can run
    * it against the same compiled rule set and sample table. */
@@ -539,6 +630,7 @@
       isDocumentBlocked: isDocumentBlocked,
       documentCategory: documentCategory,
       mediaKindFor: mediaKindFor,
+      mediaKindForMime: mediaKindForMime,
       sameSite: sameSite,
       registrableDomain: registrableDomain,
       CAT_ADS: CAT_ADS,
