@@ -1249,7 +1249,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
-    override fun noteNetMedia(session: GeckoSession?, url: String, mime: String? = null) {
+    override fun noteNetMedia(session: GeckoSession?, url: String, mime: String?) {
         // alpha.47: a MIME-classified observation counts a
         // MIME hit for Diagnostics, before attribution.
         if (!mime.isNullOrBlank() && BlockingObserver.mediaKindForMime(mime) != null) {
