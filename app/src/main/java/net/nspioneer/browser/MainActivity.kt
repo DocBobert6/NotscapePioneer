@@ -5,6 +5,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Choreographer
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -25,6 +28,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.data.TabSnapshot
@@ -94,6 +101,11 @@ class MainActivity : ComponentActivity() {
     // + Store.saveClosedTabs). Private tabs are never recorded.
     private val closedTabs = mutableStateListOf<TabSnapshot>()
     private val homeTabIds = mutableStateSetOf<Int>()
+    // P-A4 (alpha.38): tabs restored from the saved session
+    // whose sessions were left unopened at creation (see
+    // restoreTabSession). Consumed by runDeferredLaunchWork.
+    private val deferredRestoredTabs = mutableListOf<EngineTab>()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var browserBackHandler: (() -> Boolean)? = null
     private var extensionPrompt by mutableStateOf<ExtensionPrompt?>(null)
     private var longPressTarget by mutableStateOf<LongPressTarget?>(null)
@@ -126,39 +138,12 @@ class MainActivity : ComponentActivity() {
         // the main thread or setContent.
         FilterEngine.initAsync(this)
 
-        // A previous run crashed: surface the crash line in the
-        // status panel so Copy status carries it (the app keeps
-        // no other crash record — see installCrashHandler).
-        runCatching {
-            val crashFile = File(filesDir, "crash-last.log")
-            var crashStamp: String? = null
-            if (crashFile.exists()) {
-                val first = crashFile.readLines().firstOrNull() ?: ""
-                if (first.isNotBlank()) {
-                    engine.noteStatus("last crash: $first")
-                    // First line is "[$stamp] thread=… …" — the
-                    // stamp is the crash time a recovered trace
-                    // is marked with (alpha.26).
-                    crashStamp = Regex("""\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]""")
-                        .find(first)?.groupValues?.getOrNull(1)
-                }
-            }
-            // alpha.26: a trace left running when the app ended
-            // (crash, force-stop, OS kill) survives in the trace
-            // file — recover it so Diagnostics can show it and
-            // Copy status can copy it. A normally-stopped trace
-            // deletes its file, so there is nothing to recover.
-            // A trace file with no crash record is still
-            // recovered, marked as ended-while-tracing.
-            if (engine.recoverCrashedTrace(crashStamp)) {
-                engine.noteStatus("recovered trace from previous run")
-            }
-        }
-
-        // alpha.27: staged blob files no download references
-        // any more (dialog dismissed, process died) are swept
-        // so the staging dir never fills with orphans.
-        runCatching { Downloads.sweepOrphanBlobStaging(this, store) }
+        // P-A4 (alpha.38): the previous-run crash line, the
+        // crashed-trace recovery, and the orphan-blob sweep used
+        // to run here, on the launch path before setContent.
+        // They now run after the first frame — see
+        // runDeferredLaunchWork() (disk reads off the main
+        // thread, status lines posted back to it).
 
         // alpha.10: Save offline — the probe's `page-html`
         // answer arrives here; save the snapshot + record it,
@@ -457,6 +442,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        // P-A4 (alpha.38): the deferred launch work (Cast
+        // discovery, startup private wipe, restored-session
+        // opens, orphan-blob sweep, crash-file read + trace
+        // recovery) runs after the first frame — see
+        // runDeferredLaunchWork().
+        runAfterFirstFrame { runDeferredLaunchWork() }
     }
 
     override fun onResume() {
@@ -785,31 +777,154 @@ class MainActivity : ComponentActivity() {
             return
         }
         saved.forEach { snapshot ->
+            // P-A4 (alpha.38): the tab is created WITHOUT
+            // opening its session — the native session open and
+            // the restore/load wait for the deferred launch step
+            // (runDeferredLaunchWork, after the first frame), so
+            // a many-tab restore no longer blocks the first
+            // frame. The snapshot's URL/title are pinned at
+            // creation, so the bar and the tab grid read them
+            // before the session opens.
             // Batch 2: a saved session state restores the tab
             // whole — history, scroll, zoom, form data — with
             // no load() afterwards. Without one (a pre-alpha.6
             // save, or a tab whose state never pushed) fall back
             // to the URL; the scroll rides the probe.
             val stateJson = snapshot.sessionState.ifBlank { null }
-            val tab = engine.createTab(
-                isPrivate = false,
+            val url = snapshot.url.ifBlank { null }
+            val tab = engine.createDeferredTab(
+                snapshotUrl = snapshot.url,
+                snapshotTitle = snapshot.title,
                 restoreStateJson = stateJson,
+                loadUrl = if (stateJson == null) url else null,
                 desktopMode = snapshot.desktopMode,
                 scrollY = snapshot.scrollY
             )
             wireTab(tab)
             tabs.add(tab)
-            if (stateJson == null) {
-                val url = snapshot.url.ifBlank { null }
-                if (url == null) {
-                    homeTabIds.add(tab.id)
-                } else {
-                    tab.load(url)
-                }
+            deferredRestoredTabs.add(tab)
+            if (stateJson == null && url == null) {
+                homeTabIds.add(tab.id)
             }
         }
         activeTabIndex = store.tabSessionActive.coerceIn(0, tabs.lastIndex)
-        persistTabSession()
+        // P-A4: no persistTabSession() here any more. The store
+        // already holds exactly these snapshots — re-saving them
+        // now would overwrite their session states with blanks
+        // (the states only arrive with the deferred restore, a
+        // frame later, via onSessionStateChange), and the active
+        // index above is the round-trip of the value just read.
+        // The next persist (tab switch, close, onPause) saves
+        // the restored states.
+    }
+
+    // ------------------------------------------------------------------
+    // P-A4 (alpha.38): deferred launch work
+    // ------------------------------------------------------------------
+
+    /** Run [block] once, after the first frame has been
+     *  presented. Two frame callbacks: the first fires while the
+     *  first frame is being produced, the second only after it
+     *  was presented — so the deferred work can never delay the
+     *  first frame itself. No-op when the activity is finishing
+     *  or destroyed (e.g. a rotation before the first frame). */
+    private fun runAfterFirstFrame(block: () -> Unit) {
+        var first = true
+        Choreographer.getInstance().postFrameCallback(object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (isFinishing || isDestroyed) return
+                if (first) {
+                    first = false
+                    Choreographer.getInstance().postFrameCallback(this)
+                } else {
+                    block()
+                }
+            }
+        })
+    }
+
+    /** The launch work that used to run synchronously in
+     *  onCreate before setContent, now after the first frame:
+     *  Cast discovery, the startup private-context wipe, the
+     *  restored-session opens, and — off the main thread — the
+     *  orphan-blob sweep and the crash-file read + crashed-trace
+     *  recovery. Everything here still runs, just later; the app
+     *  behaves identically once it has. */
+    private fun runDeferredLaunchWork() {
+        // Main-thread items (Gecko / Cast APIs need the main
+        // thread).
+        engine.startCastDiscovery()
+        engine.wipePrivateContextAtStartup()
+        openDeferredSessions()
+        // Disk I/O off the main thread; status lines are posted
+        // back to it (see readCrashFileAndRecoverTrace).
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { Downloads.sweepOrphanBlobStaging(this@MainActivity, store) }
+            readCrashFileAndRecoverTrace()
+        }
+    }
+
+    /** Open the restored tabs' sessions: the active tab first,
+     *  so its page starts loading at once, the rest as one
+     *  posted batch — background tabs whose pages load in the
+     *  background. A tab whose session is already open (an
+     *  intent loaded into it first) is left alone by
+     *  openDeferredTab. */
+    private fun openDeferredSessions() {
+        val restored = deferredRestoredTabs.toList()
+        deferredRestoredTabs.clear()
+        if (restored.isEmpty()) return
+        val active = activeTab
+        val ordered = listOfNotNull(active?.takeIf { it in restored }) +
+            restored.filter { it !== active }
+        ordered.firstOrNull()?.let { engine.openDeferredTab(it) }
+        val rest = ordered.drop(1)
+        if (rest.isNotEmpty()) {
+            mainHandler.post { rest.forEach { engine.openDeferredTab(it) } }
+        }
+    }
+
+    /** The crash-file read + crashed-trace recovery that used
+     *  to run in onCreate. Runs on an IO thread (this is the
+     *  possibly-large read — the trace file is uncapped, audit
+     *  P-B7); the status lines and recovered-trace state are
+     *  posted to the main thread. */
+    private suspend fun readCrashFileAndRecoverTrace() {
+        // A previous run crashed: surface the crash line in the
+        // status panel so Copy status carries it (the app keeps
+        // no other crash record — see installCrashHandler).
+        var crashStamp: String? = null
+        var firstLine: String? = null
+        runCatching {
+            val crashFile = File(filesDir, "crash-last.log")
+            if (crashFile.exists()) {
+                // First line only — readLines() would read the
+                // whole file for one line.
+                firstLine = crashFile.bufferedReader().use { it.readLine() }
+                    ?.takeIf { it.isNotBlank() }
+                // First line is "[$stamp] thread=… …" — the
+                // stamp is the crash time a recovered trace
+                // is marked with (alpha.26).
+                crashStamp = firstLine?.let {
+                    Regex("""\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]""")
+                        .find(it)?.groupValues?.getOrNull(1)
+                }
+            }
+        }
+        // alpha.26: a trace left running when the app ended
+        // (crash, force-stop, OS kill) survives in the trace
+        // file — recover it so Diagnostics can show it and
+        // Copy status can copy it. A normally-stopped trace
+        // deletes its file, so there is nothing to recover.
+        // A trace file with no crash record is still
+        // recovered, marked as ended-while-tracing.
+        val traceLines = engine.readRecoveredTraceLines()
+        withContext(Dispatchers.Main) {
+            firstLine?.let { engine.noteStatus("last crash: $it") }
+            if (engine.recoverCrashedTraceLines(traceLines, crashStamp)) {
+                engine.noteStatus("recovered trace from previous run")
+            }
+        }
     }
 
     // ------------------------------------------------------------------
