@@ -228,9 +228,9 @@ interface Engine {
     // gap). Do not pretend otherwise in the UI: the site-info row says
     // what it disables.
     fun setBlockingEnabled(host: String, enabled: Boolean)
-    fun refreshFilterLists()              // re-download + re-parse the 7 lists
+    fun refreshFilterLists()              // re-download + re-parse the lists
                                           // (FilterEngine.refreshAsync equivalent)
-    val filterListsState: State<String>   // "7 lists • N rules • updated …" |
+    val filterListsState: State<String>   // "N lists • N rules • updated …" |
                                           // "updating…" | "failed: …" — for Settings
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result

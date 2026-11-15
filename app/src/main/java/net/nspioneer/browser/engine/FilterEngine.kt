@@ -127,7 +127,7 @@ object FilterEngine {
         "/analytics.js", "/beacon", "/pixel.gif", "prebid", "adsbygoogle"
     )
 
-    /** The 7 lists, in this order — the indices matter, because a
+    /** The 8 lists, in this order — the indices matter, because a
      *  new list is appended last so cached indices never shift. */
     val listUrls = listOf(
         "https://easylist.to/easylist/easylist.txt",
@@ -140,14 +140,26 @@ object FilterEngine {
         "https://filters.adtidy.org/extension/ublock/filters/11.txt",
         // uBlock Origin's own filters.
         "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt",
-        // AdGuard Base — appended LAST so cached indices never shift.
-        "https://filters.adtidy.org/extension/ublock/filters/2.txt"
+        // AdGuard Base.
+        "https://filters.adtidy.org/extension/ublock/filters/2.txt",
+        // Phishing Army — phishing/malware domains (alpha.31,
+        // Safe Browsing local-first edition). Plain domain
+        // list, one per line; aggregates PhishTank, OpenPhish,
+        // CERT.PL, Phishunt, urlscan.io, PhishStats, StalkPhish,
+        // URLAbuse and AntiPhish.org. Free for personal and
+        // individual use (CC BY-NC-4.0 — Pioneer is a free,
+        // non-commercial personal project, so the term is met).
+        // ~145k domains, regenerated several times a day
+        // (4-hour expiry). Explicitly false-positive scrubbed:
+        // shared hosting and dynamic DNS are not blocked
+        // wholesale. Appended LAST so cached indices never shift.
+        "https://phishing.army/download/phishing_army_blocklist.txt"
     )
 
     val listNames = listOf(
         "EasyList", "EasyPrivacy", "StevenBlack hosts",
         "AdGuard Tracking Protection", "AdGuard Mobile Ads",
-        "uBlock Origin filters", "AdGuard Base"
+        "uBlock Origin filters", "AdGuard Base", "Phishing Army"
     )
 
     // ------------------------------------------------------------------
@@ -163,6 +175,11 @@ object FilterEngine {
     @Volatile private var genericSelectors: List<String> = emptyList()
     @Volatile private var domainSelectors: Map<String, List<String>> = emptyMap()
     @Volatile private var docHosts: Set<String> = emptySet()
+    /** alpha.31: phishing/malware domains from list 7
+     *  (Phishing Army), kept apart from the ad/tracker hosts:
+     *  a navigation to one warns with a full-page
+     *  interstitial instead of silently blocking. */
+    @Volatile private var phishingHosts: Set<String> = emptySet()
     @Volatile private var cosmeticExcGeneric: Set<String> = emptySet()
     @Volatile private var cosmeticExcDomain: Map<String, List<String>> = emptyMap()
     @Volatile private var genericHideOffHosts: Set<String> = emptySet()
@@ -302,7 +319,10 @@ object FilterEngine {
     )
 
     private const val COMPILED_MAGIC = 0x4E464331
-    private const val COMPILED_VERSION = 3
+    // v4 (alpha.31): the phishingHosts set, appended after
+    // hideOff. Older caches are rejected by the version check
+    // and fall back to the text parse.
+    private const val COMPILED_VERSION = 4
 
     @Volatile var ruleCount: Int = 0
         private set
@@ -509,12 +529,18 @@ object FilterEngine {
         val excGeneric = HashSet<String>()
         val excDomain = HashMap<String, MutableList<String>>()
         val hideOff = HashSet<String>()
+        /** alpha.31: phishing/malware domains (list 7,
+         *  Phishing Army) — kept apart from the ad/tracker
+         *  hosts so a navigation to one can warn with an
+         *  interstitial instead of silently blocking. */
+        val phishingHosts = HashSet<String>()
 
         fun isEmpty() = hosts.isEmpty() && scoped.isEmpty() &&
-            generic.isEmpty()
+            generic.isEmpty() && phishingHosts.isEmpty()
 
         fun total() = hosts.size +
-            scoped.values.sumOf { it.size } + generic.size
+            scoped.values.sumOf { it.size } + generic.size +
+            phishingHosts.size
 
         /** $document/$popup rule count: pure document hosts plus
          *  scoped rules carrying the document flag. Popunder /
@@ -542,6 +568,7 @@ object FilterEngine {
                 excDomain.getOrPut(k) { mutableListOf() }.addAll(v)
             }
             hideOff.addAll(other.hideOff)
+            phishingHosts.addAll(other.phishingHosts)
         }
     }
 
@@ -550,19 +577,23 @@ object FilterEngine {
      *  hosts = ads (adware/malware domains), 3 AdGuard Tracking
      *  Protection = trackers, 4 AdGuard Mobile Ads = ads,
      *  5 uAssets filters = ads, 6 AdGuard Base = ads (its primary
-     *  purpose is ad blocking; its tracker rules are a minority). */
+     *  purpose is ad blocking; its tracker rules are a minority),
+     *  7 Phishing Army = other (safety, not ads/trackers). */
     internal fun categoryForList(i: Int): Int = when (i) {
         1, 3 -> CAT_TRACKER
+        7 -> CAT_OTHER
         else -> CAT_ADS
     }
 
     /** Parse one list's text (or a free-text ABP block) into
-     *  [data] under list index [i]. Index 2 is the hosts file;
-     *  index 99 is a custom list (its category is passed in). */
+     *  [data] under list index [i]. Index 2 is the hosts file,
+     *  index 7 is the plain-domain phishing list, index 99 is
+     *  a custom list (its category is passed in). */
     internal fun parseInto(
         i: Int, text: String, data: FilterData, category: Int = categoryForList(i)
     ) {
         if (i == 2) parseHosts(text, data.hosts)
+        else if (i == 7) parseDomains(text, data.phishingHosts)
         else parse(
             text, data.hosts, data.exceptions, data.scoped,
             data.generic, data.perDomain, data.docHosts,
@@ -584,6 +615,7 @@ object FilterEngine {
             scopedRules = data.scoped.values.sumOf { it.size },
             genericSelectors = data.generic.size,
             documentRules = data.documentRuleCount(),
+            phishingHosts = data.phishingHosts.size,
             total = data.total()
         )
     }
@@ -595,6 +627,7 @@ object FilterEngine {
         val scopedRules: Int,
         val genericSelectors: Int,
         val documentRules: Int,
+        val phishingHosts: Int = 0,
         val total: Int
     )
 
@@ -609,6 +642,7 @@ object FilterEngine {
         cosmeticExcGeneric = data.excGeneric
         cosmeticExcDomain = data.excDomain
         genericHideOffHosts = data.hideOff
+        phishingHosts = data.phishingHosts
         cssCache = null
         documentStartScript = buildDocumentStartScript(
             chunkCosmeticSelectors(
@@ -620,7 +654,8 @@ object FilterEngine {
             genericHideOffHosts
         )
         ruleCount = data.hosts.size +
-            data.scoped.values.sumOf { it.size }
+            data.scoped.values.sumOf { it.size } +
+            data.phishingHosts.size
         updatedAt = newest
         onListsChanged?.invoke()
     }
@@ -648,6 +683,7 @@ object FilterEngine {
         cosmeticExcGeneric = emptySet()
         cosmeticExcDomain = emptyMap()
         genericHideOffHosts = emptySet()
+        phishingHosts = emptySet()
         documentStartScript = ""
         cssCache = null
         userNetRules = emptyList()
@@ -763,6 +799,15 @@ object FilterEngine {
                     // error body must not replace a good list on disk.
                     val sane = text.length > 50_000 && when (i) {
                         2 -> text.contains("0.0.0.0")
+                        // 7: plain domains — the first real line
+                        // must look like a domain, so a captive
+                        // portal HTML page can never pass.
+                        7 -> text.lineSequence().map { it.trim() }
+                            .firstOrNull {
+                                it.isNotEmpty() && !it.startsWith("#") &&
+                                    !it.startsWith("!")
+                            }?.let { isDomainLine(it.lowercase()) }
+                            ?: false
                         else -> text.contains("||") && !text.trimStart().startsWith("<")
                     }
                     if (!sane) return@runCatching
@@ -1006,6 +1051,7 @@ object FilterEngine {
                 writeStrSet(out, data.excGeneric)
                 writeStrListMap(out, data.excDomain)
                 writeStrSet(out, data.hideOff)
+                writeStrSet(out, data.phishingHosts)
                 out.writeLong(newest)
             }
             val target = File(d, "compiled.bin")
@@ -1074,6 +1120,7 @@ object FilterEngine {
                 data.excGeneric.addAll(readStrSet(inp))
                 readStrListMap(inp, data.excDomain)
                 data.hideOff.addAll(readStrSet(inp))
+                data.phishingHosts.addAll(readStrSet(inp))
                 val newest = inp.readLong()
                 if (data.hosts.isEmpty()) null
                 else data to newest
@@ -1482,6 +1529,36 @@ object FilterEngine {
         }
     }
 
+    /** A domain is a label-dot-label chain: letters, digits,
+     *  hyphens (never leading or trailing a label), dots
+     *  between labels. Shared by [parseDomains] and the
+     *  refresh sanity check for list 7. */
+    private fun isDomainLine(s: String): Boolean {
+        if (!s.contains('.')) return false
+        if (!s.any { it.isLetter() }) return false
+        return s.all { it.isLetterOrDigit() || it == '.' || it == '-' } &&
+            !s.startsWith(".") && !s.startsWith("-") &&
+            !s.endsWith(".") && !s.endsWith("-") &&
+            !s.contains("..") && !s.contains(".-") &&
+            !s.contains("-.")
+    }
+
+    /** Plain-domain list format (alpha.31, list 7 Phishing
+     *  Army): one domain per line, `#`/`!` comment lines.
+     *  Kept verbatim, including the list's own intentional
+     *  test domains (amiprotected.it) — they are the built-in
+     *  self-test for the interstitial, not phishing reports. */
+    internal fun parseDomains(text: String, hosts: MutableSet<String>) {
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#") ||
+                line.startsWith("!")
+            ) continue
+            val host = line.lowercase()
+            if (isDomainLine(host)) hosts.add(host)
+        }
+    }
+
     /** Player/CDN hosts that must never be host-blocked (see parse note). */
     private val neverBlockHosts = setOf(
         "googlevideo.com", "googleapis.com", "youtube.com", "ytimg.com",
@@ -1787,6 +1864,30 @@ object FilterEngine {
             host, path, page, wantException = false, onlyDocument = true
         ) != null
     }
+
+    /** alpha.31: true when [host] (or a parent domain) is a
+     *  listed phishing/malware domain (list 7, Phishing Army).
+     *  Consulted by the navigation guard only — never for
+     *  subresource requests, and never by [blockCategory], so
+     *  the phishing set cannot silently break a page: a hit
+     *  always warns with the interstitial first. The same
+     *  vetoes as [isDocumentBlocked] apply: a never-block host
+     *  or an explicit @@ exception for the host wins, so a
+     *  user who knows a flagged domain is safe can whitelist
+     *  it. Per-site disableBlocking does NOT veto — phishing
+     *  protection is safety, not ad blocking, and Chrome's
+     *  Safe Browsing does not switch off with it either. */
+    fun isPhishingHost(host: String): Boolean {
+        val h = host.lowercase().trimEnd('.')
+        if (h.isEmpty()) return false
+        if (matches(neverBlockHosts, h)) return false
+        if (matches(exceptionHosts, h)) return false
+        return matches(phishingHosts, h)
+    }
+
+    /** Live phishing-domain count (list 7), for Settings /
+     *  diagnostics. */
+    fun phishingHostsCount(): Int = phishingHosts.size
 
     // ------------------------------------------------------------------
     // Cosmetics

@@ -63,6 +63,21 @@ example.com#@#.generic-ad
 ||shared.example.net^
 """
 
+        /** Fixed sample phishing list (parsed as list 7, plain
+         *  domains — alpha.31). */
+        const val SAMPLE_PHISHING = """
+# Phishing Army sample
+# Expires: 4 hours
+phish.example.com
+login-stealer.example.net
+sub.bad.example
+UPPER.EXAMPLE.ORG
+not-a-domain
+no-dot-here
+a..b.example
+amiprotected.it
+"""
+
         /** The sample-URL table: url, isMainFrame, pageHost,
          *  expected category (null = allow). */
         data class Row(
@@ -313,5 +328,68 @@ example.com#@#.generic-ad
         assertTrue(compiled.scoped.any { it.host == "cdn.example.net" })
         assertTrue(compiled.scoped.any { it.host == "sneaky.example" && it.document })
         assertEquals(2, compiled.userNet.size)
+    }
+
+    @Test
+    fun phishingDomainsParseAsPlainDomainList() {
+        val data = FilterEngine.FilterData()
+        FilterEngine.parseInto(7, SAMPLE_PHISHING, data)
+        assertEquals(
+            setOf(
+                "phish.example.com", "login-stealer.example.net",
+                "sub.bad.example", "upper.example.org",
+                "amiprotected.it"
+            ),
+            data.phishingHosts
+        )
+        assertTrue(data.hosts.isEmpty())
+        assertFalse(data.isEmpty())
+        assertEquals(FilterEngine.CAT_OTHER, FilterEngine.categoryForList(7))
+        val counts = FilterEngine.parseListCounts(7, SAMPLE_PHISHING)
+        assertEquals(5, counts.phishingHosts)
+        assertEquals(0, counts.hosts)
+        assertEquals(5, counts.total)
+    }
+
+    @Test
+    fun phishingHostLookupWalksParentDomainsAndHonoursVetoes() {
+        val data = FilterEngine.FilterData()
+        FilterEngine.parseInto(7, SAMPLE_PHISHING, data)
+        // Never-block veto: a listed player host never warns.
+        data.phishingHosts.add("youtube.com")
+        // @@ exception veto: an explicitly excepted host never warns.
+        FilterEngine.parseInto(0, "@@||login-stealer.example.net^\n", data)
+        FilterEngine.loadForTests(data)
+        assertTrue(FilterEngine.isPhishingHost("phish.example.com"))
+        assertTrue(FilterEngine.isPhishingHost("evil.phish.example.com"))
+        assertTrue(FilterEngine.isPhishingHost("sub.bad.example"))
+        assertTrue(FilterEngine.isPhishingHost("deep.sub.bad.example"))
+        assertTrue(FilterEngine.isPhishingHost("UPPER.EXAMPLE.ORG"))
+        assertTrue(FilterEngine.isPhishingHost("amiprotected.it"))
+        assertTrue(FilterEngine.isPhishingHost("www.amiprotected.it"))
+        assertFalse(FilterEngine.isPhishingHost("clean.example.com"))
+        assertFalse(FilterEngine.isPhishingHost("youtube.com"))
+        assertFalse(FilterEngine.isPhishingHost("login-stealer.example.net"))
+        assertFalse(FilterEngine.isPhishingHost(""))
+    }
+
+    @Test
+    fun phishingHostsNeverBlockSilently() {
+        val data = FilterEngine.FilterData()
+        FilterEngine.parseInto(7, SAMPLE_PHISHING, data)
+        FilterEngine.loadForTests(data)
+        // A phishing host is never a silent block: main-frame
+        // loads return null (the interstitial warns instead),
+        // and subresource loads are not blocked by the set.
+        assertNull(
+            FilterEngine.blockCategory(
+                "https://phish.example.com/x", true, true, true, "news.example"
+            )
+        )
+        assertNull(
+            FilterEngine.blockCategory(
+                "https://phish.example.com/x.js", false, true, true, "news.example"
+            )
+        )
     }
 }

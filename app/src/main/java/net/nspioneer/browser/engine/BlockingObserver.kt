@@ -383,7 +383,7 @@ class BlockingObserver(private val host: BlockingHost) {
     }
 
     /** Settings status line for the filter lists (Engine
-     *  `filterListsState`, design §5): "7 lists • N rules •
+     *  `filterListsState`, design §5): "N lists • N rules •
      *  updated …" | "updating…" | "Lists not downloaded yet
      *  (built-in rules active)". There is no "failed" state to
      *  report: a refresh that fails leaves the previous good
@@ -394,12 +394,12 @@ class BlockingObserver(private val host: BlockingHost) {
             val whenText = if (FilterEngine.updatedAt > 0) {
                 DateFormat.getDateInstance().format(Date(FilterEngine.updatedAt))
             } else "—"
-            "7 lists • ${FilterEngine.ruleCount} rules • updated $whenText"
+            "${FilterEngine.listUrls.size} lists • ${FilterEngine.ruleCount} rules • updated $whenText"
         }
         else -> "Lists not downloaded yet (built-in rules active)"
     }
 
-    /** Re-download + re-parse the 7 lists (Engine
+    /** Re-download + re-parse the lists (Engine
      *  `refreshFilterLists`, design §5). The push to the
      *  background script happens from `FilterEngine.onListsChanged`
      *  when the new set lands. */
