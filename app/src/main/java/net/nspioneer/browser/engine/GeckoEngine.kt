@@ -127,6 +127,21 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         statusPanel.status(line)
     }
 
+    /** Translate (alpha.45): the on-device Bergamot/WASM
+     *  translator. The manager owns the offer state machine;
+     *  the engine maps its own tabs to TranslateTab holders
+     *  for it (GeckoTab is private to this class). */
+    private val translationManager = TranslationManager(
+        store = store,
+        status = { line -> statusPanel.status(line) },
+        postToMain = { r -> mainHandler.post(r) },
+        tabForSession = { session ->
+            tabs.firstOrNull { it.session === session }?.let { tab ->
+                TranslateTab(tab.id, tab.session, tab.url.value)
+            }
+        },
+    )
+
     /** Phase 3 blocking bridge (Worker A): owns the app side
      *  of the probe's blocking messages (`blocked`,
      *  `cosmetic-query`, `rules-request` / `rules-update`) and
@@ -161,6 +176,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 blockingObserver.syncBlockingFlags()
             }
         }
+        // alpha.45: the translator's WASM device gate, once,
+        // fire-and-forget — the result lands in
+        // translationManager.supported and gates every offer.
+        translationManager.checkSupported()
     }
 
     /** The Activity hosting this engine, for fullscreen
@@ -352,6 +371,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             .globalPrivacyControlEnabled(
                 store.setting("gpc", "true") == "true"
             )
+            // alpha.45: let the toolkit offer translation on
+            // foreign-language pages (the offer itself is
+            // gated by TranslationManager — engine support,
+            // the six-language setting, never-translate).
+            .translationsOfferPopup(true)
             .build()
         val runtime = GeckoRuntime.create(appContext, settings)
         // alpha.44: fingerprinting protection, gated on the
@@ -601,6 +625,9 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // either: answer it as Deny (once) before the session
         // closes (alpha.14).
         popupController.cancelPendingForTab(own.id)
+        // alpha.45: drop the tab's translate state (offer,
+        // detected language, translated flag).
+        translationManager.onTabClosed(own.id)
         MediaLog.clear(own.id)
         tabs.remove(own)
         if (currentTab === own) currentTab = null
@@ -632,6 +659,9 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun onTabSelected(tab: EngineTab) {
         val own = tab as? GeckoTab ?: return
         selectedTab = own
+        translationManager.onTabSelected(
+            TranslateTab(own.id, own.session, own.url.value)
+        )
         if (own.session.isOpen) {
             runCatching {
                 own.session.setActive(true)
@@ -859,6 +889,39 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun answerPopupDecision(choice: PopupChoice) =
         popupController.answerPending(choice)
     override fun dismissPopupDecision() = popupController.dismissPending()
+
+    // Translate (alpha.45): the manager owns the state
+    // machine; the engine only forwards. The offer's
+    // session is resolved from the offer's own tab, not the
+    // selected tab — the user may have switched tabs while
+    // the offer was up.
+    override val translateSupported: State<Boolean?>
+        get() = translationManager.supported
+    override val translateOffer: State<TranslateOffer?>
+        get() = translationManager.offer
+    override fun answerTranslateOffer(choice: TranslateChoice) {
+        val tabId = translationManager.offer.value?.tabId
+        val session = tabs.firstOrNull { it.id == tabId }?.session
+        translationManager.answerOffer(choice, session)
+    }
+    override val translatePageState: State<TranslatePageState>
+        get() = translationManager.pageState
+    override fun translatePage() = translationManager.translateCurrentPage()
+    override fun restorePageTranslation() = translationManager.restoreCurrentPage()
+    override val translateModelStates: State<List<TranslateModelState>>
+        get() = translationManager.modelStates
+    override fun refreshTranslateModelStates() =
+        translationManager.refreshModelStates()
+    override val translateNeverSites: State<List<String>>
+        get() = translationManager.neverSites
+    override fun refreshTranslateNeverSites() =
+        translationManager.refreshNeverSites()
+    override fun removeTranslateNeverSite(host: String) =
+        translationManager.removeNeverSite(host)
+    override fun setTranslateLanguageEnabled(code: String, enabled: Boolean) =
+        translationManager.setLanguageEnabled(code, enabled)
+    override fun isTranslateLanguageEnabled(code: String): Boolean =
+        translationManager.isLanguageEnabled(code)
 
     // ------------------------------------------------------------------
     // Batch 4: settings the engine enforces
@@ -1504,6 +1567,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 blockingObserver.noteContentBlocked(own.id, category)
             }
         })
+
+        // alpha.45: the translator's offer/state delegate —
+        // one shared instance owned by TranslationManager;
+        // the engine only routes the session to a tab.
+        session.setTranslationsSessionDelegate(translationManager.delegate)
 
         session.navigationDelegate = object : GeckoSession.NavigationDelegate {
             override fun onLocationChange(

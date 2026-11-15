@@ -406,6 +406,36 @@ interface Engine {
     // user's word, sets the tab's safeBrowsingBypass and
     // loads the URL. (tabId, url).
     var onSafeBrowsingWarn: ((tabId: Int, url: String) -> Unit)?
+
+    // ---- Translate (alpha.45) ----
+    // Device gate: null until the WASM check returns,
+    // false when this device cannot run the translator.
+    val translateSupported: State<Boolean?>
+    // The pending offer dialog for the selected tab
+    // (null when none). The shell renders the offer from
+    // this state and answers it via answerTranslateOffer.
+    val translateOffer: State<TranslateOffer?>
+    // Answer the offer dialog (NOT_NOW only dismisses it;
+    // the menu row still offers the translation).
+    fun answerTranslateOffer(choice: TranslateChoice)
+    // What the selected tab can do about translation now
+    // (drives the menu row's label / visibility).
+    val translatePageState: State<TranslatePageState>
+    // Menu action: translate the selected tab's page.
+    fun translatePage()
+    // Menu action: restore the selected tab's page.
+    fun restorePageTranslation()
+    // Per-language model states, for the Settings rows
+    // (loaded lazily by refreshTranslateModelStates).
+    val translateModelStates: State<List<TranslateModelState>>
+    fun refreshTranslateModelStates()
+    // The never-translate site list, for Settings.
+    val translateNeverSites: State<List<String>>
+    fun refreshTranslateNeverSites()
+    fun removeTranslateNeverSite(host: String)
+    // One language on/off in the six-language setting.
+    fun setTranslateLanguageEnabled(code: String, enabled: Boolean)
+    fun isTranslateLanguageEnabled(code: String): Boolean
 }
 
 // ---- Phase 3: downloads ----
