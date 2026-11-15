@@ -119,8 +119,8 @@ class BlockingObserver(private val host: BlockingHost) {
          *  `googlevideo.com/videoplayback`, Twitch /
          *  Dailymotion CDN URLs). Parameters after ';' are
          *  stripped before matching; the match is
-         *  case-insensitive. `video/mp2t` is covered by
-         *  `video/*`. Must agree with background.js
+         *  case-insensitive. `video/mp2t` is covered by the
+         *  `video/` prefix. Must agree with background.js
          *  `MEDIA_MIME_RE` and MediaLog's copy. */
         private val MEDIA_MIME_RE = Regex(
             """^(video/|audio/|application/x-mpegurl|application/dash\+xml)""",
