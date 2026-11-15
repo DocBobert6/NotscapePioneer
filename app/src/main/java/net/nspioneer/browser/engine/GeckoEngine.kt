@@ -111,6 +111,26 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 settings.setFingerprintingProtectionPrivateBrowsing(true)
             }
         }
+
+        /** Alpha.53: whether a committed top-level navigation
+         *  clears the tab's media log. True only for a different
+         *  http(s) URL from the last navigated one. A same-URL
+         *  reload keeps the log (the probe re-reports the same
+         *  URLs and MediaLog dedupes by URL), and about:blank /
+         *  non-http(s) navigations never clear it. The checks
+         *  mirror the onLocationChange guards exactly, so this
+         *  is true exactly when the delegate reaches the clear
+         *  — which is why the delegate computes it before the
+         *  guards mutate lastNavigatedUrl. */
+        internal fun shouldClearMediaLogOnNavigate(
+            lastNavigatedUrl: String?,
+            url: String,
+        ): Boolean {
+            if (url == lastNavigatedUrl) return false
+            if (url == "about:blank") return false
+            if (!url.startsWith("http://") && !url.startsWith("https://")) return false
+            return true
+        }
     }
 
     private val appContext = context.applicationContext
@@ -1722,10 +1742,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 tab.url.value = if (url == "about:blank") "" else (url ?: "")
                 currentTab = tab
                 val u = url ?: return
+                // alpha.53: the tab's media log belongs to the
+                // page that produced it. A committed navigation
+                // to a different http(s) URL clears it, so the
+                // picker never shows the previous page's videos
+                // next to the new page's. Computed before the
+                // guards below mutate lastNavigatedUrl.
+                val clearMediaLog = shouldClearMediaLogOnNavigate(tab.lastNavigatedUrl, u)
                 if (u == tab.lastNavigatedUrl) return
                 if (u == "about:blank") return
                 if (!u.startsWith("http://") && !u.startsWith("https://")) return
                 tab.lastNavigatedUrl = u
+                if (clearMediaLog) MediaLog.clear(tab.id)
                 tab.onNavigate?.invoke(u, tab.title.value)
                 // Batch 4: per-site JavaScript. The load path
                 // (GeckoTab.load) applies the value before
