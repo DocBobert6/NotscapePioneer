@@ -1,5 +1,6 @@
 package net.nspioneer.browser.engine
 
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import org.json.JSONObject
 import org.mozilla.geckoview.AllowOrDeny
@@ -14,7 +15,8 @@ import org.mozilla.geckoview.WebExtensionController
  *
  * Carried from the Phase 1 spike (MainActivity, commit 4609fbb5):
  * the built-in probe extension (media + EME reporting) and the
- * uBlock Origin install from AMO. One deliberate change from the
+ * approved-extension installs from AMO (see ApprovedExtensions).
+ * One deliberate change from the
  * spike: the spike AUTO-APPROVED the uBlock install prompt. Phase 2
  * NEVER auto-approves — [WebExtensionController.PromptDelegate]
  * calls [Engine.onExtensionInstallPrompt] and waits for the shell's
@@ -45,21 +47,15 @@ class ExtensionManager(
 ) {
 
     companion object {
-        private const val UBLOCK_AMO_URL =
-            "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
-        private const val UBLOCK_ID = "uBlock0@raymondhill.net"
         private const val PROBE_LOCATION = "resource://android/assets/extensions/pioneer-probe/"
         private const val PROBE_ID = "pioneer-probe@pioneer"
         const val PROBE_APP = "pioneer"
     }
 
     val uBlockState = mutableStateOf("not installed")
+    val googleSearchFixerState = mutableStateOf("not installed")
 
     private var probeExtension: WebExtension? = null
-
-    /** Set when the user declines the install prompt, so the install
-     * failure that follows reports "declined" instead of "failed". */
-    private var declinedByUser = false
 
     // ------------------------------------------------------------------
     // Probe extension (own built-in, media + EME reporting + zoom)
@@ -265,42 +261,65 @@ class ExtensionManager(
     }
 
     // ------------------------------------------------------------------
-    // uBlock Origin (runtime install from AMO, first extension)
+    // Approved extensions (runtime install from AMO — see
+    // ApprovedExtensions; by name only, never a store).
+    // installUBlock is the original path, unchanged in
+    // behaviour; installGoogleSearchFixer shares it.
     // ------------------------------------------------------------------
 
-    fun installUBlock() {
+    fun installUBlock() =
+        installFromAmo(ApprovedExtensions.UBLOCK_ORIGIN, uBlockState, "uBlock")
+
+    fun installGoogleSearchFixer() =
+        installFromAmo(
+            ApprovedExtensions.GOOGLE_SEARCH_FIXER,
+            googleSearchFixerState,
+            "Google Search Fixer",
+        )
+
+    private fun installFromAmo(
+        extension: ApprovedExtension,
+        state: MutableState<String>,
+        statusTag: String,
+    ) {
         val controller = runtime.webExtensionController
-        controller.promptDelegate = ubPromptDelegate
+        // Set when the user declines the install prompt, so the
+        // install failure that follows reports "declined" instead
+        // of "failed". Per-install (local), not shared: two
+        // installs never share one flag.
+        var declinedByUser = false
+        controller.promptDelegate =
+            promptDelegateFor(extension.displayName) { declinedByUser = true }
         try {
             controller.list().accept(
                 { installed ->
-                    val existing = installed?.firstOrNull { it.id == UBLOCK_ID }
+                    val existing = installed?.firstOrNull { it.id == extension.id }
                     if (existing != null) {
                         val version = existing.metaData?.version ?: "?"
-                        uBlockState.value = "installed $version"
-                        status.status("uBlock: already installed ($version)")
+                        state.value = "installed $version"
+                        status.status("$statusTag: already installed ($version)")
                     } else {
                         declinedByUser = false
-                        uBlockState.value = "installing…"
-                        status.status("uBlock: installing from AMO…")
+                        state.value = "installing…"
+                        status.status("$statusTag: installing from AMO…")
                         controller.install(
-                            UBLOCK_AMO_URL,
+                            extension.amoUrl,
                             WebExtensionController.INSTALLATION_METHOD_MANAGER,
                         ).accept(
                             { ext ->
                                 val version = ext?.metaData?.version ?: "?"
-                                uBlockState.value = "installed $version"
-                                status.status("uBlock: INSTALLED (${ext?.id}, $version)")
+                                state.value = "installed $version"
+                                status.status("$statusTag: INSTALLED (${ext?.id}, $version)")
                             },
                             { e ->
                                 if (declinedByUser) {
-                                    uBlockState.value = "declined — retry from menu"
-                                    status.status("uBlock: install declined")
+                                    state.value = "declined — retry from menu"
+                                    status.status("$statusTag: install declined")
                                 } else {
-                                    uBlockState.value =
+                                    state.value =
                                         "failed: ${e?.javaClass?.simpleName}: ${e?.message}"
                                     status.status(
-                                        "uBlock: INSTALL FAILED: " +
+                                        "$statusTag: INSTALL FAILED: " +
                                             "${e?.javaClass?.simpleName}: ${e?.message}"
                                     )
                                 }
@@ -309,13 +328,13 @@ class ExtensionManager(
                     }
                 },
                 { e ->
-                    uBlockState.value = "failed: ${e?.message}"
-                    status.status("uBlock: list failed: ${e?.message}")
+                    state.value = "failed: ${e?.message}"
+                    status.status("$statusTag: list failed: ${e?.message}")
                 },
             )
         } catch (e: Throwable) {
-            uBlockState.value = "failed: ${e.javaClass.simpleName}: ${e.message}"
-            status.status("uBlock: threw ${e.javaClass.simpleName}: ${e.message}")
+            state.value = "failed: ${e.javaClass.simpleName}: ${e.message}"
+            status.status("$statusTag: threw ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -326,7 +345,10 @@ class ExtensionManager(
      * If no prompt handler is wired, the install is declined.
      * A double decision is ignored — the result completes once.
      */
-    private val ubPromptDelegate = object : WebExtensionController.PromptDelegate {
+    private fun promptDelegateFor(
+        displayName: String,
+        onDeclined: () -> Unit,
+    ) = object : WebExtensionController.PromptDelegate {
         override fun onInstallPromptRequest(
             extension: WebExtension,
             permissions: Array<String>,
@@ -338,7 +360,7 @@ class ExtensionManager(
             val decide: (Boolean) -> Unit = { allow ->
                 if (!decided) {
                     decided = true
-                    if (!allow) declinedByUser = true
+                    if (!allow) onDeclined()
                     // On Install, grant everything the spike granted:
                     // permissions, private mode, and technical /
                     // interaction data collection — now behind the
@@ -348,10 +370,10 @@ class ExtensionManager(
             }
             val prompt = promptProvider()
             if (prompt != null) {
-                status.status("uBlock: install prompt — asking the shell")
-                prompt("uBlock Origin", permissions.toList(), decide)
+                status.status("$displayName: install prompt — asking the shell")
+                prompt(displayName, permissions.toList(), decide)
             } else {
-                status.status("uBlock: install prompt with no shell handler — declining")
+                status.status("$displayName: install prompt with no shell handler — declining")
                 decide(false)
             }
             return result

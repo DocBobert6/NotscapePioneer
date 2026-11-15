@@ -242,6 +242,8 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override var onExtensionInstallPrompt: ((String, List<String>, (Boolean) -> Unit) -> Unit)? = null
 
     override val uBlockState: State<String> get() = extensions.uBlockState
+    override val googleSearchFixerState: State<String>
+        get() = extensions.googleSearchFixerState
     override val castRoutes: State<String> get() = _castRoutes
     private val _castRoutes = mutableStateOf("cast: not probed yet")
     override val statusLines get() = statusPanel.statusLines
@@ -523,6 +525,8 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     override fun installUBlock() = extensions.installUBlock()
 
+    override fun installGoogleSearchFixer() = extensions.installGoogleSearchFixer()
+
     override fun setTrackingProtection(level: String) {
         val etp = when (level) {
             "strict" -> ContentBlocking.EtpLevel.STRICT
@@ -620,6 +624,40 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             )
         } catch (e: Throwable) {
             extensions.uBlockState.value = "failed: ${e.javaClass.simpleName}: ${e.message}"
+        }
+    }
+
+    override fun uninstallGoogleSearchFixer() {
+        try {
+            runtime.webExtensionController.list().accept(
+                { installed ->
+                    val existing = installed?.firstOrNull {
+                        it.id == ApprovedExtensions.GOOGLE_SEARCH_FIXER.id
+                    }
+                    if (existing == null) {
+                        extensions.googleSearchFixerState.value = "not installed"
+                        statusPanel.status("Google Search Fixer: uninstall — not installed")
+                        return@accept
+                    }
+                    runtime.webExtensionController.uninstall(existing).accept(
+                        {
+                            extensions.googleSearchFixerState.value = "not installed"
+                            statusPanel.status("Google Search Fixer: uninstalled")
+                        },
+                        { e ->
+                            extensions.googleSearchFixerState.value =
+                                "failed: ${e?.javaClass?.simpleName}: ${e?.message}"
+                            statusPanel.status("Google Search Fixer: uninstall FAILED: ${e?.message}")
+                        },
+                    )
+                },
+                { e ->
+                    extensions.googleSearchFixerState.value = "failed: ${e?.message}"
+                    statusPanel.status("Google Search Fixer: uninstall list failed: ${e?.message}")
+                },
+            )
+        } catch (e: Throwable) {
+            extensions.googleSearchFixerState.value = "failed: ${e.javaClass.simpleName}: ${e.message}"
         }
     }
 
