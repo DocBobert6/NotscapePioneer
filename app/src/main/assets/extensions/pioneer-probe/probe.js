@@ -28,6 +28,11 @@
  * asked of the app once per page load (video-popup-query); the
  * watcher hides while the video is fullscreen, paused, or out of
  * the viewport, and never pauses / mutes / seeks the page video.
+ * The 1 s position poller (alpha.42, audit E-A4) only runs while
+ * a video is placed: place() starts it when it shows the button
+ * and stops it when it hides it, so a page with no playing video
+ * costs zero timer wakeups. The play / pause / scroll / resize /
+ * fullscreen / visibility listeners re-arm it through place().
  */
 (function () {
   "use strict";
@@ -376,8 +381,11 @@
       }
       function place() {
         try {
+          // E-A4 (alpha.42): a hidden page never shows the pill,
+          // and it must not keep the 1 s poller alive either.
+          if (document.hidden) { if (btn) btn.style.display = "none"; stopPoll(); return false; }
           var found = pick();
-          if (!found) { if (btn) btn.style.display = "none"; return; }
+          if (!found) { if (btn) btn.style.display = "none"; stopPoll(); return false; }
           if (!btn) {
             btn = document.createElement("div");
             btn.id = "notscape-video-popup";
@@ -419,7 +427,26 @@
           btn.style.top = top + "px";
           btn.style.left = left + "px";
           btn.style.display = "block";
+          // E-A4: a video is placed — the 1 s poller tracks it
+          // (layout shifts move it without a scroll/resize event).
+          startPoll();
+          return true;
         } catch (e) { /* placement is best-effort */ }
+        stopPoll();
+        return false;
+      }
+      // E-A4 (alpha.42): the 1 s poller is managed, not free-running.
+      // It only exists while a video is placed (startPoll is called
+      // from place() on success, stopPoll on every hide); the event
+      // listeners below re-arm it through place() when a video
+      // starts, moves into view, or the tab becomes visible again.
+      var pollTimer = null;
+      function startPoll() {
+        if (pollTimer !== null) return;
+        pollTimer = setInterval(place, 1000);
+      }
+      function stopPoll() {
+        if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
       }
       document.addEventListener("play", place, true);
       document.addEventListener("playing", place, true);
@@ -428,7 +455,7 @@
       window.addEventListener("scroll", place, true);
       window.addEventListener("resize", place);
       document.addEventListener("fullscreenchange", place);
-      setInterval(place, 1000);
+      document.addEventListener("visibilitychange", place);
       place();
     } catch (e) { /* a locked-down page simply never shows the button */ }
   }
