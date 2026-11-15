@@ -66,6 +66,7 @@ import net.nspioneer.browser.BuildConfig
 import net.nspioneer.browser.data.HistoryEntry
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.StorageInfo
+import net.nspioneer.browser.engine.DE_AMP_KEY
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.SearchTemplate
 import net.nspioneer.browser.media.Downloads
@@ -905,6 +906,16 @@ fun SettingsScreen(
                         "you can allow one site once",
                     checked = store.setting("httpsOnly", "false") == "true",
                     onCheckedChange = { store.putSetting("httpsOnly", it.toString()) }
+                )
+                InsetDivider()
+                // alpha.34: De-AMP (Brave-style Layer 1) —
+                // AMP pages open as the normal page instead.
+                ToggleRow(
+                    label = "De-AMP",
+                    supporting = "AMP pages open as the normal page instead; " +
+                        "Google Search Fixer results stop being AMP",
+                    checked = store.setting(DE_AMP_KEY, "true") == "true",
+                    onCheckedChange = { store.putSetting(DE_AMP_KEY, it.toString()) }
                 )
                 InsetDivider()
                 // Batch 4: autoplay cycle (Mariner's Allowed /
