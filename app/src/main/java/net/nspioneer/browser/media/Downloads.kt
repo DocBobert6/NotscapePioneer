@@ -160,15 +160,17 @@ object Downloads {
 
     // ---------- per-download job bundles ----------
     //
-    // A DownloadRecord carries no referer, no segmented probe data, and
-    // no merge side URLs, so the queue and resume paths could not
-    // re-enqueue a job from the record alone. The inputs a job needs
-    // are therefore persisted alongside it in one store setting,
-    // "dljob:<id>", as URL-encoded key=value pairs. The bundle is
-    // written at start time, updated when routing picks an engine,
-    // and cleared when the download leaves the active set (cancel,
-    // delete, or terminal completion). It never holds credentials
-    // beyond the referer/cookie the engine already sends.
+    // A DownloadRecord carries the request context (referer,
+    // originHost, userAgent — alpha.49) but no segmented probe
+    // data and no merge side URLs, so the queue and resume paths
+    // still cannot re-enqueue a job from the record alone. The
+    // remaining inputs a job needs are therefore persisted
+    // alongside it in one store setting, "dljob:<id>", as
+    // URL-encoded key=value pairs. The bundle is written at start
+    // time, updated when routing picks an engine, and cleared when
+    // the download leaves the active set (cancel, delete, or
+    // terminal completion). It never holds credentials beyond the
+    // referer/cookie the engine already sends.
     // The cookie snapshot is always empty in Pioneer (GeckoView
     // exposes no cookie API — see the file header); the plumbing
     // stays host-scoped for a future cookie source.
@@ -227,6 +229,62 @@ object Downloads {
 
     internal fun clearJobBundle(store: PioneerStore, id: Long) {
         store.removeSetting("dljob:$id")
+    }
+
+    /** The host of a URL, or "" when it has none / will not
+     *  parse. Pure. */
+    internal fun originHostOf(rawUrl: String?): String =
+        runCatching { android.net.Uri.parse(rawUrl ?: "").host }
+            .getOrNull() ?: ""
+
+    /** Fill a record's request context (alpha.49, gap plan
+     *  A-4): the referer the caller passes, the page host
+     *  (the referer's host, else the download URL's host),
+     *  and the user agent the engines send ([UA]). Only
+     *  blank fields are filled — a record built with context
+     *  at start time is never overwritten. Returns true when
+     *  any field changed, so the caller knows to persist.
+     *  Pure apart from mutating the passed record, the same
+     *  in-place pattern the engines use for status/progress. */
+    internal fun fillRequestContext(rec: DownloadRecord, referer: String?): Boolean {
+        var changed = false
+        if (rec.referer.isBlank() && !referer.isNullOrBlank()) {
+            rec.referer = referer
+            changed = true
+        }
+        if (rec.originHost.isBlank()) {
+            val host = originHostOf(rec.referer.ifBlank { rec.url })
+            if (host.isNotBlank()) {
+                rec.originHost = host
+                changed = true
+            }
+        }
+        if (rec.userAgent.isBlank()) {
+            rec.userAgent = UA
+            changed = true
+        }
+        return changed
+    }
+
+    /** The WorkManager input data for one worker enqueue,
+     *  built from the record (alpha.49): `recId` and the
+     *  record's referer — the one-shot bundle is no longer
+     *  the source. A blank referer becomes a null input,
+     *  which the workers already treat as "no referer".
+     *  Extra entries keep the old shape (`total` as Long,
+     *  everything else as String). Pure. */
+    internal fun workerInputData(
+        rec: DownloadRecord,
+        extra: Map<String, String>?,
+    ): androidx.work.Data {
+        val dataBuilder = androidx.work.Data.Builder()
+            .putLong("recId", rec.id)
+            .putString("referer", rec.referer.takeIf { it.isNotBlank() })
+        extra?.forEach { (k, v) ->
+            if (k == "total") dataBuilder.putLong(k, v.toLongOrNull() ?: -1L)
+            else dataBuilder.putString(k, v)
+        }
+        return dataBuilder.build()
     }
 
     /** A failure that must not be retried (bad key, bad IV):
@@ -355,7 +413,13 @@ object Downloads {
             store.removeDownload(rec.id)
             store.removeSetting("dlerror:${rec.id}")
             store.removeSetting("dldowngrade:${rec.id}")
-            start(appCtx, store, fresh.title, fresh.url, media = fresh.media, isPrivate = fresh.isPrivate)
+            // alpha.49: the restarted download keeps the old
+            // record's request context instead of losing it.
+            start(
+                appCtx, store, fresh.title, fresh.url, media = fresh.media,
+                isPrivate = fresh.isPrivate,
+                referer = fresh.referer.takeIf { it.isNotBlank() }
+            )
             return true
         }
         if (fresh.dmId >= 0) {
@@ -504,7 +568,11 @@ object Downloads {
             val bundle = readJobBundle(store, rec.id) ?: continue
             val url = bundle["url"] ?: rec.url
             val contentType = bundle["contentType"]?.takeIf { it.isNotBlank() }
-            val referer = bundle["referer"]?.takeIf { it.isNotBlank() }
+            // alpha.49: the record is the source of truth for
+            // request context; the bundle is only the fallback
+            // for records created before the record carried it.
+            val referer = rec.referer.takeIf { it.isNotBlank() }
+                ?: bundle["referer"]?.takeIf { it.isNotBlank() }
             val media = bundle["media"] == "true"
             val stagedFile = bundle["stagedFile"]?.takeIf { it.isNotBlank() }
                 ?.let { File(it) }
@@ -619,6 +687,14 @@ object Downloads {
         media: Boolean,
         stagedFile: File? = null
     ) {
+        // alpha.49 (gap plan A-4): the record carries the
+        // request context from here on — fill any blank field
+        // from the routed referer and persist, so a retried or
+        // resumed job reads it from the record, not the bundle.
+        // (Records created by start()/startMerge() already
+        // carry it; this is the backfill for older records
+        // whose context still lives only in the bundle.)
+        if (fillRequestContext(rec, referer)) store.updateDownload(rec)
         // With Wi-Fi-only on and a metered network active,
         // don't even probe — leave the record queued (the row
         // shows "Waiting for Wi-Fi") until a later promotion
@@ -651,7 +727,7 @@ object Downloads {
             pausedIds.remove(rec.id)
             store.updateDownloadProgress(rec.id, 0)
             updateJobBundle(store, rec.id, mapOf("engine" to "dash"))
-            enqueueWorker(appCtx, store, rec.id, "dash", referer, null)
+            enqueueWorker(appCtx, store, rec, "dash", null)
             return
         }
         if (isHls) {
@@ -665,14 +741,16 @@ object Downloads {
             pausedIds.remove(rec.id)
             store.updateDownloadProgress(rec.id, 0)
             updateJobBundle(store, rec.id, mapOf("engine" to "hls"))
-            enqueueWorker(appCtx, store, rec.id, "hls", referer, null)
+            enqueueWorker(appCtx, store, rec, "hls", null)
             return
         }
         // Segmented downloads: eligible plain downloads go to
         // the segmented worker; anything ineligible falls
         // through to the DownloadManager path below, unchanged.
         if (store.setting("segmentedDownloads", "true") == "true") {
-            val probe = probeSegmented(appCtx, url, referer)
+            val probe = probeSegmented(
+                appCtx, url, rec.referer.takeIf { it.isNotBlank() }
+            )
             if (probe.eligible) {
                 cancelledIds.remove(rec.id)
                 pausedIds.remove(rec.id)
@@ -685,7 +763,7 @@ object Downloads {
                     "md5" to (probe.md5 ?: "")
                 ))
                 enqueueWorker(
-                    appCtx, store, rec.id, "seg", referer,
+                    appCtx, store, rec, "seg",
                     mapOf(
                         "finalUrl" to probe.finalUrl,
                         "total" to probe.total.toString(),
@@ -696,24 +774,21 @@ object Downloads {
                 return
             }
         }
-        routeDirect(appCtx, store, rec, url, referer)
+        routeDirect(appCtx, store, rec, url, rec.referer.takeIf { it.isNotBlank() })
     }
 
     /** Enqueue one of the four WorkManager workers for a
      *  record. Workers survive process death and retry
-     *  transient failures with exponential backoff (30s). */
+     *  transient failures with exponential backoff (30s).
+     *  The input data comes from the record (alpha.49) —
+     *  see [workerInputData] — never from the one-shot
+     *  bundle, so a retried job carries the same context. */
     private fun enqueueWorker(
-        appCtx: Context, store: PioneerStore, recId: Long, kind: String,
-        referer: String?, extra: Map<String, String>?,
+        appCtx: Context, store: PioneerStore, rec: DownloadRecord,
+        kind: String, extra: Map<String, String>?,
     ) {
-        val dataBuilder = androidx.work.Data.Builder()
-            .putLong("recId", recId)
-            .putString("referer", referer)
-        extra?.forEach { (k, v) ->
-            if (k == "total") dataBuilder.putLong(k, v.toLongOrNull() ?: -1L)
-            else dataBuilder.putString(k, v)
-        }
-        val data = dataBuilder.build()
+        val recId = rec.id
+        val data = workerInputData(rec, extra)
         val constraints = androidx.work.Constraints.Builder()
             .setRequiredNetworkType(downloadNetworkType(store))
             .build()
@@ -801,7 +876,14 @@ object Downloads {
                 status = "queued",
                 addedAt = System.currentTimeMillis(),
                 media = media,
-                isPrivate = isPrivate
+                isPrivate = isPrivate,
+                // alpha.49 (gap plan A-4): the request context
+                // lives on the record from creation — the page
+                // the download came from, its host, and the UA
+                // the engines send.
+                referer = referer ?: "",
+                originHost = originHostOf(referer ?: url),
+                userAgent = UA
             )
             store.addDownload(rec)
             // Cookie snapshot: always empty in Pioneer — GeckoView
@@ -873,7 +955,12 @@ object Downloads {
                 status = "queued",
                 addedAt = System.currentTimeMillis(),
                 media = true,
-                isPrivate = isPrivate
+                isPrivate = isPrivate,
+                // alpha.49 (gap plan A-4): request context on
+                // the record from creation, as in start().
+                referer = referer ?: "",
+                originHost = originHostOf(referer ?: videoUrl),
+                userAgent = UA
             )
             store.addDownload(rec)
             saveJobBundle(store, rec.id, mapOf(
@@ -893,7 +980,7 @@ object Downloads {
                 "engine" to "merge"
             ))
             store.updateDownloadState(rec.id, "downloading")
-            enqueueWorker(appCtx, store, rec.id, "merge", referer, mapOf(
+            enqueueWorker(appCtx, store, rec, "merge", mapOf(
                 "videoUrl" to videoUrl, "audioUrl" to audioUrl
             ))
         }

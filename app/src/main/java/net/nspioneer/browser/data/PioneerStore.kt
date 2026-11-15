@@ -107,6 +107,15 @@ data class DownloadRecord(
     // its file are wiped with the private profile and never shown in the
     // Downloads or Offline lists.
     val isPrivate: Boolean = false,
+    // Request context for the download (alpha.49, gap plan A-4):
+    // the page the download came from, that page's host, and the
+    // user agent the download engines send. Persisted with the
+    // record, so a retried or resumed job carries the same context
+    // instead of depending on the one-shot dljob:<id> bundle.
+    // "" for records created before alpha.49.
+    var referer: String = "",
+    var originHost: String = "",
+    var userAgent: String = "",
 ) {
     // Transient size/speed detail, in the class body so it stays out of
     // equals, copy and the persisted document. -1 means unknown.
@@ -796,7 +805,8 @@ class PioneerStore private constructor(context: Context) {
                 val r = downloads[i]
                 downloads[i] = DownloadRecord(
                     r.id, r.title, r.url, name, r.dmId, r.status, r.addedAt,
-                    r.media, r.progress, r.contentUri, r.isPrivate
+                    r.media, r.progress, r.contentUri, r.isPrivate,
+                    r.referer, r.originHost, r.userAgent
                 )
                 mutated(Part.DOWNLOADS)
             }
@@ -1193,7 +1203,10 @@ class PioneerStore private constructor(context: Context) {
                     o.optBoolean("media", false),
                     o.optInt("progress", -1),
                     o.optString("contentUri", ""),
-                    o.optBoolean("isPrivate", false)
+                    o.optBoolean("isPrivate", false),
+                    o.optString("referer", ""),
+                    o.optString("originHost", ""),
+                    o.optString("userAgent", "")
                 )
             }
             downloads.addAll(items)
@@ -1412,6 +1425,9 @@ class PioneerStore private constructor(context: Context) {
                             .put("progress", it.progress)
                             .put("contentUri", it.contentUri)
                             .put("isPrivate", it.isPrivate)
+                            .put("referer", it.referer)
+                            .put("originHost", it.originHost)
+                            .put("userAgent", it.userAgent)
                     )
                 }
             }
@@ -1522,7 +1538,10 @@ class PioneerStore private constructor(context: Context) {
                             o.optBoolean("media", false),
                             o.optInt("progress", -1),
                             o.optString("contentUri", ""),
-                            o.optBoolean("isPrivate", false)
+                            o.optBoolean("isPrivate", false),
+                            o.optString("referer", ""),
+                            o.optString("originHost", ""),
+                            o.optString("userAgent", "")
                         )
                     }
                     downloads.clear()
