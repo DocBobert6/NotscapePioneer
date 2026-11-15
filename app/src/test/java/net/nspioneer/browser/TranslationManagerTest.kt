@@ -302,7 +302,7 @@ class TranslationManagerTest {
         assertEquals("es", offer?.fromCode)
         assertEquals("Spanish", offer?.fromName)
         assertEquals("elpais.com", offer?.host)
-        assertEquals(73_600_000, offer?.pairSizeBytes)
+        assertEquals(73_600_000L, offer?.pairSizeBytes)
         assertFalse(offer?.modelDownloaded ?: true)
         assertEquals(
             TranslatePageState.Offer("es", "Spanish"),
