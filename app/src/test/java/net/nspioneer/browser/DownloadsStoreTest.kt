@@ -1,5 +1,6 @@
 package net.nspioneer.browser
 
+import android.os.Environment
 import net.nspioneer.browser.data.DownloadRecord
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.media.Downloads
@@ -365,6 +366,44 @@ class DownloadsStoreTest {
             assertTrue(kept.exists())
         } finally {
             runCatching { kept.delete() }
+        }
+    }
+
+    @Test
+    fun sweepStagingDeletesStaleOrphansAndKeepsLiveAndFresh() {
+        val app = RuntimeEnvironment.getApplication()
+        val staging = File(
+            app.getExternalFilesDir(Environment.DIRECTORY_MOVIES),
+            "notscape-staging"
+        ).apply { mkdirs() }
+        val old = System.currentTimeMillis() - 25L * 3600 * 1000
+        // Stale orphan, no record id in the name -> deleted.
+        val orphan = File(staging, "movie.segments").apply {
+            mkdirs()
+            setLastModified(old)
+        }
+        // Stale dir whose id belongs to a live record -> kept.
+        val live = File(staging, "movie.3001.segments").apply {
+            mkdirs()
+            setLastModified(old)
+        }
+        // Stale dir whose id belongs to no live record -> deleted.
+        val dead = File(staging, "movie.3002.segments").apply {
+            mkdirs()
+            setLastModified(old)
+        }
+        // Fresh orphan (younger than the 24 h cutoff) -> kept.
+        val fresh = File(staging, "movie2.segments").apply { mkdirs() }
+        store.addDownload(rec(3001L, fileName = "movie.mp4"))
+        try {
+            Downloads.sweepStaging(app, store)
+            assertFalse(orphan.exists())
+            assertTrue(live.exists())
+            assertFalse(dead.exists())
+            assertTrue(fresh.exists())
+        } finally {
+            runCatching { live.deleteRecursively() }
+            runCatching { fresh.deleteRecursively() }
         }
     }
 }
