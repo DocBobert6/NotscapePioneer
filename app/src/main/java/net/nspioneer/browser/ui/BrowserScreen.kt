@@ -449,6 +449,10 @@ fun BrowserScreen(
     var findText by remember { mutableStateOf("") }
     // Batch 4: the plain-http warning URL (HTTPS-only mode).
     var httpsWarnUrl by remember { mutableStateOf<String?>(null) }
+    // alpha.31: the Safe Browsing warning — (tab id, URL) of
+    // a navigation stopped on a listed phishing/malware
+    // domain. The tab never left the page it was on.
+    var safeBrowsingWarn by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var editingAddress by remember { mutableStateOf(false) }
     // Mariner's field value (BrowserScreen.kt:3830): a
     // TextFieldValue so focusing the pill selects the whole
@@ -791,6 +795,15 @@ fun BrowserScreen(
     // from onLoadRequest when a tapped link can't be upgraded)
     // to this screen's interstitial.
     SideEffect { engine.onHttpsWarn = { url -> httpsWarnUrl = url } }
+    // alpha.31: wire the engine's Safe Browsing warning
+    // (fired from onLoadRequest when a navigation hits a
+    // listed phishing/malware domain) to the interstitial
+    // below.
+    SideEffect {
+        engine.onSafeBrowsingWarn = { tabId, url ->
+            safeBrowsingWarn = tabId to url
+        }
+    }
 
     /** Mariner BrowserScreen.kt:258: the home URL is the
      *  `homePage` setting, "" meaning the built-in start
@@ -996,6 +1009,10 @@ fun BrowserScreen(
     // are declared above in the Phase 3 section.
     val backHandler: () -> Boolean = {
         when {
+            // alpha.31: the Safe Browsing interstitial is
+            // full-page — back dismisses it (Go back), never
+            // a hang, and the tab never left its page.
+            safeBrowsingWarn != null -> { safeBrowsingWarn = null; true }
             longPressTarget != null -> { onLongPressHandled(); true }
             mediaSheetOpen -> { mediaSheetOpen = false; true }
             siteInfoOpen -> { siteInfoOpen = false; true }
@@ -2506,6 +2523,98 @@ fun BrowserScreen(
                         )
                     }
                 }
+            }
+        }
+    }
+    // alpha.31: Safe Browsing interstitial — a navigation
+    // stopped on a listed phishing/malware domain. Full-page,
+    // opaque, above everything (it is drawn after the tab
+    // grid, so it covers that too): the tab never left the
+    // page it was on, so "Go back" simply dismisses.
+    // "Proceed anyway" is one URL, one time — the bypass is
+    // consumed on the next load of that exact URL, and a
+    // different URL on the same host warns again. The wording
+    // says plainly that this is a downloaded list, not a live
+    // check: Chrome and Firefox check phishing in real time
+    // and will always be ahead on a brand-new scam. The
+    // warned tab may have been closed while the warning
+    // stood — the overlay goes with it.
+    val sbWarn = safeBrowsingWarn
+    if (sbWarn != null && tabs.any { it.id == sbWarn.first }) {
+        val (warnTabId, warnUrl) = sbWarn
+        val warnHost = runCatching { Uri.parse(warnUrl).host }.getOrNull() ?: warnUrl
+        Box(
+            modifier = Modifier.fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surfaceContainerLow
+                        )
+                    )
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(horizontal = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    Icons.Filled.Block,
+                    contentDescription = null,
+                    modifier = Modifier.size(56.dp),
+                    tint = MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    "This site may be a scam",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "$warnHost is on Pioneer's downloaded list of " +
+                        "known phishing and malware sites. The site " +
+                        "may be trying to steal your passwords or " +
+                        "install harmful software.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "This check uses a list downloaded to your phone " +
+                        "— nothing about your browsing is sent " +
+                        "anywhere, and no live check happens. A " +
+                        "brand-new scam may not be on the list yet: " +
+                        "Chrome and Firefox check phishing in real " +
+                        "time and will always be ahead on zero-hour " +
+                        "phishing.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(28.dp))
+                Button(
+                    onClick = {
+                        val target = tabs.firstOrNull { it.id == warnTabId }
+                        safeBrowsingWarn = null
+                        if (target == null) return@Button
+                        homeTabIds.remove(target.id)
+                        target.safeBrowsingBypass = warnUrl
+                        val idx = tabs.indexOf(target)
+                        if (idx >= 0 && idx != activeTabIndex) onSwitchTab(idx)
+                        target.load(warnUrl)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Proceed anyway") }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = { safeBrowsingWarn = null },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Go back") }
             }
         }
     }
