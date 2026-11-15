@@ -847,7 +847,8 @@ class MainActivity : ComponentActivity() {
      *  onCreate before setContent, now after the first frame:
      *  Cast discovery, the startup private-context wipe, the
      *  restored-session opens, and — off the main thread — the
-     *  orphan-blob sweep and the crash-file read + crashed-trace
+     *  orphan-blob sweep, the general download-staging sweep
+     *  (E-A3), and the crash-file read + crashed-trace
      *  recovery. Everything here still runs, just later; the app
      *  behaves identically once it has. */
     private fun runDeferredLaunchWork() {
@@ -860,6 +861,7 @@ class MainActivity : ComponentActivity() {
         // back to it (see readCrashFileAndRecoverTrace).
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching { Downloads.sweepOrphanBlobStaging(this@MainActivity, store) }
+            runCatching { Downloads.sweepStaging(this@MainActivity, store) }
             readCrashFileAndRecoverTrace()
         }
     }
