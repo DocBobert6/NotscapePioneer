@@ -209,7 +209,9 @@ interface Engine {
     var onExtensionInstallPrompt: ((name: String, permissions: List<String>,
         decide: (allow: Boolean) -> Unit) -> Unit)?
     fun installUBlock()
-    // alpha.33: second approved extension — Google Search Fixer.
+    // alpha.33: second approved extension — Google Search Fixer
+    // Refreshed (alpha.54: the maintained fork; the original
+    // v1.6 is no longer the approved entry).
     // Same install path as uBlock (see ExtensionManager), same
     // prompt, own state; by name only, never a store.
     fun installGoogleSearchFixer()
@@ -220,7 +222,7 @@ interface Engine {
     fun requestPageHtml(tab: EngineTab)
     val uBlockState: State<String>  // "not installed" | "installing…" |
         // "installed 1.76.0" | "failed: …" | "declined — retry from menu"
-    // alpha.33: Google Search Fixer state, same vocabulary.
+    // alpha.33: Google Search Fixer Refreshed state, same vocabulary.
     val googleSearchFixerState: State<String>
     fun setTrackingProtection(level: String)  // "strict" | "basic" |
         // "off" -> EtpLevel STRICT / DEFAULT / NONE via
@@ -303,7 +305,7 @@ interface Engine {
     val mainWorldState: State<String>
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result
-    // alpha.33: remove Google Search Fixer; its state reports it.
+    // alpha.33: remove Google Search Fixer Refreshed; its state reports it.
     fun uninstallGoogleSearchFixer()
     // ---- Phase 3: downloads ----
     // The engine reports an unhandleable response; the SHELL shows Mariner's

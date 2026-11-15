@@ -925,7 +925,7 @@ fun SettingsScreen(
                 ToggleRow(
                     label = "De-AMP",
                     supporting = "AMP pages open as the normal page instead; " +
-                        "Google Search Fixer results stop being AMP",
+                        "Google Search Fixer Refreshed results stop being AMP",
                     checked = store.setting(DE_AMP_KEY, "true") == "true",
                     onCheckedChange = { store.putSetting(DE_AMP_KEY, it.toString()) }
                 )
@@ -1667,7 +1667,7 @@ fun SettingsScreen(
                 val gsfInstalled = gsfState.startsWith("installed")
                 InsetDivider()
                 ActionRow(
-                    label = "Google Search Fixer",
+                    label = "Google Search Fixer Refreshed",
                     supporting = gsfState,
                     actionLabel = if (gsfInstalled) "Check again" else "Install",
                     onClick = { engine.installGoogleSearchFixer() }
@@ -1675,7 +1675,7 @@ fun SettingsScreen(
                 if (gsfInstalled) {
                     InsetDivider()
                     ActionRow(
-                        label = "Remove Google Search Fixer",
+                        label = "Remove Google Search Fixer Refreshed",
                         supporting = "Removes the extension from Pioneer",
                         actionLabel = "Remove",
                         onClick = { engine.uninstallGoogleSearchFixer() }

@@ -66,7 +66,7 @@ import net.nspioneer.browser.engine.Engine
  * browser is, what the library does, the default-browser
  * ask, the two choices worth making up front (theme,
  * search engine), and the two optional extensions (uBlock
- * Origin, Google Search Fixer), written live to the same
+ * Origin, Google Search Fixer Refreshed), written live to the same
  * settings Settings uses. Shown until the "onboarded"
  * setting is set; Settings > About can replay it at any
  * time. Skipping counts as finishing: the defaults are the

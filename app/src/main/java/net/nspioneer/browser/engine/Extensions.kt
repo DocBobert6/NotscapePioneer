@@ -379,7 +379,7 @@ class ExtensionManager(
         installFromAmo(
             ApprovedExtensions.GOOGLE_SEARCH_FIXER,
             googleSearchFixerState,
-            "Google Search Fixer",
+            "Google Search Fixer Refreshed",
         )
 
     private fun installFromAmo(

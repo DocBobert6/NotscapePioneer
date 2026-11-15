@@ -937,24 +937,24 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                     }
                     if (existing == null) {
                         extensions.googleSearchFixerState.value = "not installed"
-                        statusPanel.status("Google Search Fixer: uninstall — not installed")
+                        statusPanel.status("Google Search Fixer Refreshed: uninstall — not installed")
                         return@accept
                     }
                     runtime.webExtensionController.uninstall(existing).accept(
                         {
                             extensions.googleSearchFixerState.value = "not installed"
-                            statusPanel.status("Google Search Fixer: uninstalled")
+                            statusPanel.status("Google Search Fixer Refreshed: uninstalled")
                         },
                         { e ->
                             extensions.googleSearchFixerState.value =
                                 "failed: ${e?.javaClass?.simpleName}: ${e?.message}"
-                            statusPanel.status("Google Search Fixer: uninstall FAILED: ${e?.message}")
+                            statusPanel.status("Google Search Fixer Refreshed: uninstall FAILED: ${e?.message}")
                         },
                     )
                 },
                 { e ->
                     extensions.googleSearchFixerState.value = "failed: ${e?.message}"
-                    statusPanel.status("Google Search Fixer: uninstall list failed: ${e?.message}")
+                    statusPanel.status("Google Search Fixer Refreshed: uninstall list failed: ${e?.message}")
                 },
             )
         } catch (e: Throwable) {

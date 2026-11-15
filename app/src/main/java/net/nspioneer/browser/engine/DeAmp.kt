@@ -5,7 +5,7 @@ import android.net.Uri
 /**
  * De-AMP (alpha.34, Brave-style Layer 1): rewrite AMP URLs to
  * their canonical form at navigation time, so a tap on a Google
- * search result (Chrome page, via Google Search Fixer) lands on
+ * search result (Chrome page, via Google Search Fixer Refreshed) lands on
  * the normal page instead of the AMP version.
  *
  * Pure, so the unit suite can pin it without an engine — same
