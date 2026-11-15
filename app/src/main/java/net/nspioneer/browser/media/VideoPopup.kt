@@ -38,6 +38,13 @@ object VideoPopup {
         host.isNotBlank() &&
             store.setting(offKey(host), "false") == "true"
 
+    /** Global button option (alpha.51): the on-video ▶ button
+     *  is shown unless the user turns it off. Default ON. */
+    fun buttonKey(): String = "showVideoPopupButton"
+
+    fun isButtonOn(store: PioneerStore): Boolean =
+        store.setting(buttonKey(), "true") == "true"
+
     /**
      * The anti-spoof gate: the tapped URL must be a video
      * the detectors saw — never a page/embed kind, never

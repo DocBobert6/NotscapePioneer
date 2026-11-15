@@ -72,6 +72,7 @@ import net.nspioneer.browser.engine.SearchTemplate
 import net.nspioneer.browser.engine.TranslationLanguages
 import net.nspioneer.browser.engine.UpdateCheck
 import net.nspioneer.browser.media.Downloads
+import net.nspioneer.browser.media.VideoPopup
 import org.mozilla.geckoview.StorageController
 import java.io.File
 import java.io.FileOutputStream
@@ -1346,7 +1347,21 @@ fun SettingsScreen(
             // page): skip interval + subtitle font/size/colour/
             // background/edge + font import. Written to the
             // store; the player applies it (applySubtitleStyle).
+            // alpha.51: the on-video pop-up button option lives
+            // here too — default ON; when off, no button is
+            // placed on any video (the video long-press still
+            // opens the media sheet).
             GroupTitle("Video player")
+            SettingsCard {
+                ToggleRow(
+                    label = "Show video pop-up button",
+                    supporting = "Show the play button on detected videos. " +
+                        "Long-press a playing video to open the media sheet.",
+                    checked = VideoPopup.isButtonOn(store),
+                    onCheckedChange = { store.putSetting(VideoPopup.buttonKey(), it.toString()) }
+                )
+            }
+            Spacer(Modifier.height(14.dp))
             GroupTitle("Skip interval")
             SettingsCard {
                 listOf(

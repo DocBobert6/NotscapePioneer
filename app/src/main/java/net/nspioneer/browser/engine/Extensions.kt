@@ -169,6 +169,7 @@ class ExtensionManager(
                 val reply = JSONObject().apply {
                     put("type", "video-popup-off")
                     put("off", off)
+                    put("showButton", host.showVideoPopupButton())
                 }
                 return GeckoResult.fromValue(reply as Any)
             }
@@ -453,6 +454,9 @@ interface ProbeHost {
     /** Phase 3 (Worker C): per-site pop-up-player opt-out
      *  for [host] (`videoPopupOff:$host`). */
     fun videoPopupOff(host: String): Boolean
+    /** alpha.51: global on-video button option
+     *  (`showVideoPopupButton`, default ON). */
+    fun showVideoPopupButton(): Boolean
     /** alpha.10 (Save offline): the content script answered
      *  a `page-html-request` with this page's outerHTML. */
     fun notePageHtml(session: GeckoSession?, html: String)

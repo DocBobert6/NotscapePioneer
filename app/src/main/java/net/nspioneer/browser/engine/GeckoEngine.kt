@@ -1317,6 +1317,9 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun videoPopupOff(host: String): Boolean =
         VideoPopup.isOff(store, host)
 
+    override fun showVideoPopupButton(): Boolean =
+        VideoPopup.isButtonOn(store)
+
     /** Worker A fallthrough: the blocking bridge owns
      *  `blocked`, `cosmetic-query` and `rules-request` (and
      *  returns null for types it does not own, so this is a
