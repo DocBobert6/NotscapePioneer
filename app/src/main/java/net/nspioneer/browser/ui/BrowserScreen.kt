@@ -194,6 +194,7 @@ import net.nspioneer.browser.engine.PopupChoice
 import net.nspioneer.browser.engine.TranslateChoice
 import net.nspioneer.browser.engine.TranslationLanguages
 import net.nspioneer.browser.engine.UserBlockRules
+import net.nspioneer.browser.media.DetectedMedia
 import net.nspioneer.browser.media.Downloads
 import java.io.File
 import net.nspioneer.browser.media.MediaLog
@@ -313,6 +314,9 @@ private data class PendingDownload(
     // null for ordinary downloads. Owned by the dialog until
     // the Download button hands it to Downloads.start.
     val stagedFile: File? = null,
+    // alpha.46: the variant pre-chosen in the quality sheet;
+    // null when the choice is still open (dialog rows).
+    val chosenVariant: Downloads.DownloadVariant? = null,
 )
 
 /** Mariner's permission resource words ("Allow $host to
@@ -918,6 +922,8 @@ fun BrowserScreen(
     var confirmDontAsk by remember { mutableStateOf(false) }
     var pendingVariants by remember { mutableStateOf<List<Downloads.DownloadVariant>>(emptyList()) }
     var pendingVariantIndex by remember { mutableStateOf(0) }
+    // alpha.46: the download-quality sheet request, or null.
+    var qualitySheet by remember { mutableStateOf<QualitySheetRequest?>(null) }
     // The captured-popup queue lives in the engine's single
     // popup controller (rebuild item 1): prompt denies +
     // popunder-guard captures share it (max 5, arrival order —
@@ -1062,12 +1068,13 @@ fun BrowserScreen(
         title: String, url: String, media: Boolean,
         contentType: String?, suggestedName: String?,
         referer: String?, isPrivate: Boolean,
-        stagedFile: File? = null
+        stagedFile: File? = null,
+        chosenVariant: Downloads.DownloadVariant? = null
     ) {
         if (store.setting("confirmDownloads", "true") == "true") {
             pendingDownload = PendingDownload(
                 title, url, media, contentType, suggestedName, referer, isPrivate,
-                stagedFile = stagedFile
+                stagedFile = stagedFile, chosenVariant = chosenVariant
             )
             confirmName = suggestedName
                 ?: Uri.parse(url).lastPathSegment
@@ -1082,6 +1089,34 @@ fun BrowserScreen(
                 referer = referer, isPrivate = isPrivate,
                 stagedFile = stagedFile
             )
+        }
+    }
+
+    /** Download-quality choice (alpha.46): for a detected
+     *  video with several renditions, fetch the variants and
+     *  offer the Frost-style quality sheet; a single-variant
+     *  source (or a failed fetch) goes straight to the usual
+     *  confirm dialog / download, with no extra step. */
+    fun beginQualityDownload(media: DetectedMedia) {
+        snackScope.launch {
+            val variants = withContext(Dispatchers.IO) {
+                Downloads.fetchDownloadVariants(media.url, null, tabUrl)
+            }
+            if (Downloads.offersQualityChoice(variants)) {
+                qualitySheet = QualitySheetRequest(
+                    media, variants,
+                    formatLabel = if (media.url.substringBefore('?')
+                        .endsWith(".mpd", ignoreCase = true)
+                    ) "DASH • ${variants.size} qualities"
+                    else "HLS • ${variants.size} qualities"
+                )
+            } else {
+                beginDownload(
+                    media.label.ifBlank { media.url }, media.url,
+                    media = true, contentType = null, suggestedName = null,
+                    referer = tabUrl, isPrivate = tab.isPrivate
+                )
+            }
         }
     }
 
@@ -1129,7 +1164,9 @@ fun BrowserScreen(
         val pending = pendingDownload
         pendingVariants = emptyList()
         pendingVariantIndex = 0
-        if (pending == null || !pending.media || pending.videoUrl != null) return@LaunchedEffect
+        if (pending == null || !pending.media || pending.videoUrl != null ||
+            pending.chosenVariant != null
+        ) return@LaunchedEffect
         pendingVariants = withContext(Dispatchers.IO) {
             Downloads.fetchDownloadVariants(pending.url, pending.contentType, pending.referer)
         }
@@ -1156,6 +1193,7 @@ fun BrowserScreen(
             safeBrowsingWarn != null -> { safeBrowsingWarn = null; true }
             longPressTarget != null -> { onLongPressHandled(); true }
             mediaSheetOpen -> { mediaSheetOpen = false; true }
+            qualitySheet != null -> { qualitySheet = null; true }
             siteInfoOpen -> { siteInfoOpen = false; true }
             // Four-choice popup prompt (alpha.14): back
             // dismisses it without choosing — Deny (once) +
@@ -3325,8 +3363,9 @@ fun BrowserScreen(
                         )
                     }
                     // Audit D-m13: quality choice, defaulting
-                    // to the highest variant.
-                    if (pendingVariants.isNotEmpty()) {
+                    // to the highest variant. Hidden when the
+                    // quality sheet already chose (alpha.46).
+                    if (pending.chosenVariant == null && pendingVariants.isNotEmpty()) {
                         Spacer(Modifier.height(12.dp))
                         Text(
                             "Quality",
@@ -3378,10 +3417,11 @@ fun BrowserScreen(
                                 fileNameOverride = confirmName
                             )
                         } else {
-                            val chosen = pendingVariants.getOrNull(pendingVariantIndex)
+                            val chosen = pending.chosenVariant
+                                ?: pendingVariants.getOrNull(pendingVariantIndex)
                             Downloads.start(
                                 context, store, pending.title,
-                                chosen?.url ?: pending.url,
+                                Downloads.downloadUrlForVariant(pending.url, chosen),
                                 media = pending.media,
                                 contentType = pending.contentType,
                                 suggestedName = pending.suggestedName,
@@ -3431,11 +3471,7 @@ fun BrowserScreen(
             },
             onDownload = { media ->
                 mediaSheetOpen = false
-                beginDownload(
-                    media.label.ifBlank { media.url }, media.url,
-                    media = true, contentType = null, suggestedName = null,
-                    referer = tabUrl, isPrivate = tab.isPrivate
-                )
+                beginQualityDownload(media)
             },
             onOpenPage = { media ->
                 mediaSheetOpen = false
@@ -3454,6 +3490,27 @@ fun BrowserScreen(
                 }
             },
             onDismiss = { mediaSheetOpen = false }
+        )
+    }
+
+    // Download-quality sheet (alpha.46): shown from the
+    // media sheet when the detected video has several
+    // renditions; the chosen variant goes through the
+    // usual confirm dialog, pre-chosen.
+    qualitySheet?.let { request ->
+        DownloadQualitySheet(
+            request = request,
+            onDownload = { chosen ->
+                qualitySheet = null
+                beginDownload(
+                    request.media.label.ifBlank { request.media.url },
+                    request.media.url,
+                    media = true, contentType = null, suggestedName = null,
+                    referer = tabUrl, isPrivate = tab.isPrivate,
+                    chosenVariant = chosen
+                )
+            },
+            onDismiss = { qualitySheet = null }
         )
     }
 
