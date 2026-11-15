@@ -1655,7 +1655,11 @@ object Downloads {
 
     data class HlsOutcome(val ok: Boolean, val bytes: Long = 0, val error: String? = null)
 
-    private data class HlsVariant(val bandwidth: Long, val width: Int, val height: Int, val url: String)
+    internal data class HlsVariant(
+        val bandwidth: Long, val width: Int, val height: Int, val url: String,
+        /** Separate audio rendition URL (#EXT-X-MEDIA), if the master splits audio out. */
+        val audioUrl: String? = null,
+    )
     private data class HlsSegment(val url: String, val duration: Double, val keyUri: String?, val keyIv: String?)
     private data class HlsMedia(val segments: List<HlsSegment>, val isLive: Boolean)
 
@@ -1687,20 +1691,54 @@ object Downloads {
     private fun resolveUrl(base: String, rel: String): String =
         runCatching { URL(URL(base), rel).toString() }.getOrDefault(rel)
 
-    private fun parseHlsMaster(text: String, baseUrl: String): List<HlsVariant> {
+    /** Attributes of an HLS tag line (#EXT-X-STREAM-INF /
+     *  #EXT-X-MEDIA): KEY=value or KEY="quoted value",
+     *  comma-separated. */
+    private fun parseHlsAttrs(line: String): Map<String, String> {
+        val out = mutableMapOf<String, String>()
+        val re = Regex("""(\w[\w-]*)=("[^"]*"|[^,]*)""")
+        for (m in re.findAll(line)) {
+            out[m.groupValues[1]] = m.groupValues[2].removeSurrounding("\"")
+        }
+        return out
+    }
+
+    internal fun parseHlsMaster(text: String, baseUrl: String): List<HlsVariant> {
         val lines = text.lines()
+        // #EXT-X-MEDIA audio renditions, by GROUP-ID; within a
+        // group (e.g. several languages) prefer DEFAULT=YES.
+        val audioGroups = mutableMapOf<String, MutableList<Pair<Boolean, String>>>()
+        for (raw in lines) {
+            val line = raw.trim()
+            if (!line.startsWith("#EXT-X-MEDIA")) continue
+            val attrs = parseHlsAttrs(line)
+            if (attrs["TYPE"] != "AUDIO") continue
+            val group = attrs["GROUP-ID"] ?: continue
+            val uri = attrs["URI"] ?: continue
+            val def = attrs["DEFAULT"] == "YES"
+            audioGroups.getOrPut(group) { mutableListOf() } += def to resolveUrl(baseUrl, uri)
+        }
+        val audioUrlFor = { group: String? ->
+            group?.let {
+                audioGroups[it]?.firstOrNull { (def, _) -> def }?.second
+                    ?: audioGroups[it]?.firstOrNull()?.second
+            }
+        }
         val out = mutableListOf<HlsVariant>()
         for (i in lines.indices) {
             val line = lines[i].trim()
             if (!line.startsWith("#EXT-X-STREAM-INF")) continue
-            val bw = Regex("""BANDWIDTH=(\d+)""").find(line)
-                ?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
-            val res = Regex("""RESOLUTION=(\d+)x(\d+)""").find(line)
-            val w = res?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-            val h = res?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 0
+            val attrs = parseHlsAttrs(line)
+            val bw = attrs["BANDWIDTH"]?.toLongOrNull() ?: 0L
+            val res = attrs["RESOLUTION"]?.split("x")
+            val w = res?.getOrNull(0)?.toIntOrNull() ?: 0
+            val h = res?.getOrNull(1)?.toIntOrNull() ?: 0
             val uri = lines.getOrNull(i + 1)?.trim().orEmpty()
             if (uri.isNotBlank() && !uri.startsWith("#")) {
-                out += HlsVariant(bw, w, h, resolveUrl(baseUrl, uri))
+                out += HlsVariant(
+                    bw, w, h, resolveUrl(baseUrl, uri),
+                    audioUrlFor(attrs["AUDIO"])
+                )
             }
         }
         return out
@@ -1752,9 +1790,105 @@ object Downloads {
         return cipher.doFinal(data)
     }
 
+    /** Download one HLS media playlist (a video variant or a
+     *  separate audio rendition) into [dir], joining its
+     *  segments in order. Returns the joined file + bytes.
+     *  Pause/cancel surface as InterruptedException with
+     *  message "paused"/"cancelled", like the caller's
+     *  contract; the segment journal in [dir] lets a resume
+     *  continue where it stopped. Progress is mapped into
+     *  [progressBase, progressBase + progressSpan] so a
+     *  video+audio job reports one 0..100 sweep; [bytesOffset]
+     *  keeps the byte count cumulative across sides. */
+    private fun downloadHlsMedia(
+        appCtx: Context, store: PioneerStore, rec: DownloadRecord,
+        mediaUrl: String, referer: String?, snapshot: CookieSnapshot?,
+        dir: File, progressBase: Double, progressSpan: Double,
+        bytesOffset: Long = 0L, onProgress: (Int) -> Unit = {},
+    ): Pair<File, Long> {
+        val mediaText = fetchText(
+            mediaUrl, referer,
+            cookieForRequest(mediaUrl, snapshot, null)
+        )
+        val media = parseHlsMedia(mediaText, mediaUrl)
+        if (media.segments.isEmpty()) throw java.io.IOException("Empty HLS media playlist")
+        val done = readSegJournal(dir)
+        val total = media.segments.size
+        var keyBytes: ByteArray? = null
+        var lastKeyUri: String? = null
+        var fetchedBytes = 0L
+        for ((index, seg) in media.segments.withIndex()) {
+            if (isCancelled(rec.id)) throw InterruptedException("cancelled")
+            if (isPaused(rec.id)) {
+                writeSegJournal(dir, done)
+                throw InterruptedException("paused")
+            }
+            if (index in done) continue
+            val segCookie = cookieForRequest(seg.url, snapshot, null)
+            val bytes = runCatching {
+                checkedBytes(openGet(seg.url, referer, segCookie))
+            }.getOrElse {
+                // One transient failure retries once after a
+                // short wait; a second failure fails the job.
+                if (sleepChecked(rec.id, 2_000)) {
+                    writeSegJournal(dir, done)
+                    throw InterruptedException("paused")
+                }
+                checkedBytes(openGet(seg.url, referer, segCookie))
+            }
+            val plain = if (seg.keyUri != null) {
+                if (seg.keyUri != lastKeyUri) {
+                    keyBytes = checkedBytes(
+                        openGet(seg.keyUri, referer, cookieForRequest(seg.keyUri, snapshot, null))
+                    )
+                    lastKeyUri = seg.keyUri
+                }
+                val iv = seg.keyIv?.let { hex ->
+                    val padded = hex.padStart(32, '0')
+                    ByteArray(16) { i ->
+                        padded.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+                    }
+                } ?: ByteArray(16).also { b ->
+                    // IV defaults to the segment sequence
+                    // number as a 16-byte big-endian value.
+                    b[12] = (index ushr 24).toByte()
+                    b[13] = (index ushr 16).toByte()
+                    b[14] = (index ushr 8).toByte()
+                    b[15] = index.toByte()
+                }
+                decryptAes128(bytes, keyBytes!!, iv)
+            } else bytes
+            File(dir, "seg-%05d.ts".format(index)).writeBytes(plain)
+            done += index
+            fetchedBytes += plain.size.toLong()
+            if (index % 5 == 0 || index == total - 1) {
+                writeSegJournal(dir, done)
+                val pct = (progressBase * 100 + progressSpan * 100 * (index + 1) / total)
+                    .toInt().coerceIn(0, 100)
+                store.updateDownloadProgress(rec.id, pct)
+                noteBytes(store, rec, bytesOffset + fetchedBytes, -1, -1)
+                onProgress(pct)
+                notifyProgress(appCtx, rec, pct)
+            }
+        }
+        // Join in order into the staged output.
+        val staged = File(dir, "joined.ts")
+        staged.outputStream().use { out ->
+            for (i in media.segments.indices) {
+                val f = File(dir, "seg-%05d.ts".format(i))
+                if (f.exists()) f.inputStream().use { it.copyTo(out) }
+            }
+        }
+        return staged to fetchedBytes
+    }
+
     /** Fetch + join an HLS stream into one playable file.
      *  Segments are fetched with a journal, so a resumed job
-     *  continues where it stopped instead of starting over. */
+     *  continues where it stopped instead of starting over.
+     *  When the chosen variant carries a separate audio
+     *  rendition (#EXT-X-MEDIA), the audio side is fetched
+     *  too and both sides are remuxed into one MP4
+     *  (alpha.46) — the video-only path is unchanged. */
     fun runHlsJob(
         context: Context, store: PioneerStore, rec: DownloadRecord,
         referer: String?, onProgress: (Int) -> Unit = {},
@@ -1773,100 +1907,54 @@ object Downloads {
                 rec.url, referer,
                 cookieForRequest(rec.url, snapshot, null)
             )
-            val mediaUrl = if (masterText.contains("#EXT-X-STREAM-INF")) {
+            val chosen: HlsVariant? = if (masterText.contains("#EXT-X-STREAM-INF")) {
                 val variants = parseHlsMaster(masterText, rec.url)
                 if (variants.isEmpty()) throw java.io.IOException("Empty HLS master playlist")
-                val chosen = variantBw?.let { bw ->
+                variantBw?.let { bw ->
                     variants.firstOrNull { it.bandwidth == bw }
                 } ?: variants.maxByOrNull { it.bandwidth }
-                chosen!!.url
-            } else {
-                rec.url
-            }
-            val mediaText = fetchText(
-                mediaUrl, referer,
-                cookieForRequest(mediaUrl, snapshot, null)
-            )
-            val media = parseHlsMedia(mediaText, mediaUrl)
-            if (media.segments.isEmpty()) throw java.io.IOException("Empty HLS media playlist")
+            } else null
             val dir = stagingDir(appCtx, rec)
-            val done = readSegJournal(dir)
-            val total = media.segments.size
-            var keyBytes: ByteArray? = null
-            var lastKeyUri: String? = null
-            var fetchedBytes = 0L
-            for ((index, seg) in media.segments.withIndex()) {
-                if (isCancelled(rec.id)) throw InterruptedException("cancelled")
-                if (isPaused(rec.id)) {
-                    writeSegJournal(dir, done)
-                    return HlsOutcome(false, fetchedBytes, "paused")
+            val (videoFile, videoBytes) = downloadHlsMedia(
+                appCtx, store, rec, chosen?.url ?: rec.url, referer, snapshot,
+                dir, 0.0, if (chosen?.audioUrl != null) 0.8 else 1.0, 0L, onProgress
+            )
+            var fetchedBytes = videoBytes
+            val staged: File
+            if (chosen?.audioUrl != null) {
+                // Separate audio rendition: fetch its segments
+                // into their own subdir (own journal, own
+                // segment files) and remux both sides into
+                // one MP4.
+                val audioDir = File(dir, "audio").apply { mkdirs() }
+                val (audioFile, audioBytes) = downloadHlsMedia(
+                    appCtx, store, rec, chosen.audioUrl, referer, snapshot,
+                    audioDir, 0.8, 0.2, videoBytes, onProgress
+                )
+                fetchedBytes += audioBytes
+                val muxed = File(dir, "joined.mp4")
+                remuxMp4(appCtx, listOf(videoFile, audioFile), muxed)
+                staged = muxed
+                // The output is a real MP4, not a TS join.
+                if (stageOnly == null && rec.fileName.endsWith(".ts", ignoreCase = true)) {
+                    store.updateDownloadFileName(
+                        rec.id, rec.fileName.substringBeforeLast('.') + ".mp4"
+                    )
                 }
-                if (index in done) continue
-                val segCookie = cookieForRequest(seg.url, snapshot, null)
-                val bytes = runCatching {
-                    checkedBytes(openGet(seg.url, referer, segCookie))
-                }.getOrElse { e ->
-                    // One transient failure retries once after a
-                    // short wait; a second failure fails the job.
-                    if (sleepChecked(rec.id, 2_000)) {
-                        writeSegJournal(dir, done)
-                        return HlsOutcome(false, fetchedBytes, "paused")
+            } else {
+                staged = videoFile
+                // CMAF/fMP4 joins are really MP4, not TS: sniff
+                // for an ftyp box and rename the record.
+                val isMp4 = runCatching {
+                    staged.inputStream().use { ins ->
+                        val head = ByteArray(12)
+                        ins.read(head) == 12 && head.copyOfRange(4, 8).decodeToString() == "ftyp"
                     }
-                    checkedBytes(openGet(seg.url, referer, segCookie))
+                }.getOrDefault(false)
+                if (isMp4 && rec.fileName.endsWith(".ts", ignoreCase = true)) {
+                    val mp4Name = rec.fileName.substringBeforeLast('.') + ".mp4"
+                    store.updateDownloadFileName(rec.id, mp4Name)
                 }
-                val plain = if (seg.keyUri != null) {
-                    if (seg.keyUri != lastKeyUri) {
-                        keyBytes = checkedBytes(
-                            openGet(seg.keyUri, referer, cookieForRequest(seg.keyUri, snapshot, null))
-                        )
-                        lastKeyUri = seg.keyUri
-                    }
-                    val iv = seg.keyIv?.let { hex ->
-                        val padded = hex.padStart(32, '0')
-                        ByteArray(16) { i ->
-                            padded.substring(i * 2, i * 2 + 2).toInt(16).toByte()
-                        }
-                    } ?: ByteArray(16).also { b ->
-                        // IV defaults to the segment sequence
-                        // number as a 16-byte big-endian value.
-                        b[12] = (index ushr 24).toByte()
-                        b[13] = (index ushr 16).toByte()
-                        b[14] = (index ushr 8).toByte()
-                        b[15] = index.toByte()
-                    }
-                    decryptAes128(bytes, keyBytes!!, iv)
-                } else bytes
-                File(dir, "seg-%05d.ts".format(index)).writeBytes(plain)
-                done += index
-                fetchedBytes += plain.size.toLong()
-                if (index % 5 == 0 || index == total - 1) {
-                    writeSegJournal(dir, done)
-                    val pct = ((index + 1) * 100 / total).coerceIn(0, 100)
-                    store.updateDownloadProgress(rec.id, pct)
-                    noteBytes(store, rec, fetchedBytes, -1, -1)
-                    onProgress(pct)
-                    notifyProgress(appCtx, rec, pct)
-                }
-            }
-            // Join in order into the staged output.
-            val staged = File(dir, "joined.ts")
-            staged.outputStream().use { out ->
-                for (i in media.segments.indices) {
-                    val f = File(dir, "seg-%05d.ts".format(i))
-                    if (f.exists()) f.inputStream().use { it.copyTo(out) }
-                }
-            }
-            // CMAF/fMP4 joins are really MP4, not TS: sniff
-            // for an ftyp box and rename the record.
-            val isMp4 = runCatching {
-                staged.inputStream().use { ins ->
-                    val head = ByteArray(12)
-                    ins.read(head) == 12 && head.copyOfRange(4, 8).decodeToString() == "ftyp"
-                }
-            }.getOrDefault(false)
-            if (isMp4 && rec.fileName.endsWith(".ts", ignoreCase = true)) {
-                val mp4Name = rec.fileName.substringBeforeLast('.') + ".mp4"
-                store.updateDownloadFileName(rec.id, mp4Name)
             }
             if (stageOnly != null) {
                 // Merge side: stage the joined file for the
@@ -1900,8 +1988,78 @@ object Downloads {
      *  URL for HLS; for DASH it is null and [bandwidth]
      *  selects the representation at start time. */
     data class DownloadVariant(
-        val label: String, val url: String?, val bandwidth: Long
+        val label: String, val url: String?, val bandwidth: Long,
+        /** Separate audio rendition URL (HLS #EXT-X-MEDIA), if any. */
+        val audioUrl: String? = null,
+        /** This choice downloads audio as well as video. */
+        val hasAudio: Boolean = false,
+        /** Separate video+audio tracks will be merged into one file. */
+        val needsMux: Boolean = false,
     )
+
+    /** Row label for one quality variant, shared by the HLS
+     *  and DASH branches below and by the quality sheet:
+     *  "1920x1080 • 5000 kbps", plus " • video + audio"
+     *  when the choice downloads an audio track too. */
+    internal fun downloadVariantLabel(
+        width: Int, height: Int, bandwidth: Long, hasAudio: Boolean
+    ): String {
+        val base = if (width > 0) {
+            "${width}x${height} • ${bandwidth / 1000} kbps"
+        } else "${bandwidth / 1000} kbps"
+        return if (hasAudio) "$base • video + audio" else base
+    }
+
+    /** HLS master variants -> download choices, highest
+     *  first. A variant with a separate audio rendition
+     *  carries its URL so the job can fetch + mux it. */
+    internal fun hlsVariantsToDownload(
+        variants: List<HlsVariant>
+    ): List<DownloadVariant> = variants
+        .sortedByDescending { it.bandwidth }
+        .map {
+            DownloadVariant(
+                label = downloadVariantLabel(it.width, it.height, it.bandwidth, it.audioUrl != null),
+                url = it.url, bandwidth = it.bandwidth,
+                audioUrl = it.audioUrl, hasAudio = it.audioUrl != null,
+                needsMux = it.audioUrl != null
+            )
+        }
+
+    /** DASH representations -> download choices, highest
+     *  first. Only video reps are offered; each row pairs
+     *  the video rep with the best audio rep (the job
+     *  remuxes the two), so hasAudio/needsMux are true
+     *  whenever the manifest carries an audio rep. */
+    internal fun dashRepsToVariants(
+        reps: List<DashRep>
+    ): List<DownloadVariant> {
+        val hasAudio = reps.any { it.mime.contains("audio") }
+        return reps
+            .filter { it.mime.contains("video") || it.width > 0 }
+            .sortedByDescending { it.bandwidth }
+            .map {
+                DownloadVariant(
+                    label = downloadVariantLabel(it.width, it.height, it.bandwidth, hasAudio),
+                    url = null, bandwidth = it.bandwidth,
+                    hasAudio = hasAudio, needsMux = hasAudio
+                )
+            }
+    }
+
+    /** The URL to start a download with once a quality was
+     *  chosen: an HLS choice with a separate audio rendition
+     *  must start from the master playlist so the job can
+     *  find the audio track; otherwise the variant's own
+     *  URL (HLS) or the manifest (DASH, url null) is used. */
+    internal fun downloadUrlForVariant(
+        masterUrl: String, chosen: DownloadVariant?
+    ): String = if (chosen?.audioUrl != null) masterUrl else chosen?.url ?: masterUrl
+
+    /** A quality sheet is worth showing only when there is
+     *  a choice to make: more than one variant. */
+    internal fun offersQualityChoice(variants: List<DownloadVariant>): Boolean =
+        variants.size > 1
 
     /** Fetch the quality variants for an HLS master playlist
      *  or a DASH manifest while the confirmation dialog is
@@ -1916,30 +2074,8 @@ object Downloads {
         if (!isHls && !isDash) return emptyList()
         return runCatching {
             val text = fetchText(url, referer)
-            if (isHls) {
-                parseHlsMaster(text, url)
-                    .sortedByDescending { it.bandwidth }
-                    .map {
-                        DownloadVariant(
-                            label = if (it.width > 0) {
-                                "${it.width}x${it.height} • ${it.bandwidth / 1000} kbps"
-                            } else "${it.bandwidth / 1000} kbps",
-                            url = it.url, bandwidth = it.bandwidth
-                        )
-                    }
-            } else {
-                parseDashManifest(text, url)
-                    .filter { it.mime.contains("video") || it.width > 0 }
-                    .sortedByDescending { it.bandwidth }
-                    .map {
-                        DownloadVariant(
-                            label = if (it.width > 0) {
-                                "${it.width}x${it.height} • ${it.bandwidth / 1000} kbps"
-                            } else "${it.bandwidth / 1000} kbps",
-                            url = null, bandwidth = it.bandwidth
-                        )
-                    }
-            }
+            if (isHls) hlsVariantsToDownload(parseHlsMaster(text, url))
+            else dashRepsToVariants(parseDashManifest(text, url))
         }.getOrDefault(emptyList())
     }
 
