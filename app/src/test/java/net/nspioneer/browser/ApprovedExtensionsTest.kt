@@ -17,7 +17,7 @@ class ApprovedExtensionsTest {
     fun `exactly two approved extensions, uBlock first`() {
         assertEquals(2, ApprovedExtensions.ALL.size)
         assertEquals("uBlock Origin", ApprovedExtensions.ALL[0].displayName)
-        assertEquals("Google Search Fixer", ApprovedExtensions.ALL[1].displayName)
+        assertEquals("Google Search Fixer Refreshed", ApprovedExtensions.ALL[1].displayName)
     }
 
     @Test
@@ -31,14 +31,30 @@ class ApprovedExtensionsTest {
     }
 
     @Test
-    fun `Google Search Fixer entry matches AMO`() {
+    fun `Google Search Fixer Refreshed entry matches AMO`() {
         val g = ApprovedExtensions.GOOGLE_SEARCH_FIXER
-        assertEquals("{58c32ac4-0d6c-4d6f-ae2c-96aaf8ffcb66}", g.id)
+        assertEquals("{abea9bb3-7bd0-48bc-88b1-39f0560744d6}", g.id)
         assertEquals(
-            "https://addons.mozilla.org/firefox/downloads/latest/google-search-fixer/latest.xpi",
+            "https://addons.mozilla.org/firefox/downloads/latest/google-search-fixer-refreshed/latest.xpi",
             g.amoUrl
         )
-        assertEquals("Google Search Fixer", g.displayName)
+        assertEquals("Google Search Fixer Refreshed", g.displayName)
+    }
+
+    @Test
+    fun `original Google Search Fixer identity is no longer approved`() {
+        // alpha.54: the maintained fork replaces the stale
+        // original (AMO id 869140, v1.6) — neither its GUID
+        // nor its download URL nor its bare name may remain
+        // in the approved set.
+        val ids = ApprovedExtensions.ALL.map { it.id }
+        val urls = ApprovedExtensions.ALL.map { it.amoUrl }
+        val names = ApprovedExtensions.ALL.map { it.displayName }
+        assertTrue("{58c32ac4-0d6c-4d6f-ae2c-96aaf8ffcb66}" !in ids)
+        assertTrue(
+            "https://addons.mozilla.org/firefox/downloads/latest/google-search-fixer/latest.xpi" !in urls
+        )
+        assertTrue("Google Search Fixer" !in names)
     }
 
     @Test
