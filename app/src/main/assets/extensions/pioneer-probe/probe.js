@@ -460,6 +460,15 @@
     } catch (e) { /* a locked-down page simply never shows the button */ }
   }
 
+  /* alpha.50: a video that gains its source or duration
+   * after load (a lazy player, MSE attaching late) is
+   * found without waiting for the +2s / +6s re-scans or
+   * the 1 s pill poller: re-run the DOM scan when metadata
+   * loads or the duration becomes known. Capture phase,
+   * so it catches media in any subtree. */
+  document.addEventListener("loadedmetadata", function () { report("loadedmetadata"); }, true);
+  document.addEventListener("durationchange", function () { report("durationchange"); }, true);
+
   installVideoPopup();
   report("idle");
   queryZoom();

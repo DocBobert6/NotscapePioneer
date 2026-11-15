@@ -367,12 +367,61 @@
     return type.indexOf("audio/") === 0 ? "audio" : "video";
   }
 
+  /* Segment noise (alpha.50, gap plan row A-3):
+   * observations that are fragments of a manifest stream,
+   * not media in their own right — each one became a
+   * media-sheet row of its own. A manifest (.m3u8 / .mpd)
+   * is never noise, even if its path happens to carry a
+   * noise-shaped token. Must agree with the Kotlin copies
+   * in BlockingObserver and MediaLog. */
+  var MANIFEST_URL_RE = /\.(m3u8|mpd)(\?|#|$)/i;
+  var SEGMENT_NOISE_RE = /\.m4s(\?|#|$)|segment-|fragment|bytes=/i;
+  function isSegmentNoise(url) {
+    if (!url) return false;
+    var lower = String(url).toLowerCase();
+    if (MANIFEST_URL_RE.test(lower)) return false;
+    return SEGMENT_NOISE_RE.test(lower);
+  }
+
+  /* True for a manifest observation: a manifest URL, or a
+   * manifest MIME. The size floor (below) never applies to
+   * one: HLS / DASH manifests are routinely a few KB, and
+   * flooring them would break the detection the floor
+   * exists to clean up. */
+  function isManifest(url, mime) {
+    var lower = String(url || "").toLowerCase();
+    if (MANIFEST_URL_RE.test(lower)) return true;
+    if (mime) {
+      var type = String(mime).split(";")[0].trim().toLowerCase();
+      if (type === "application/x-mpegurl" ||
+          type === "application/dash+xml") return true;
+    }
+    return false;
+  }
+
+  /* 10 KB size floor (alpha.50): an observation whose size
+   * is known and below the floor is not media — tiny junk
+   * (a tracking pixel served as video/*, a 1 KB error
+   * page) never becomes a sheet row. No size known, no
+   * floor: onBeforeRequest carries no size and keeps
+   * today's behaviour; an unparseable size is treated as
+   * unknown. */
+  var MEDIA_SIZE_FLOOR_BYTES = 10240;
+
   /* MIME-authoritative classification: when a response MIME
    * is known (onHeadersReceived) the MIME decides — a media
    * MIME reports, a non-media MIME vetoes even a
    * media-looking URL. With no MIME (onBeforeRequest) the
-   * URL regex decides, exactly as before. */
-  function mediaKindFor(url, mime) {
+   * URL regex decides, exactly as before. Segment noise is
+   * never media, and the size floor applies where a size is
+   * known (alpha.50). */
+  function mediaKindFor(url, mime, contentLength) {
+    if (isSegmentNoise(url)) return null;
+    if (contentLength !== null && contentLength !== undefined &&
+        String(contentLength).length > 0 && !isManifest(url, mime)) {
+      var size = Number(contentLength);
+      if (isFinite(size) && size < MEDIA_SIZE_FLOOR_BYTES) return null;
+    }
     if (mime !== null && mime !== undefined && String(mime).length > 0) {
       return mediaKindForMime(mime);
     }
@@ -538,7 +587,7 @@
       if (name === "content-type") contentType = String(headers[i].value || "");
       else if (name === "content-length") contentLength = String(headers[i].value || "");
     }
-    var kind = mediaKindFor(url, contentType);
+    var kind = mediaKindFor(url, contentType, contentLength);
     if (!kind) return {};
     var pageHost = hostFromUrl(details.originUrl || details.documentUrl || "");
     pageHostForTab(details.tabId, pageHost).then(function (host) {
@@ -631,6 +680,8 @@
       documentCategory: documentCategory,
       mediaKindFor: mediaKindFor,
       mediaKindForMime: mediaKindForMime,
+      isSegmentNoise: isSegmentNoise,
+      isManifest: isManifest,
       sameSite: sameSite,
       registrableDomain: registrableDomain,
       CAT_ADS: CAT_ADS,
