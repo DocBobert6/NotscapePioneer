@@ -1641,20 +1641,27 @@ fun SettingsScreen(
                                     val result = UpdateCheck.check()
                                     withContext(Dispatchers.Main) {
                                         updateChecking = false
-                                        when (result) {
-                                            is UpdateCheck.Result.Available,
-                                            is UpdateCheck.Result.UpToDate -> {
-                                                UpdateCheck.saveLastCheck(
-                                                    store, result.remote
+                                        // One branch per type: a
+                                        // multi-type branch does not
+                                        // smart-cast `result`.
+                                        val remote = when (result) {
+                                            is UpdateCheck.Result.Available ->
+                                                result.remote
+                                            is UpdateCheck.Result.UpToDate ->
+                                                result.remote
+                                            UpdateCheck.Result.Failed -> null
+                                        }
+                                        if (remote != null) {
+                                            UpdateCheck.saveLastCheck(
+                                                store, remote
+                                            )
+                                            lastCheck =
+                                                UpdateCheck.LastCheck(
+                                                    remote,
+                                                    System.currentTimeMillis()
                                                 )
-                                                lastCheck =
-                                                    UpdateCheck.LastCheck(
-                                                        result.remote,
-                                                        System.currentTimeMillis()
-                                                    )
-                                            }
-                                            UpdateCheck.Result.Failed ->
-                                                updateCheckFailed = true
+                                        } else {
+                                            updateCheckFailed = true
                                         }
                                     }
                                 }
