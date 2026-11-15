@@ -106,7 +106,7 @@ class TranslationManagerTest {
     // ---------- pure helpers ----------
 
     @Test
-    fun parse_defaultIsAllSix() {
+    fun parse_defaultIsAllEight() {
         assertEquals(TranslationLanguages.CODES, TranslationLanguages.parseEnabledLanguages(null))
         assertEquals(TranslationLanguages.CODES, TranslationLanguages.parseEnabledLanguages(""))
         assertEquals(TranslationLanguages.CODES, TranslationLanguages.parseEnabledLanguages("   "))
@@ -127,8 +127,8 @@ class TranslationManagerTest {
     @Test
     fun parse_dashMeansNone() {
         // The "-" sentinel setLanguageEnabled writes when
-        // all six are off must parse back to empty — never
-        // to all six.
+        // all eight are off must parse back to empty — never
+        // to all eight.
         assertEquals(emptySet<String>(), TranslationLanguages.parseEnabledLanguages("-"))
     }
 
@@ -155,11 +155,16 @@ class TranslationManagerTest {
     }
 
     @Test
-    fun isOfferable_sixOnly() {
+    fun isOfferable_eightOnly() {
         assertTrue(TranslationLanguages.isOfferable("es"))
         assertTrue(TranslationLanguages.isOfferable("es-ES"))
         assertTrue(TranslationLanguages.isOfferable("pt-BR"))
-        assertFalse(TranslationLanguages.isOfferable("zh"))
+        // alpha.55: Mandarin Chinese and Hindi join the set.
+        assertTrue(TranslationLanguages.isOfferable("zh"))
+        assertTrue(TranslationLanguages.isOfferable("zh-CN"))
+        assertTrue(TranslationLanguages.isOfferable("hi"))
+        assertTrue(TranslationLanguages.isOfferable("hi-IN"))
+        assertFalse(TranslationLanguages.isOfferable("ja"))
         assertFalse(TranslationLanguages.isOfferable("en"))
         assertFalse(TranslationLanguages.isOfferable(""))
     }
@@ -211,9 +216,18 @@ class TranslationManagerTest {
     }
 
     @Test
-    fun gate_seventhLanguage() {
-        assertFalse(gate(from = "zh"))
+    fun gate_ninthLanguage() {
+        // A language outside the eight is never offered.
+        assertFalse(gate(from = "ja"))
         assertFalse(gate(from = "en"))
+    }
+
+    @Test
+    fun gate_newLanguagesOffer() {
+        // alpha.55: Mandarin Chinese and Hindi gate exactly
+        // like the original six.
+        assertTrue(gate(from = "zh"))
+        assertTrue(gate(from = "hi"))
     }
 
     // ---------- device gate ----------
@@ -242,15 +256,17 @@ class TranslationManagerTest {
         )
 
     @Test
-    fun modelStates_mapsSixRows() {
+    fun modelStates_mapsEightRows() {
         manager.onModelStatesLoaded(
             listOf(
                 model("es", true, 73_600_000),
                 model("fr", false, 73_900_000),
+                model("zh", false, 104_500_000),
+                model("hi", true, 44_300_000),
             )
         )
         val states = manager.modelStates.value
-        assertEquals(6, states.size)
+        assertEquals(8, states.size)
         val es = states.first { it.code == "es" }
         assertTrue(es.downloaded)
         assertEquals(73_600_000, es.sizeBytes)
@@ -260,6 +276,40 @@ class TranslationManagerTest {
         val de = states.first { it.code == "de" }
         assertFalse(de.downloaded)
         assertEquals(0, de.sizeBytes)
+        // alpha.55: the two new rows map the same way.
+        val zh = states.first { it.code == "zh" }
+        assertFalse(zh.downloaded)
+        assertEquals(104_500_000, zh.sizeBytes)
+        val hi = states.first { it.code == "hi" }
+        assertTrue(hi.downloaded)
+        assertEquals(44_300_000, hi.sizeBytes)
+    }
+
+    @Test
+    fun supportedSet_hasEightLanguages() {
+        // alpha.55: the six shipped in alpha.45 plus
+        // Mandarin Chinese and Hindi.
+        assertEquals(8, TranslationLanguages.SUPPORTED.size)
+        assertEquals(
+            setOf("es", "fr", "de", "it", "pt", "ru", "zh", "hi"),
+            TranslationLanguages.CODES,
+        )
+        val zh = TranslationLanguages.languageFor("zh")
+        assertEquals("Mandarin Chinese", zh?.name)
+        assertEquals(54.6, zh?.intoEnglishMB)
+        assertEquals(104.5, zh?.pairTotalMB)
+        val hi = TranslationLanguages.languageFor("hi")
+        assertEquals("Hindi", hi?.name)
+        assertEquals(22.7, hi?.intoEnglishMB)
+        assertEquals(44.3, hi?.pairTotalMB)
+    }
+
+    @Test
+    fun fallbackPackSize_newLanguages() {
+        // alpha.55: static fallbacks are the registry pair
+        // totals (runonweb MODELS.md, 2026-10-24 mirror).
+        assertEquals(104_500_000L, manager.fallbackPackSize("zh"))
+        assertEquals(44_300_000L, manager.fallbackPackSize("hi"))
     }
 
     @Test
@@ -320,12 +370,33 @@ class TranslationManagerTest {
     }
 
     @Test
-    fun offer_rejectedForSeventhLanguage() {
+    fun offer_rejectedForNinthLanguage() {
         manager.onSupportedResult(true)
         manager.onTabSelected(tab1)
-        detect(session, "zh")
-        manager.onOfferDetailsLoaded(tab1, "zh", 40_000_000, false)
+        detect(session, "ja")
+        manager.onOfferDetailsLoaded(tab1, "ja", 40_000_000, false)
         assertNull(manager.offer.value)
+    }
+
+    @Test
+    fun offer_buildsForNewLanguages() {
+        // alpha.55: the offer fires for Mandarin Chinese
+        // and Hindi exactly as for the original six.
+        buildOffer(from = "zh")
+        assertEquals("zh", manager.offer.value?.fromCode)
+        assertEquals("Mandarin Chinese", manager.offer.value?.fromName)
+        assertEquals(
+            TranslatePageState.Offer("zh", "Mandarin Chinese"),
+            manager.pageState.value,
+        )
+        manager.answerOffer(TranslateChoice.NOT_NOW, session)
+        buildOffer(from = "hi")
+        assertEquals("hi", manager.offer.value?.fromCode)
+        assertEquals("Hindi", manager.offer.value?.fromName)
+        assertEquals(
+            TranslatePageState.Offer("hi", "Hindi"),
+            manager.pageState.value,
+        )
     }
 
     @Test
@@ -397,6 +468,45 @@ class TranslationManagerTest {
     // ---------- selection / lifecycle ----------
 
     @Test
+    fun answer_translateNewLanguageWithoutDownload() {
+        // alpha.55: with the model already downloaded, the
+        // new languages translate with downloadModel=false
+        // — translate() itself never downloads silently,
+        // and no download is attempted before the user
+        // confirms (there is no download call on the offer
+        // path at all; the download only starts after the
+        // user answers TRANSLATE on an undownloaded model).
+        buildOffer(from = "zh", downloaded = true)
+        manager.answerOffer(TranslateChoice.TRANSLATE, session)
+        verify(sessionTranslation).translate(
+            eq("zh"),
+            eq("en"),
+            argThat(
+                ArgumentMatcher<SessionTranslation.TranslationOptions> { opts ->
+                    opts != null && !opts.downloadModel
+                },
+            ),
+        )
+        assertFalse(
+            statusLines.any { it.contains("downloading Mandarin Chinese model") }
+        )
+        buildOffer(from = "hi", downloaded = true)
+        manager.answerOffer(TranslateChoice.TRANSLATE, session)
+        verify(sessionTranslation).translate(
+            eq("hi"),
+            eq("en"),
+            argThat(
+                ArgumentMatcher<SessionTranslation.TranslationOptions> { opts ->
+                    opts != null && !opts.downloadModel
+                },
+            ),
+        )
+        assertFalse(
+            statusLines.any { it.contains("downloading Hindi model") }
+        )
+    }
+
+    @Test
     fun tabClosed_clearsOfferAndState() {
         buildOffer()
         manager.answerOffer(TranslateChoice.NOT_NOW, session)
@@ -442,7 +552,7 @@ class TranslationManagerTest {
         )
     }
 
-    // ---------- the six-language setting ----------
+    // ---------- the eight-language setting ----------
 
     @Test
     fun setLanguageEnabled_togglesAndPersists() {
@@ -473,7 +583,7 @@ class TranslationManagerTest {
 
     @Test
     fun setLanguageEnabled_unknownCodeIgnored() {
-        manager.setLanguageEnabled("zh", false)
+        manager.setLanguageEnabled("ja", false)
         assertTrue(manager.isLanguageEnabled("es"))
         assertEquals(
             TranslationLanguages.CODES,
