@@ -144,6 +144,12 @@ dependencies {
     // on the android.jar stubs). 4.14.1 is the latest stable;
     // runtime SDK is pinned to 35 in the test class.
     testImplementation("org.robolectric:robolectric:4.14.1")
+    // S-A1 (alpha.32): PermissionDelegateTest mocks the
+    // GeckoRuntime the delegate only touches through
+    // runCatching mirrors. Mockito 5 mocks final classes by
+    // default (inline mock maker); 5.14.2 is the latest
+    // stable 5.x at the time of writing.
+    testImplementation("org.mockito:mockito-core:5.14.2")
     // Cast probe only (route discovery logging, no session launch).
     // Same versions as Mariner.
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
