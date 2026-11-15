@@ -86,6 +86,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.nspioneer.browser.data.Bookmark
 import net.nspioneer.browser.data.DownloadRecord
+import net.nspioneer.browser.data.HistoryEntry
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.folderChild
 import net.nspioneer.browser.data.folderChildren
