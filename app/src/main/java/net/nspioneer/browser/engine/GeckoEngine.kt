@@ -305,7 +305,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                     .build()
             )
             // Batch 4: web dark mode is prefers-color-scheme
-            // only — GeckoView 159 has no forced-darkening
+            // only — GeckoView 160 has no forced-darkening
             // API (verified against the pinned AAR: no
             // setForceDark / algorithmic-darkening anywhere).
             .preferredColorScheme(preferredColorSchemeForStore())
@@ -946,10 +946,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     /** Parse an ExternalDownload from a WebResponse's headers.
      *  WebResponse extends WebMessage, NOT WebResponseInfo — it
      *  has NO filename/contentLength/contentType fields; those
-     *  come from headers, and the v160 content-disposition
-     *  validation is absent on 159, so the raw server value is
-     *  parsed and sanitised here (Downloads.resolveFileName
-     *  applies the final sanitise). */
+     *  come from headers. Since GeckoView 160 Gecko validates
+     *  the content-disposition filename with the same rules
+     *  desktop applies before passing it on; the value is
+     *  still parsed and sanitised here as defence in depth
+     *  (Downloads.resolveFileName applies the final sanitise). */
     internal fun externalDownloadFrom(
         response: org.mozilla.geckoview.WebResponse,
     ): ExternalDownload {

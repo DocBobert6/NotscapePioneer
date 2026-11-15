@@ -107,10 +107,10 @@ import java.io.FileOutputStream
  *   build script (the coordinator updates it with the pin).
  *
  * Batch 4 fills in the missing-now rows from the UI audit
- * (item 12). Deliberately OMITTED (no GeckoView 159 API —
+ * (item 12). Deliberately OMITTED (no GeckoView 160 API —
  * see the phase docs for the javap evidence, do not fake
  * them): session-only cookies (no cookie-lifetime /
- * session-only value in the 159 AAR), DOM storage toggle
+ * session-only value in the 160 AAR), DOM storage toggle
  * (GeckoSessionSettings has no setDomStorageEnabled), and
  * per-site third-party cookies (no per-site cookie
  * behaviour; the ContentPermission kinds have no cookie
@@ -124,7 +124,7 @@ import java.io.FileOutputStream
  */
 
 /** The GeckoView version pinned in app/build.gradle.kts. */
-private const val GECKOVIEW_VERSION = "159.0.20261102144711"
+private const val GECKOVIEW_VERSION = "160.0.20261104181552"
 
 @Composable
 private fun ChoiceRow(
@@ -899,7 +899,7 @@ fun SettingsScreen(
                 )
                 InsetDivider()
                 // Batch 4: HTTPS-only mode (app-layer — there is
-                // no public HTTPS-only API in GeckoView 159).
+                // no public HTTPS-only API in GeckoView 160).
                 ToggleRow(
                     label = "HTTPS-only mode",
                     supporting = "Plain-http pages show a warning first; " +
@@ -1956,7 +1956,7 @@ private fun countHistoryInRange(
  * `requestSiteReload`).
  *
  * Deliberately OMITTED: the Third-party cookies row — no
- * per-site cookie API exists in GeckoView 159 (see the
+ * per-site cookie API exists in GeckoView 160 (see the
  * header comment). Desktop site is a two-state cycle
  * (On/Default) — there is no global desktop mode to force
  * off against.

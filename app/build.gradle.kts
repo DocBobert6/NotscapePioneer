@@ -81,18 +81,20 @@ tasks.configureEach {
     }
 }
 
-// GeckoView pin: 159.0.20261102144711 — latest STABLE release at spike
-// time (Firefox 159, published to Mozilla Maven 2026-11-03). Never a
-// nightly or beta. Upgrade deliberately: one version bump, one full
-// regression pass. NOTE (2026-11-12): 159 (and 158) require
-// compileSdk 37+ and AGP 9.1.0+ per AAR metadata, so the toolchain is
-// AGP 9.4.1 / Gradle 9.8.1 / Kotlin 2.3.21 — but the android-37
-// platform itself is not published to Google's public SDK repository
-// yet, so the spike compiles against SDK 36 with the AAR metadata
-// check disabled (see the android {} block). The plain `geckoview`
-// artifact carries the engine for all ABIs; `abiFilters` above
-// strips everything but arm64-v8a at packaging time.
-val geckoviewVersion = "159.0.20261102144711"
+// GeckoView pin: 160.0.20261104181552 — latest STABLE release
+// (Firefox 160, published to Mozilla Maven 2026-11-04; stable
+// released 2026-11-10). Never a nightly or beta. Upgrade
+// deliberately: one version bump, one full regression pass.
+// NOTE (2026-11-12): 159 (and 158) require compileSdk 37+ and
+// AGP 9.1.0+ per AAR metadata, and 160 is no different, so the
+// toolchain is AGP 9.4.1 / Gradle 9.8.1 / Kotlin 2.3.21 — but
+// the android-37 platform itself is not published to Google's
+// public SDK repository yet, so the spike compiles against
+// SDK 36 with the AAR metadata check disabled (see the
+// android {} block). The plain `geckoview` artifact carries
+// the engine for all ABIs; `abiFilters` above strips
+// everything but arm64-v8a at packaging time.
+val geckoviewVersion = "160.0.20261104181552"
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.10.01")

@@ -60,7 +60,7 @@ data class SiteSetting(
     val host: String, val javaScript: Boolean = true,
     val blockImages: Boolean = false, val allowPopups: Boolean = false,
     val disableBlocking: Boolean = false, val blockPopups: Boolean = false
-    // No per-site third-party-cookies field: GeckoView 159
+    // No per-site third-party-cookies field: GeckoView 160
     // has no such API (audit S4, documented-impossible), so
     // the field was defined + serialised but never read.
 )

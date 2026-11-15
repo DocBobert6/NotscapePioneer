@@ -8,7 +8,7 @@ import android.net.Uri
  * `withHttpsException` / `withoutHttpsException` /
  * `isHttpsException`, ported verbatim).
  *
- * GeckoView 159 has NO public HTTPS-only API (verified
+ * GeckoView 160 has NO public HTTPS-only API (verified
  * against the pinned AAR: `GeckoRuntimeSettings` carries
  * `mHttpsOnly` / `mHttpsOnlyPrivateMode` fields but no
  * public setter on the settings, the Builder, or

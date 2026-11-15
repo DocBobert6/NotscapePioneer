@@ -31,7 +31,7 @@ class StatusPanel(context: Context) {
         const val TAG = "PioneerSpike"
 
         /** GeckoView version in app/build.gradle.kts (stable pin). */
-        const val GECKOVIEW_VERSION = "159.0.20261102144711"
+        const val GECKOVIEW_VERSION = "160.0.20261104181552"
     }
 
     private val appContext = context.applicationContext
