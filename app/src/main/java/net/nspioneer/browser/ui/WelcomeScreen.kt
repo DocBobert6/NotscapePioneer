@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -54,17 +56,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import net.nspioneer.browser.data.PioneerStore
+import net.nspioneer.browser.engine.ApprovedExtensions
+import net.nspioneer.browser.engine.Engine
 
 /**
  * The first-run welcome (Batch 4, Mariner's WelcomeScreen
- * adapted to Pioneer scope): four short pages — what this
+ * adapted to Pioneer scope): five short pages — what this
  * browser is, what the library does, the default-browser
- * ask, and the two choices worth making up front (theme,
- * search engine), written live to the same settings
- * Settings uses. Shown until the "onboarded" setting is
- * set; Settings > About can replay it at any time.
- * Skipping counts as finishing: the defaults are the ones
- * the pages would have set.
+ * ask, the two choices worth making up front (theme,
+ * search engine), and the two optional extensions (uBlock
+ * Origin, Google Search Fixer), written live to the same
+ * settings Settings uses. Shown until the "onboarded"
+ * setting is set; Settings > About can replay it at any
+ * time. Skipping counts as finishing: the defaults are the
+ * ones the pages would have set — extensions stay
+ * uninstalled unless chosen.
  *
  * Pioneer scope, not Mariner's: no Games page, no
  * bookshelf / reader / playlists, no notifications ask
@@ -74,7 +80,7 @@ import net.nspioneer.browser.data.PioneerStore
  * Pioneer's strings.xml carries only app_name.
  */
 @Composable
-fun WelcomeScreen(store: PioneerStore, onDone: () -> Unit) {
+fun WelcomeScreen(store: PioneerStore, engine: Engine, onDone: () -> Unit) {
     var page by remember { mutableStateOf(0) }
     val context = LocalContext.current
     Column(
@@ -279,7 +285,7 @@ fun WelcomeScreen(store: PioneerStore, onDone: () -> Unit) {
                         }
                     }
                 }
-                else -> {
+                3 -> {
                     Text(
                         "Make it yours",
                         style = MaterialTheme.typography.headlineSmall
@@ -322,7 +328,7 @@ fun WelcomeScreen(store: PioneerStore, onDone: () -> Unit) {
                             ) { store.putSetting("themeMode", "materialyou-dark") }
                         }
                     }
-                    val engine = store.setting("searchEngine", "duckduckgo")
+                    val searchEngine = store.setting("searchEngine", "duckduckgo")
                     GroupTitle("Search")
                     SettingsCard {
                         listOf(
@@ -332,9 +338,43 @@ fun WelcomeScreen(store: PioneerStore, onDone: () -> Unit) {
                             "bing" to "Bing"
                         ).forEachIndexed { i, (value, label) ->
                             if (i > 0) InsetDivider()
-                            WelcomeChoiceRow(label, engine == value) {
+                            WelcomeChoiceRow(label, searchEngine == value) {
                                 store.putSetting("searchEngine", value)
                             }
+                        }
+                    }
+                }
+                else -> {
+                    Text(
+                        "Extensions",
+                        style = MaterialTheme.typography.headlineSmall
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Two optional extensions, installed only " +
+                            "if you choose them — or later, from " +
+                            "Settings → Extensions.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    PanelCard {
+                        Column(
+                            modifier = Modifier.padding(
+                                horizontal = 14.dp, vertical = 8.dp
+                            )
+                        ) {
+                            WelcomeExtensionRow(
+                                Icons.Filled.Shield,
+                                ApprovedExtensions.UBLOCK_ORIGIN,
+                                engine.uBlockState.value,
+                            ) { engine.installUBlock() }
+                            InsetDivider()
+                            WelcomeExtensionRow(
+                                Icons.Filled.Search,
+                                ApprovedExtensions.GOOGLE_SEARCH_FIXER,
+                                engine.googleSearchFixerState.value,
+                            ) { engine.installGoogleSearchFixer() }
                         }
                     }
                 }
@@ -345,7 +385,7 @@ fun WelcomeScreen(store: PioneerStore, onDone: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
         ) {
-            if (page < 3) {
+            if (page < 4) {
                 TextButton(onClick = onDone) { Text("Skip") }
                 Spacer(Modifier.weight(1f))
                 Button(onClick = { page++ }) { Text("Continue") }
@@ -407,6 +447,69 @@ private fun WelcomeChoiceRow(
         RadioButton(selected = selected, onClick = onClick)
         Spacer(Modifier.width(8.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+/** An optional extension on the welcome Extensions page:
+ * icon + name + description, an Install button while it is
+ * not installed, "Installed" once it is. A failed or
+ * declined install shows its state line and the button
+ * reads Install again, so it can be retried here. */
+@Composable
+private fun WelcomeExtensionRow(
+    icon: ImageVector,
+    extension: ApprovedExtension,
+    state: String,
+    onInstall: () -> Unit,
+) {
+    val installed = state.startsWith("installed")
+    val installing = state.startsWith("installing")
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+    ) {
+        Box(
+            modifier = Modifier.width(30.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                modifier = Modifier.size(22.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                extension.displayName,
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                extension.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (!installed && state != "not installed") {
+                Text(
+                    state,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        if (installed) {
+            Text(
+                "Installed",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+        } else {
+            Button(onClick = onInstall, enabled = !installing) {
+                Text(if (installing) "Installing…" else "Install")
+            }
+        }
     }
 }
 

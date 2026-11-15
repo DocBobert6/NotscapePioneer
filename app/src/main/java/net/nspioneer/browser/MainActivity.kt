@@ -271,7 +271,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     when (screen) {
                         PioneerScreen.Browser -> if (showWelcome) {
-                            WelcomeScreen(store = store) {
+                            WelcomeScreen(store = store, engine = engine) {
                                 store.putSetting("onboarded", "true")
                                 showWelcome = false
                             }
