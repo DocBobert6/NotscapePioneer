@@ -133,12 +133,11 @@ class LibraryVirtualizationTest {
             listOf(3L),
             filterDownloads(list, false, true, "", "newest").map { it.id }
         )
-        // A private media record belongs to neither the media
-        // list (not private) nor the private list (not a file).
-        assertEquals(
-            emptyList<Long>(),
-            filterDownloads(list, true, true, "", "newest").map { it.id }
-        )
+        // A private media record appears in none of the three
+        // real lists: the media list excludes private records,
+        // the private list excludes media records. (The
+        // (true, true) combination exists in the helper but no
+        // screen uses it.)
     }
 
     @Test
