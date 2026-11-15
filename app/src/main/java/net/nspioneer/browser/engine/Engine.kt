@@ -293,6 +293,11 @@ interface Engine {
     // alpha.50: "media-net sightings: N (M manifests)"
     // — for Diagnostics
     val mediaNetState: State<String>
+    // alpha.52: attempt the MAIN-world experiment install
+    // (flag-gated, at most once per session) — called from
+    // engine init, from the Settings toggle when the flag
+    // flips on, and from the next page load as a fallback.
+    fun installMainWorldExperiment()
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result
     // alpha.33: remove Google Search Fixer; its state reports it.

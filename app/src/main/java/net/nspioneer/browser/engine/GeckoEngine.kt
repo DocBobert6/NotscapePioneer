@@ -164,6 +164,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         it.onMediaNetStateChanged = { refreshMediaNetState() }
     }
 
+    /** Alpha.52: the MAIN-world experiment verdict. The
+     *  callback refreshes the Diagnostics state line and
+     *  logs the verdict once (first-wins, so exactly one
+     *  line per session). */
+    private val mainWorldExperiment = MainWorldExperiment().also {
+        it.onStateChanged = {
+            refreshMainWorldState()
+            val reason = it.rejectReason?.let { r -> " ($r)" } ?: ""
+            statusPanel.status("probe MAIN world: ${it.verdict.name.lowercase()}$reason")
+        }
+    }
+
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
@@ -328,6 +340,26 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
+    private val _mainWorldState =
+        mutableStateOf(
+            mainWorldExperiment.mainWorldStateText(
+                MainWorldExperiment.isEnabled(store)
+            )
+        )
+
+    /** Refresh the MAIN-world experiment status line from the
+     *  verdict (alpha.52: `mainWorldState` ←
+     *  `mainWorldStateText()`). Posted to the main thread:
+     *  the sentinel can arrive off it. The Engine interface
+     *  exposes this state in C2, with the Diagnostics row. */
+    private fun refreshMainWorldState() {
+        mainHandler.post {
+            _mainWorldState.value = mainWorldExperiment.mainWorldStateText(
+                MainWorldExperiment.isEnabled(store)
+            )
+        }
+    }
+
     override var onTabCreated: ((EngineTab) -> Unit)? = null
     override var onTabDestroyed: ((EngineTab) -> Unit)? = null
     override var onPopupClosed: ((EngineTab) -> Unit)? = null
@@ -375,6 +407,9 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     init {
         extensions.installProbeExtension()
+        // Alpha.52: the MAIN-world experiment install — a
+        // no-op unless the probeMainWorld flag is on.
+        extensions.installMainWorldExperiment()
         // P-A4 (alpha.38): Cast discovery and the startup
         // private-context wipe used to run here, on the launch
         // path before setContent. They now run after the first
@@ -757,6 +792,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     // ------------------------------------------------------------------
 
     override fun installUBlock() = extensions.installUBlock()
+
+    /** Alpha.52: attempt the MAIN-world experiment install
+     *  (flag-gated inside ExtensionManager). */
+    override fun installMainWorldExperiment() =
+        extensions.installMainWorldExperiment()
 
     override fun installGoogleSearchFixer() = extensions.installGoogleSearchFixer()
 
@@ -1319,6 +1359,43 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     override fun showVideoPopupButton(): Boolean =
         VideoPopup.isButtonOn(store)
+
+    /** Alpha.52: the MAIN-world experiment flag. */
+    override fun probeMainWorldEnabled(): Boolean =
+        MainWorldExperiment.isEnabled(store)
+
+    override fun noteMainWorldInstallFailed(message: String?) {
+        mainWorldExperiment.noteInstallFailed(message)
+    }
+
+    override fun noteMainWorldSentinel(mainWorld: Boolean) {
+        // Sentinels only count while the flag is on — a script
+        // left installed from an earlier flip-on must not move
+        // the verdict after the flag goes off.
+        if (!MainWorldExperiment.isEnabled(store)) return
+        mainWorldExperiment.noteSentinel(mainWorld)
+    }
+
+    /** Alpha.52: 10 s bounded wait for the sentinel, armed
+     *  once per session on the first page load AFTER the
+     *  install completed — a load that merely triggered the
+     *  install cannot time out before the script ever had a
+     *  page. */
+    private var mainWorldTimeoutArmed = false
+
+    override fun noteMainWorldPageLoad() {
+        if (!MainWorldExperiment.isEnabled(store)) return
+        // Mid-session flip-on: the install runs on the next
+        // page load (the Settings toggle also attempts it at
+        // once, so this is the fallback path).
+        extensions.installMainWorldExperiment()
+        if (!extensions.isMainWorldInstalled()) return
+        if (mainWorldExperiment.verdict != MainWorldExperiment.Verdict.UNKNOWN ||
+            mainWorldTimeoutArmed
+        ) return
+        mainWorldTimeoutArmed = true
+        mainHandler.postDelayed({ mainWorldExperiment.noteTimeout() }, 10_000)
+    }
 
     /** Worker A fallthrough: the blocking bridge owns
      *  `blocked`, `cosmetic-query` and `rules-request` (and

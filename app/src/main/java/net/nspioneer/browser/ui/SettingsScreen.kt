@@ -68,6 +68,7 @@ import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.engine.DE_AMP_KEY
 import net.nspioneer.browser.engine.Engine
+import net.nspioneer.browser.engine.MainWorldExperiment
 import net.nspioneer.browser.engine.SearchTemplate
 import net.nspioneer.browser.engine.TranslationLanguages
 import net.nspioneer.browser.engine.UpdateCheck
@@ -1695,6 +1696,27 @@ fun SettingsScreen(
                     "Version ${last.remote.versionName} is available"
                 else -> "Up to date — latest is ${last.remote.versionName}"
             }
+
+            // Alpha.52: the MAIN-world experiment flag. An
+            // experiment, not a feature — it attempts a content
+            // script in the page's own (MAIN) world and reports
+            // accepted/rejected in Diagnostics. Default OFF.
+            GroupTitle("Experiments")
+            SettingsCard {
+                ToggleRow(
+                    label = "MAIN-world probe experiment",
+                    supporting = "Attempt a content script in the page's own (MAIN) world " +
+                        "and report accepted/rejected in Diagnostics. " +
+                        "Turning it on attempts the install at once; the verdict " +
+                        "appears after the next page load.",
+                    checked = MainWorldExperiment.isEnabled(store),
+                    onCheckedChange = {
+                        store.putSetting(MainWorldExperiment.flagKey(), it.toString())
+                        if (it) engine.installMainWorldExperiment()
+                    }
+                )
+            }
+            Spacer(Modifier.height(14.dp))
 
             GroupTitle("About")
             SettingsCard {

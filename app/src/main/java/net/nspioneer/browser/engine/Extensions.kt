@@ -50,12 +50,29 @@ class ExtensionManager(
         private const val PROBE_LOCATION = "resource://android/assets/extensions/pioneer-probe/"
         private const val PROBE_ID = "pioneer-probe@pioneer"
         const val PROBE_APP = "pioneer"
+        // Alpha.52: the MAIN-world experiment extension (own
+        // manifest asking for "world": "MAIN" + main-world.js).
+        private const val MAIN_WORLD_LOCATION =
+            "resource://android/assets/extensions/pioneer-main-world/"
+        private const val MAIN_WORLD_ID = "pioneer-main-world@pioneer"
     }
 
     val uBlockState = mutableStateOf("not installed")
     val googleSearchFixerState = mutableStateOf("not installed")
 
     private var probeExtension: WebExtension? = null
+
+    /** Alpha.52: the experiment extension once installed, and
+     *  whether the install was attempted this session (at most
+     *  once — a flag-off call must not consume the attempt). */
+    private var mainWorldExtension: WebExtension? = null
+    private var mainWorldAttempted = false
+
+    /** Alpha.52: true once the experiment extension installed
+     *  — the page-load arming only starts the bounded wait
+     *  after this, so a load that merely triggered the install
+     *  cannot time out before the script ever had a page. */
+    fun isMainWorldInstalled(): Boolean = mainWorldExtension != null
 
     // ------------------------------------------------------------------
     // Probe extension (own built-in, media + EME reporting + zoom)
@@ -83,6 +100,65 @@ class ExtensionManager(
     }
 
     /**
+     * Alpha.52 — install the MAIN-world experiment extension,
+     * ONLY when the probeMainWorld flag is on (default OFF).
+     * The install result is itself part of the verdict: a
+     * failed install records REJECTED (the ceiling is
+     * confirmed); a successful install leaves the verdict
+     * UNKNOWN until the sentinel arrives. Guarded so the
+     * attempt happens at most once per session; a flag-off
+     * call returns before setting the guard, so flipping the
+     * flag on mid-session (Settings toggle or next page load)
+     * still attempts it.
+     */
+    fun installMainWorldExperiment() {
+        if (!host.probeMainWorldEnabled()) return
+        if (mainWorldAttempted) return
+        mainWorldAttempted = true
+        try {
+            runtime.webExtensionController
+                .ensureBuiltIn(MAIN_WORLD_LOCATION, MAIN_WORLD_ID)
+                .accept(
+                    { ext ->
+                        status.status("MAIN-world experiment: installed (${ext?.id})")
+                        ext?.let { extension ->
+                            mainWorldExtension = extension
+                            sessionProvider().forEach { session ->
+                                registerExperimentSession(session)
+                            }
+                        }
+                    },
+                    { e ->
+                        status.status("MAIN-world experiment: INSTALL FAILED: ${e?.message}")
+                        host.noteMainWorldInstallFailed(e?.message)
+                    },
+                )
+        } catch (e: Throwable) {
+            status.status("MAIN-world experiment: threw ${e.javaClass.simpleName}: ${e.message}")
+            host.noteMainWorldInstallFailed(e.message)
+        }
+    }
+
+    /**
+     * Register the probe message delegate for the experiment
+     * extension on one session — the sentinel
+     * (`probe-main-world-ok`) arrives through the same
+     * delegate as the probe's messages. Called for every tab
+     * at creation once the experiment extension is installed.
+     */
+    private fun registerExperimentSession(session: GeckoSession) {
+        mainWorldExtension?.let { extension ->
+            runCatching {
+                session.webExtensionController.setMessageDelegate(
+                    extension, probeMessageDelegate, PROBE_APP
+                )
+            }.onFailure { e ->
+                status.status("MAIN-world experiment: delegate for new tab failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Register the probe message delegate for one session. Called for
      * every tab at creation — tabs created after the probe install
      * (e.g. from window.open) need it too.
@@ -97,6 +173,9 @@ class ExtensionManager(
                 status.status("probe: delegate for new tab failed: ${e.message}")
             }
         }
+        // Alpha.52: tabs created after the experiment install
+        // need its delegate too, or the sentinel never arrives.
+        registerExperimentSession(session)
     }
 
     private val probePortDelegate = object : WebExtension.PortDelegate {
@@ -185,6 +264,16 @@ class ExtensionManager(
                 host.noteVideoPopupLongPress(sender.session, message.optString("url"))
                 return null
             }
+            // Alpha.52: the MAIN-world experiment sentinel. The
+            // script reports whether it found itself in the
+            // page's own world; the verdict lives in
+            // MainWorldExperiment (first-wins, conservative —
+            // only a MAIN-world proof accepts). An absent field
+            // reads as false — never a false accept.
+            if (type == "probe-main-world-ok") {
+                host.noteMainWorldSentinel(message.optBoolean("mainWorld", false))
+                return null
+            }
             // Phase 3 (Worker A wiring): a `webRequest`
             // observation from the probe background script.
             // The sender is the background script, so
@@ -235,6 +324,11 @@ class ExtensionManager(
             val items = message.optJSONArray("items")
             val count = items?.length() ?: 0
             val eme = message.optJSONObject("eme")
+            // Alpha.52: a probe report means a page loaded — the
+            // bounded wait for the MAIN-world sentinel runs from
+            // here (and a mid-session flip-on attempts the
+            // install on this load).
+            host.noteMainWorldPageLoad()
             status.status(
                 "probe tab $tabNumber [${message.optString("phase")}]: " +
                     "$count media URLs on $url" +
@@ -457,6 +551,20 @@ interface ProbeHost {
     /** alpha.51: global on-video button option
      *  (`showVideoPopupButton`, default ON). */
     fun showVideoPopupButton(): Boolean
+    /** Alpha.52: the MAIN-world experiment flag
+     *  (`probeMainWorld`, default OFF). */
+    fun probeMainWorldEnabled(): Boolean = false
+    /** Alpha.52: the experiment extension's install failed —
+     *  the ceiling is confirmed. */
+    fun noteMainWorldInstallFailed(message: String?) {}
+    /** Alpha.52: one sentinel arrived; [mainWorld] is true
+     *  only when the script proved it runs in the page's own
+     *  world. */
+    fun noteMainWorldSentinel(mainWorld: Boolean) {}
+    /** Alpha.52: a probe report means a page loaded — arm the
+     *  bounded wait for the sentinel, and attempt the install
+     *  if the flag was flipped on mid-session. */
+    fun noteMainWorldPageLoad() {}
     /** alpha.10 (Save offline): the content script answered
      *  a `page-html-request` with this page's outerHTML. */
     fun notePageHtml(session: GeckoSession?, html: String)
