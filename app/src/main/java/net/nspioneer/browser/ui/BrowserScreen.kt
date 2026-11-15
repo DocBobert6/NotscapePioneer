@@ -44,6 +44,7 @@ import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -406,9 +407,12 @@ private fun LoadFinishedWatcher(
 
 /** The loading-progress fill inside the address pill: the
  *  theme's ink sweeping across the pill while a load is in
- *  flight. Only this leaf reads `tab.progress`. */
+ *  flight. Only this leaf reads `tab.progress`. A `BoxScope`
+ *  extension because the fill uses `matchParentSize`, which
+ *  only resolves inside a Box scope — the pill Box at the
+ *  call site provides it. */
 @Composable
-private fun ProgressPillFill(tab: EngineTab, pillShape: Shape) {
+private fun BoxScope.ProgressPillFill(tab: EngineTab, pillShape: Shape) {
     val progress = tab.progress.value
     if (isLoadingProgress(progress)) {
         Box(modifier = Modifier.matchParentSize().clip(pillShape)) {
