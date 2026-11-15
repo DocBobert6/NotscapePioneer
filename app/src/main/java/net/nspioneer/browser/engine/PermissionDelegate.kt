@@ -79,18 +79,49 @@ class PioneerPermissionDelegate(
     private fun hostOf(uri: String): String =
         runCatching { Uri.parse(uri).host }.getOrNull() ?: ""
 
+    /** Drop [prompt] from every pending map. An answered prompt
+     *  must leave no stale entry: [rejectOutstanding] answers
+     *  whatever is still pending on tab close, and re-completing
+     *  an already-completed Gecko request throws
+     *  (S-A1 — alpha.32). */
+    private fun clearPending(prompt: PermPrompt) {
+        pendingContent.remove(prompt)
+        pendingMedia.remove(prompt)
+        promptSessions.remove(prompt)
+    }
+
     /** Build the engine-side prompt for [resources] on [host].
      *  onGrant completes the Gecko request with the resources
-     *  actually granted (after the OS check); onDeny denies. */
+     *  actually granted (after the OS check); onDeny denies.
+     *  Either answer clears the prompt from the pending maps
+     *  (S-A1): an answered prompt must not survive to be
+     *  answered again on tab close. A late answer — the OS
+     *  check returning after the tab closed — is a no-op: the
+     *  prompt is already gone from the maps, so there is
+     *  nothing left to complete. */
     private fun buildPrompt(
         origin: String, host: String, resources: List<String>,
         complete: (granted: List<String>) -> Unit,
         deny: () -> Unit,
-    ): PermPrompt = PermPrompt(
-        origin = origin, host = host, resources = resources,
-        onGrant = { granted -> complete(granted) },
-        onDeny = { deny() },
-    )
+    ): PermPrompt {
+        lateinit var prompt: PermPrompt
+        prompt = PermPrompt(
+            origin = origin, host = host, resources = resources,
+            onGrant = { granted ->
+                if (prompt in promptSessions) {
+                    complete(granted)
+                    clearPending(prompt)
+                }
+            },
+            onDeny = {
+                if (prompt in promptSessions) {
+                    deny()
+                    clearPending(prompt)
+                }
+            },
+        )
+        return prompt
+    }
 
     // ------------------------------------------------------------------
     // Content permissions (geolocation, autoplay, DRM, storage, …)
@@ -267,28 +298,46 @@ class PioneerPermissionDelegate(
                 // with the newly allowed ones, and denying
                 // still grants the decided ones. (Mariner,
                 // BrowserScreen.kt:3110-3140, verbatim.)
-                val mixed = prompt.copy(
+                lateinit var mixed: PermPrompt
+                mixed = prompt.copy(
                     resources = asked,
                     onGrant = { grantedAsked ->
-                        val combined = allowed + grantedAsked
-                        if (combined.isNotEmpty()) {
-                            // Persist the newly allowed ones,
-                            // then grant the combined set.
-                            grantedAsked.forEach {
-                                store.putSitePermission(host, it, "allow")
+                        // S-A1: only answer while still pending —
+                        // the tab may have closed while the OS
+                        // check was in flight.
+                        if (mixed in promptSessions) {
+                            val combined = allowed + grantedAsked
+                            if (combined.isNotEmpty()) {
+                                // Persist the newly allowed ones,
+                                // then grant the combined set.
+                                grantedAsked.forEach {
+                                    store.putSitePermission(host, it, "allow")
+                                }
+                                checkOs(combined) { osGranted ->
+                                    if (mixed in promptSessions) {
+                                        complete(osGranted)
+                                        clearPending(mixed)
+                                    }
+                                }
+                            } else {
+                                callback.reject()
+                                clearPending(mixed)
                             }
-                            checkOs(combined) { osGranted ->
-                                complete(osGranted)
-                            }
-                        } else {
-                            callback.reject()
                         }
                     },
                     onDeny = {
-                        if (allowed.isNotEmpty()) {
-                            checkOs(allowed) { granted -> complete(granted) }
-                        } else {
-                            callback.reject()
+                        if (mixed in promptSessions) {
+                            if (allowed.isNotEmpty()) {
+                                checkOs(allowed) { granted ->
+                                    if (mixed in promptSessions) {
+                                        complete(granted)
+                                        clearPending(mixed)
+                                    }
+                                }
+                            } else {
+                                callback.reject()
+                                clearPending(mixed)
+                            }
                         }
                     },
                 )
@@ -341,14 +390,20 @@ class PioneerPermissionDelegate(
 
     /** Answer every outstanding request for [session] with a
      *  denial — tab close / navigation must never leave a
-     *  getUserMedia promise hanging. */
+     *  getUserMedia promise hanging. The completes are guarded
+     *  (S-A1): a stale entry must never crash the app again,
+     *  whatever answered the request first. */
     fun rejectOutstanding(session: GeckoSession) {
         val doomed = promptSessions.filter { it.value === session }.keys.toList()
         for (prompt in doomed) {
-            pendingContent[prompt]?.complete(
-                GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY
-            )
-            pendingMedia[prompt]?.callback?.reject()
+            runCatching {
+                pendingContent[prompt]?.complete(
+                    GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY
+                )
+            }
+            runCatching {
+                pendingMedia[prompt]?.callback?.reject()
+            }
             pendingContent.remove(prompt)
             pendingMedia.remove(prompt)
             promptSessions.remove(prompt)
