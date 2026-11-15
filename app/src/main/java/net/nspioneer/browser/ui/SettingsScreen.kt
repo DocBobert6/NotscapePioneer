@@ -69,6 +69,7 @@ import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.engine.DE_AMP_KEY
 import net.nspioneer.browser.engine.Engine
 import net.nspioneer.browser.engine.SearchTemplate
+import net.nspioneer.browser.engine.TranslationLanguages
 import net.nspioneer.browser.engine.UpdateCheck
 import net.nspioneer.browser.media.Downloads
 import org.mozilla.geckoview.StorageController
@@ -977,6 +978,88 @@ fun SettingsScreen(
                     actionLabel = "Erase",
                     onClick = { showErasePrivate = true }
                 )
+            }
+
+            // alpha.45: on-device page translation
+            // (Bergamot/WASM via GeckoView's
+            // TranslationsController). Into-English only, six
+            // languages. Models download once per language
+            // from Mozilla's servers, then live in the
+            // profile — after that, no page text leaves the
+            // device. The six toggles ARE the setting: all
+            // six off means no offers.
+            GroupTitle("Translate")
+            SettingsCard {
+                // Load the model states + never-translate list
+                // lazily: when this group composes (every
+                // Settings open — the list re-syncs on open,
+                // which is when the user would act on it).
+                LaunchedEffect(Unit) {
+                    engine.refreshTranslateModelStates()
+                    engine.refreshTranslateNeverSites()
+                }
+                val translateSupported = engine.translateSupported.value
+                if (translateSupported == false) {
+                    Text(
+                        "Translation isn't supported on this device",
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    Text(
+                        "This device can't run the on-device translator.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+                    )
+                } else {
+                    Text(
+                        "Translate pages on your device — nothing about the page is sent anywhere.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                    )
+                    Text(
+                        "Each language downloads once, the first time you translate a page in it (about 74 MB each, about 440 MB for all six), then works offline.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                    val modelStates = engine.translateModelStates.value
+                    TranslationLanguages.SUPPORTED.forEachIndexed { index, lang ->
+                        if (index > 0) InsetDivider()
+                        val modelState =
+                            modelStates.firstOrNull { it.code == lang.code }
+                        ToggleRow(
+                            label = lang.name,
+                            supporting = if (modelState?.downloaded == true) {
+                                "Downloaded — translates on your device"
+                            } else {
+                                "Not downloaded — downloads once the first time " +
+                                    "you translate a page in ${lang.name}"
+                            },
+                            checked = engine.isTranslateLanguageEnabled(lang.code),
+                            onCheckedChange = {
+                                engine.setTranslateLanguageEnabled(lang.code, it)
+                            }
+                        )
+                    }
+                    val neverSites = engine.translateNeverSites.value
+                    if (neverSites.isNotEmpty()) {
+                        InsetDivider()
+                        Text(
+                            "Never translate on these sites",
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                        neverSites.forEach { host ->
+                            ActionRow(
+                                label = host,
+                                actionLabel = "Remove",
+                                onClick = { engine.removeTranslateNeverSite(host) }
+                            )
+                        }
+                    }
+                }
             }
 
             GroupTitle("Cookies & storage")
