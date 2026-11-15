@@ -126,6 +126,13 @@ interface EngineTab {
     // blank, even if isNewSessionPending was cleared by another
     // path — belt and braces against the start-page flash.
     val popupTargetUri: State<String?>
+    // ---- Safe Browsing (alpha.31) ----
+    // One-time exact-URL bypass for a phishing interstitial:
+    // set by the shell when the user chooses "Proceed anyway",
+    // consumed on the next onLoadRequest for that exact URL.
+    // A fresh navigation to a different URL on the same host
+    // warns again — the bypass is one URL, one time.
+    var safeBrowsingBypass: String?
     // True once the session is open (engine-opened, or Gecko
     // opened it after onNewSession): the shell binds the view
     // on this signal, not on a recomposition side-effect.
@@ -344,6 +351,11 @@ interface Engine {
     // mode: the shell shows the interstitial and, on the
     // user's word, excepts the host and loads it.
     var onHttpsWarn: ((url: String) -> Unit)?
+    // A navigation hit a listed phishing/malware domain: the
+    // shell shows the Safe Browsing interstitial and, on the
+    // user's word, sets the tab's safeBrowsingBypass and
+    // loads the URL. (tabId, url).
+    var onSafeBrowsingWarn: ((tabId: Int, url: String) -> Unit)?
 }
 
 // ---- Phase 3: downloads ----

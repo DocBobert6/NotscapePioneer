@@ -654,6 +654,8 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     override var onHttpsWarn: ((String) -> Unit)? = null
 
+    override var onSafeBrowsingWarn: ((Int, String) -> Unit)? = null
+
     override fun setWebDarkMode(mode: String) {
         runCatching {
             // Case-normalised: Settings passes lowercase
@@ -1331,6 +1333,33 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                         request.uri.startsWith("https://"))
                 ) {
                     val u = request.uri
+                    // Safe Browsing (alpha.31, local-first): a
+                    // main-frame navigation to a listed
+                    // phishing/malware domain stops here and
+                    // warns with the interstitial — it never
+                    // loads silently, and it never blocks
+                    // silently either. First, before the
+                    // HTTPS-only upgrade: the warning is about
+                    // the domain, not the scheme. One-time
+                    // exact-URL bypass: consumed on the next
+                    // request for that URL. Fires in private
+                    // tabs too, and regardless of per-site
+                    // disableBlocking — phishing protection is
+                    // safety, not ad blocking.
+                    if (tab.safeBrowsingBypass == u) {
+                        tab.safeBrowsingBypass = null
+                    } else {
+                        val host = runCatching { Uri.parse(u).host }.getOrNull() ?: ""
+                        if (host.isNotBlank() &&
+                            FilterEngine.isPhishingHost(host)
+                        ) {
+                            statusPanel.status(
+                                "tab ${n()}: safe browsing warn: $u"
+                            )
+                            onSafeBrowsingWarn?.invoke(tab.id, u)
+                            return GeckoResult.fromValue(AllowOrDeny.DENY)
+                        }
+                    }
                     // HTTPS-only: in-page loads (not direct
                     // navigations — typed addresses / app loads /
                     // the user's confirmed "Continue for this
@@ -1923,6 +1952,10 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         /** Batch 4: the https URL loaded as an HTTPS-only
          *  upgrade, until its load settles (onPageStop). */
         var upgradedFromHttp: String? = null
+
+        /** alpha.31: one-time exact-URL Safe Browsing bypass
+         *  (see EngineTab.safeBrowsingBypass). */
+        override var safeBrowsingBypass: String? = null
 
         /** Batch 4: the per-site JavaScript value last applied
          *  to this session (null = never applied — the session
