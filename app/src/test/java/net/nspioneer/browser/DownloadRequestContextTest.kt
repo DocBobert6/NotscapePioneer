@@ -15,7 +15,6 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
 
 /**
  * Alpha.49 (gap plan A-4): the download record carries its
@@ -98,17 +97,20 @@ class DownloadRequestContextTest {
     }
 
     @Test
-    fun contextWrittenToDownloadsJsonOnDisk() {
+    fun contextPresentInSerializedDownloadsDocument() {
+        // The persisted document: exportBackup serializes
+        // Part.DOWNLOADS with the identical serialize() code
+        // flush() writes to downloads.json, so the keys below
+        // are the keys on disk. (Reading the file back by path
+        // is not asserted here: the store is a process
+        // singleton, so its filesDir is the one from the first
+        // test method that created it, not necessarily this
+        // method's application filesDir.)
         store.addDownload(
             rec(5003L, "https://page.example.com/watch", "page.example.com", "TestUA/1.0")
         )
-        store.flush()
-        val file = File(
-            RuntimeEnvironment.getApplication().filesDir,
-            "pioneer-store/downloads.json"
-        )
-        assertTrue(file.exists())
-        val arr = JSONObject(file.readText()).getJSONArray("downloads")
+        val root = JSONObject(store.exportBackup())
+        val arr = root.getJSONArray("downloads")
         assertEquals(1, arr.length())
         val o = arr.getJSONObject(0)
         assertEquals("https://page.example.com/watch", o.getString("referer"))
