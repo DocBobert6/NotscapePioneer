@@ -1683,6 +1683,15 @@ object Downloads {
         }
     }
 
+    /** Journal index for a DASH track's init segment
+     *  (alpha.48): segment indices are 0.., so -1 marks the
+     *  init segment as fetched without colliding. */
+    internal const val DASH_INIT_JOURNAL_INDEX = -1
+
+    /** One DASH media segment's file inside a track dir. */
+    private fun dashSegFile(trackDir: File, index: Int): File =
+        File(trackDir, "seg-%05d.m4s".format(index))
+
     private fun fetchText(url: String, referer: String?, cookie: String? = null): String {
         val conn = openGet(url, referer, cookie)
         return checkedBytes(conn).decodeToString()
@@ -2304,20 +2313,36 @@ object Downloads {
      *  SegmentTemplate $Number$ is expanded until the first
      *  404 (the manifest carries no segment count for
      *  SegmentTimeline-less manifests); SegmentList uses its
-     *  explicit URLs. */
-    private fun downloadDashTrack(
+     *  explicit URLs.
+     *
+     *  Segments are fetched with a journal (alpha.48), the
+     *  same shape as the HLS job: each track gets its own
+     *  subdir holding the init segment, one file per media
+     *  segment, and a journal.txt of finished indices (the
+     *  init segment is [DASH_INIT_JOURNAL_INDEX]). A resumed
+     *  job skips journaled init + segments instead of
+     *  re-fetching them, then joins what is on disk in
+     *  order into "$prefix.mp4" — the same return path as
+     *  before, so callers (remux, merge side) are unchanged. */
+    internal fun downloadDashTrack(
         appCtx: Context, store: PioneerStore, rec: DownloadRecord,
         rep: DashRep, baseUrl: String, referer: String?, dir: File,
         prefix: String, onProgress: (Int) -> Unit,
         progressBase: Double, progressSpan: Double,
     ): File {
-        val out = File(dir, "$prefix.mp4")
-        out.outputStream().use { output ->
-            rep.initTemplate?.let { init ->
+        val trackDir = File(dir, prefix).apply { mkdirs() }
+        val done = readSegJournal(trackDir)
+        val initFile = File(trackDir, "init.mp4")
+        // Init segment, fetched once and journaled as -1; a
+        // resume skips it and reuses the stored file.
+        rep.initTemplate?.let { init ->
+            if (DASH_INIT_JOURNAL_INDEX !in done) {
                 val initUrl = resolveUrl(baseUrl, init)
-                val bytes = checkedBytes(openGet(initUrl, referer))
-                output.write(bytes)
+                initFile.writeBytes(checkedBytes(openGet(initUrl, referer)))
+                done += DASH_INIT_JOURNAL_INDEX
+                writeSegJournal(trackDir, done)
             }
+        }
             val urls: List<String> = when {
                 rep.segments.isNotEmpty() ->
                     rep.segments.map { resolveUrl(baseUrl, it) }
@@ -2362,32 +2387,59 @@ object Downloads {
                 else -> emptyList()
             }
             if (urls.isEmpty()) throw java.io.IOException("No DASH segments for track")
-            var fetched = 0
             for ((i, segUrl) in urls.withIndex()) {
-                if (isCancelled(rec.id)) throw InterruptedException("cancelled")
-                if (isPaused(rec.id)) throw InterruptedException("paused")
+                if (isCancelled(rec.id)) {
+                    writeSegJournal(trackDir, done)
+                    throw InterruptedException("cancelled")
+                }
+                if (isPaused(rec.id)) {
+                    writeSegJournal(trackDir, done)
+                    throw InterruptedException("paused")
+                }
+                if (i in done) continue
                 val conn = runCatching { openGet(segUrl, referer) }.getOrNull()
-                    ?: break
+                if (conn == null) {
+                    writeSegJournal(trackDir, done)
+                    break
+                }
                 if (conn.responseCode == 404) {
                     conn.disconnect()
+                    writeSegJournal(trackDir, done)
                     break
                 }
-                val bytes = runCatching { checkedBytes(conn) }.getOrElse {
+                val bytes = runCatching { checkedBytes(conn) }.getOrNull()
+                if (bytes == null) {
                     conn.disconnect()
+                    writeSegJournal(trackDir, done)
                     break
                 }
-                output.write(bytes)
-                fetched++
+                dashSegFile(trackDir, i).writeBytes(bytes)
+                done += i
                 if (i % 10 == 0) {
+                    writeSegJournal(trackDir, done)
                     val pct = (progressBase * 100 + progressSpan * 100 * (i + 1) / urls.size)
                         .toInt().coerceIn(0, 100)
                     store.updateDownloadProgress(rec.id, pct)
                     onProgress(pct)
                 }
             }
-            if (fetched == 0) throw java.io.IOException("No DASH segments downloaded")
-        }
-        return out
+            // A resume that finds everything journaled fetches
+            // nothing new; only error when no segment file exists
+            // at all (a fresh run whose fetches all failed).
+            if (urls.indices.none { dashSegFile(trackDir, it).exists() }) {
+                throw java.io.IOException("No DASH segments downloaded")
+            }
+            // Join in order into the track file.
+            val out = File(dir, "$prefix.mp4")
+            out.outputStream().use { output ->
+                if (initFile.exists()) initFile.inputStream().use { it.copyTo(output) }
+                for (i in urls.indices) {
+                    val f = dashSegFile(trackDir, i)
+                    if (f.exists()) f.inputStream().use { it.copyTo(output) }
+                }
+            }
+            writeSegJournal(trackDir, done)
+            return out
     }
 
     private fun downloadDash(
