@@ -226,6 +226,11 @@ class MediaNetCounterTest {
         assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/dash/segment-42.mp4"))
         assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/dash/fragment-7.mp4"))
         assertTrue(BlockingObserver.isSegmentNoise("https://example.com/clip.mp4?bytes=0-99999"))
+        // alpha.57: HLS / DASH init segments are noise too.
+        assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/v/video_360p_init.mp4?KEY1=x"))
+        assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/v/audio_1_init.mp4"))
+        assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/dash/video-init.mp4"))
+        assertFalse(BlockingObserver.isSegmentNoise("https://example.com/init.mp4"))
         assertFalse(BlockingObserver.isSegmentNoise("https://example.com/hls/master.m3u8"))
         assertFalse(BlockingObserver.isSegmentNoise("https://example.com/dash/manifest.mpd"))
         assertFalse(BlockingObserver.isSegmentNoise("https://example.com/clip.mp4"))
