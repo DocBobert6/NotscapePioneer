@@ -52,11 +52,11 @@ class ResolvePickerTest {
         val refs = Downloads.referencedMediaPlaylists(master, base)
         assertEquals(
             setOf(
-                "https://example.com/v1080.m3u8",
-                "https://example.com/v720.m3u8",
-                "https://example.com/v360.m3u8",
-                "https://example.com/audio-en.m3u8",
-                "https://example.com/audio-es.m3u8"
+                "https://example.com/hls/v1080.m3u8",
+                "https://example.com/hls/v720.m3u8",
+                "https://example.com/hls/v360.m3u8",
+                "https://example.com/hls/audio-en.m3u8",
+                "https://example.com/hls/audio-es.m3u8"
             ),
             refs
         )
