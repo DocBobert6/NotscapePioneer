@@ -96,15 +96,18 @@ object MediaLog {
     )
 
     /** Segment noise (alpha.50, gap plan row A-3; alpha.57
-     *  adds the init-segment tokens and the noteDom filter):
-     *  must agree with background.js `isSegmentNoise`,
-     *  BlockingObserver's copy, and probe.js's copy. */
+     *  adds the init-segment tokens and the noteDom filter;
+     *  the v3 audit (rec 2) widens the token to _init. /
+     *  -init. + mp4 or m4s, plus a bare init.mp4 / init.m4s
+     *  path segment): must agree with background.js
+     *  `isSegmentNoise`, BlockingObserver's copy, and
+     *  probe.js's copy. */
     private val manifestUrlPattern = Regex(
         """\.(m3u8|mpd)(\?|#|$)""",
         RegexOption.IGNORE_CASE
     )
     private val segmentNoisePattern = Regex(
-        """\.m4s(\?|#|$)|segment-|fragment|bytes=|_init\.mp4(\?|#|$)|-init\.mp4(\?|#|$)""",
+        """\.m4s(\?|#|$)|segment-|fragment|bytes=|[_-]init\.(mp4|m4s)(\?|#|$)|/init\.(mp4|m4s)(\?|#|$)""",
         RegexOption.IGNORE_CASE
     )
 

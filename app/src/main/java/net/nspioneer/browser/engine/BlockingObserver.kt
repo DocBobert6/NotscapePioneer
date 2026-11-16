@@ -137,13 +137,15 @@ class BlockingObserver(private val host: BlockingHost) {
          *  unit tests pin it down. Must agree with
          *  background.js `isSegmentNoise` and MediaLog's
          *  copy, and with the probe.js copy. alpha.57 adds
-         *  the init-segment tokens (_init.mp4 / -init.mp4). */
+         *  the init-segment tokens; the v3 audit (rec 2)
+         *  widens them to _init. / -init. + mp4 or m4s, plus
+         *  a bare init.mp4 / init.m4s path segment. */
         private val MANIFEST_URL_RE = Regex(
             """\.(m3u8|mpd)(\?|#|$)""",
             RegexOption.IGNORE_CASE
         )
         private val SEGMENT_NOISE_RE = Regex(
-            """\.m4s(\?|#|$)|segment-|fragment|bytes=|_init\.mp4(\?|#|$)|-init\.mp4(\?|#|$)""",
+            """\.m4s(\?|#|$)|segment-|fragment|bytes=|[_-]init\.(mp4|m4s)(\?|#|$)|/init\.(mp4|m4s)(\?|#|$)""",
             RegexOption.IGNORE_CASE
         )
 

@@ -47,10 +47,11 @@
    * isSegmentNoise and the Kotlin copies in MediaLog and
    * BlockingObserver: .m4s segments, segment- / fragment /
    * bytes= URLs, and HLS / DASH init segments
-   * (_init.mp4 / -init.mp4). A manifest (.m3u8 / .mpd)
-   * is never noise. */
+   * (_init. / -init. followed by mp4 or m4s, plus a bare
+   * init.mp4 / init.m4s path segment — v3 audit rec 2).
+   * A manifest (.m3u8 / .mpd) is never noise. */
   var MANIFEST_URL_RE = /\.(m3u8|mpd)(\?|#|$)/i;
-  var SEGMENT_NOISE_RE = /\.m4s(\?|#|$)|segment-|fragment|bytes=|_init\.mp4(\?|#|$)|-init\.mp4(\?|#|$)/i;
+  var SEGMENT_NOISE_RE = /\.m4s(\?|#|$)|segment-|fragment|bytes=|[_-]init\.(mp4|m4s)(\?|#|$)|\/init\.(mp4|m4s)(\?|#|$)/i;
   function isSegmentNoise(url) {
     if (!url) return false;
     var lower = String(url).toLowerCase();

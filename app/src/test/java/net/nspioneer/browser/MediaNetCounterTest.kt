@@ -230,7 +230,13 @@ class MediaNetCounterTest {
         assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/v/video_360p_init.mp4?KEY1=x"))
         assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/v/audio_1_init.mp4"))
         assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/dash/video-init.mp4"))
-        assertFalse(BlockingObserver.isSegmentNoise("https://example.com/init.mp4"))
+        assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/dash/video-init.m4s"))
+        assertTrue(BlockingObserver.isSegmentNoise("https://cdn.example.com/dash/audio_init.m4s"))
+        // v3 audit rec 2: a bare init.mp4 / init.m4s path
+        // segment is noise too (accepted cost: a standalone
+        // whole video genuinely named init.mp4 is hidden).
+        assertTrue(BlockingObserver.isSegmentNoise("https://example.com/init.mp4"))
+        assertTrue(BlockingObserver.isSegmentNoise("https://example.com/init.m4s"))
         assertFalse(BlockingObserver.isSegmentNoise("https://example.com/hls/master.m3u8"))
         assertFalse(BlockingObserver.isSegmentNoise("https://example.com/dash/manifest.mpd"))
         assertFalse(BlockingObserver.isSegmentNoise("https://example.com/clip.mp4"))

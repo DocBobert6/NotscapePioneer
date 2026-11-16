@@ -19,8 +19,10 @@ import org.robolectric.annotation.Config
  * 61 rows for one video — the 3 manifests buried under ~58
  * segment and init-segment rows. The filter now runs in
  * probe.js add() and in MediaLog.noteDom, and the shared token
- * set gains the init-segment tokens (_init.mp4 / -init.mp4).
- * Only downloadable items may reach the media sheet.
+ * set gains the init-segment tokens (_init. / -init. followed
+ * by mp4 or m4s, plus a bare init.mp4 / init.m4s path segment
+ * — v3 audit rec 2). Only downloadable items may reach the
+ * media sheet.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -51,6 +53,9 @@ class MediaLogSegmentNoiseTest {
                 domItem("https://usa7-nas30-1.shegu.net/video/video_360p_init.mp4?KEY1=4Uz62kr0Y"),
                 domItem("https://usa7-nas30-1.shegu.net/hls/audio_1_init.mp4?KEY1=ycRqWDKUgZ"),
                 domItem("https://cdn.example.com/dash/video-init.mp4"),
+                domItem("https://cdn.example.com/dash/init.mp4"),
+                domItem("https://cdn.example.com/dash/init.m4s"),
+                domItem("https://cdn.example.com/dash/audio_init.m4s"),
                 domItem("https://hls.shegu.net/44487.m3u8?quality=360p&sign=5c92"),
                 domItem("https://example.com/clip.mp4"),
             ),
@@ -86,9 +91,15 @@ class MediaLogSegmentNoiseTest {
         assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/v/video_360p_init.mp4?KEY1=x"))
         assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/v/audio_1_init.mp4"))
         assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/dash/video-init.mp4"))
-        // A bare init.mp4 has no _init / -init token, so it is
-        // kept — the scoped token does not touch ordinary files.
-        assertFalse(MediaLog.isSegmentNoise("https://example.com/init.mp4"))
+        assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/dash/video-init.m4s"))
+        assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/dash/audio_init.m4s"))
+        // v3 audit rec 2: a bare init.mp4 / init.m4s path
+        // segment is noise too. The accepted cost, stated in
+        // the audit: a standalone whole video genuinely named
+        // init.mp4 would be hidden — rare, acceptable.
+        assertTrue(MediaLog.isSegmentNoise("https://example.com/init.mp4"))
+        assertTrue(MediaLog.isSegmentNoise("https://example.com/init.m4s"))
+        assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/dash/init.mp4?KEY1=x"))
         // The pre-existing tokens still hold.
         assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/dash/seg-12.m4s"))
         assertTrue(MediaLog.isSegmentNoise("https://cdn.example.com/dash/segment-42.mp4"))
@@ -117,7 +128,12 @@ class MediaLogSegmentNoiseTest {
             "https://cdn.example.com/v/video_360p_init.mp4?KEY1=x",
             "https://cdn.example.com/v/audio_1_init.mp4",
             "https://cdn.example.com/dash/video-init.mp4",
+            "https://cdn.example.com/dash/video-init.m4s",
+            "https://cdn.example.com/dash/audio_init.m4s",
+            "https://cdn.example.com/dash/init.mp4",
+            "https://cdn.example.com/dash/init.m4s",
             "https://example.com/init.mp4",
+            "https://example.com/init.m4s",
             "https://example.com/hls/master.m3u8",
             "https://example.com/hls/segment-9/master.m3u8",
             "https://example.com/dash/manifest.mpd",
