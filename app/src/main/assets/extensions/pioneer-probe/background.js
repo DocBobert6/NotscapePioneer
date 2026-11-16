@@ -167,7 +167,7 @@
     return s;
   }
 
-  var flags = { blockAds: true, blockTrackers: true, refererPolicy: "", cookieCapture: false };
+  var flags = { blockAds: true, blockTrackers: true, refererPolicy: "", cookieCapture: false, cookiesApi: false };
 
   /* Cookie-capture experiment (alpha.59) — observation
    * state. `requests` counts in-scope requests seen while
@@ -196,6 +196,13 @@
 
   var cookieProbe = freshCookieProbe();
 
+  /* Cookies-API experiment (alpha.63): the re-probe timer
+   * for a main-frame navigation — cookies can arrive late,
+   * so the probe runs again 10 s after the load. One timer
+   * at a time; the next navigation clears it. Null when no
+   * re-probe is pending. */
+  var cookiesApiTimer = null;
+
   function applyRules(r) {
     r = r || {};
     if (r.blockAds !== undefined) flags.blockAds = !!r.blockAds;
@@ -208,6 +215,17 @@
        * state, so a later flip-on reports names fresh
        * instead of staying silent on already-seen names. */
       if (wasCapture && !flags.cookieCapture) cookieObs = freshCookieObs();
+    }
+    if (r.cookiesApi !== undefined) {
+      flags.cookiesApi = !!r.cookiesApi;
+      /* Flipping the experiment off cancels the pending
+       * re-probe, so a stale timer cannot probe after the
+       * flag went off (probeCookiesApi also checks the
+       * flag, so this is belt and braces). */
+      if (!flags.cookiesApi && cookiesApiTimer) {
+        clearTimeout(cookiesApiTimer);
+        cookiesApiTimer = null;
+      }
     }
     r = r.rules || r;
     rules.hosts = toSet(r.hosts);
@@ -582,6 +600,103 @@
     }
   }
 
+  /* Cookies-API experiment (alpha.63): does GeckoView
+   * expose browser.cookies to the background script, and
+   * do the tab's cookies live in the default store or a
+   * per-session store? The API is present in GeckoView 160
+   * (schema cookies.json + ext-cookies.js in the shipped
+   * omni.ja, permission "cookies", no GeckoView gating),
+   * and getAll returns HttpOnly cookies with values — but
+   * it defaults to the default store (userContextId 0),
+   * and Pioneer's tabs may use per-session context IDs.
+   * So the probe queries the default store (no storeId)
+   * AND every listed store by id, and reports per-store
+   * counts + names. That is the one question this
+   * experiment settles; nothing is wired into downloads.
+   *
+   * SECURITY — names only, NEVER values: the report
+   * carries cookie NAMES (e.g. "SID, HSID, SSID") and
+   * per-store counts. No cookie value is read into a
+   * report, logged, stored, persisted, or sent anywhere.
+   * A Diagnostics line showing names proves delivery
+   * without ever touching a secret. */
+  var COOKIES_API_MAX_STORES = 5;
+  var COOKIES_API_MAX_NAMES = 8;
+
+  /* Names of the cookies in one getAll result, deduped
+   * and capped. Reads .name only — never .value. */
+  function cookieNamesOf(cookies) {
+    var names = [];
+    var seen = {};
+    for (var i = 0; i < (cookies || []).length; i++) {
+      var name = String((cookies[i] || {}).name || "");
+      if (name && !seen[name]) { seen[name] = 1; names.push(name); }
+    }
+    return names.slice(0, COOKIES_API_MAX_NAMES);
+  }
+
+  /* One probe run for pageUrl: default store + every
+   * listed store. Reports {api, host, stores} on the
+   * port, or {api: false} when browser.cookies is not
+   * exposed here at all, or {api: true, error} when a
+   * getAll call throws (e.g. a missing host permission).
+   * A failing store listing falls back to the default
+   * store only; a failing non-default store reports as
+   * empty for that store; only a failing default-store
+   * query is an error, because that is the query the
+   * download job would make. Never throws. */
+  function probeCookiesApi(pageUrl) {
+    if (!flags.cookiesApi) return;
+    var host = hostFromUrl(pageUrl || "");
+    if (typeof browser === "undefined" || !browser.cookies ||
+        typeof browser.cookies.getAll !== "function") {
+      postNative({ type: "cookie-api-probe", api: false, host: host });
+      return;
+    }
+    var storesPromise = null;
+    try {
+      storesPromise = (typeof browser.cookies.getAllCookieStores === "function")
+        ? browser.cookies.getAllCookieStores()
+        : Promise.resolve([]);
+    } catch (e) {
+      postNative({
+        type: "cookie-api-probe", api: true, host: host,
+        error: (e && e.name) || "Error"
+      });
+      return;
+    }
+    Promise.resolve(storesPromise).catch(function () { return []; }).then(function (stores) {
+      var queries = [];
+      queries.push(browser.cookies.getAll({ url: pageUrl }).then(function (cs) {
+        return { storeId: "default", names: cookieNamesOf(cs) };
+      }));
+      (stores || []).forEach(function (s) {
+        var id = String((s || {}).id || "");
+        /* The default store is already queried above
+         * (without a storeId); the private store throws
+         * for an extension without private-browsing
+         * access, so neither is queried again here. */
+        if (!id || id === "firefox-default" || id === "firefox-private") return;
+        queries.push(browser.cookies.getAll({ url: pageUrl, storeId: id }).then(function (cs) {
+          return { storeId: id, names: cookieNamesOf(cs) };
+        }, function () {
+          return { storeId: id, names: [] };
+        }));
+      });
+      return Promise.all(queries);
+    }).then(function (results) {
+      postNative({
+        type: "cookie-api-probe", api: true, host: host,
+        stores: (results || []).slice(0, COOKIES_API_MAX_STORES)
+      });
+    }).catch(function (e) {
+      postNative({
+        type: "cookie-api-probe", api: true, host: host,
+        error: (e && e.name) || "Error"
+      });
+    });
+  }
+
   /* ---- native messaging: the background port ---- */
 
   /* Alpha.61: every background-script report goes out on
@@ -688,6 +803,18 @@
       pageHostForTab(details.tabId, pageHost).then(function (host) {
         reportObservation("media-net", url, kind, null, details.tabId, host);
       });
+    }
+
+    /* Cookies-API experiment (alpha.63): on every main-frame
+     * navigation, ask the cookies API for this page's
+     * cookies — and again 10 s later, because cookies can
+     * arrive late. Runs for any method: a POST navigation
+     * is still a navigation, and the probe reads cookies,
+     * never the request body. */
+    if (isMainFrame && flags.cookiesApi) {
+      probeCookiesApi(url);
+      if (cookiesApiTimer) clearTimeout(cookiesApiTimer);
+      cookiesApiTimer = setTimeout(function () { probeCookiesApi(url); }, 10000);
     }
 
     /* GET/HEAD only — POST/PUT uploads and sign-ins are never
@@ -923,6 +1050,8 @@
       cookieNamesFromHeaders: cookieNamesFromHeaders,
       cookieCaptureInScope: cookieCaptureInScope,
       probeCookieListener: probeCookieListener,
+      probeCookiesApi: probeCookiesApi,
+      cookieNamesOf: cookieNamesOf,
       onBeforeSendHeaders: onBeforeSendHeaders,
       isManifest: isManifest,
       sameSite: sameSite,
