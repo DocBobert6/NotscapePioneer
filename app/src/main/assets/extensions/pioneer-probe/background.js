@@ -181,6 +181,21 @@
 
   var cookieObs = freshCookieObs();
 
+  /* Cookie-capture probe (alpha.60) — listener
+   * instrumentation. `events` counts EVERY
+   * onBeforeSendHeaders invocation, flag on or off;
+   * `inScope` counts the ones the scope rule matches;
+   * `lastReported` is the event count of the last probe
+   * message sent. Monotonic since background start — never
+   * reset on a flag flip, so the line keeps showing the
+   * listener is alive even while the flag is off. Counts
+   * and the flag only — no URLs, no names, no values. */
+  function freshCookieProbe() {
+    return { events: 0, inScope: 0, lastReported: 0 };
+  }
+
+  var cookieProbe = freshCookieProbe();
+
   function applyRules(r) {
     r = r || {};
     if (r.blockAds !== undefined) flags.blockAds = !!r.blockAds;
@@ -506,6 +521,34 @@
    * Ticks go out every 10th in-scope request and on every
    * main-frame load — bounded traffic, not one message per
    * request. */
+  /* Cookie-capture probe (alpha.60): count this
+   * invocation and, on the same bounded cadence as the
+   * ticks (every 10th event, and on every main-frame
+   * load), report the counts plus the background
+   * script's own flag value. Runs before the flag check
+   * in onBeforeSendHeaders, so the counts separate the
+   * three suspects: events 0 means the listener never
+   * fires; events above 0 with inScope 0 means the scope
+   * never matches; flagOn false means the flag never
+   * arrived here. */
+  function probeCookieListener(details) {
+    var url = details.url || "";
+    var pageHost = hostFromUrl(details.originUrl || details.documentUrl || "");
+    cookieProbe.events++;
+    if (cookieCaptureInScope(url, pageHost)) cookieProbe.inScope++;
+    if (cookieProbe.events % 10 === 0 || details.type === "main_frame") {
+      if (cookieProbe.lastReported !== cookieProbe.events) {
+        cookieProbe.lastReported = cookieProbe.events;
+        sendNative({
+          type: "cookie-capture-probe",
+          events: cookieProbe.events,
+          inScope: cookieProbe.inScope,
+          flagOn: !!flags.cookieCapture
+        });
+      }
+    }
+  }
+
   function observeCookieHeader(details) {
     var url = details.url || "";
     var pageHost = hostFromUrl(details.originUrl || details.documentUrl || "");
@@ -656,6 +699,10 @@
      * this runs even when there is no referer policy, so the
      * early return below must not skip it. Observation never
      * modifies headers. */
+    /* Cookie-capture probe (alpha.60): count every
+     * invocation, flag on or off — the counts are what
+     * separate the three suspects. */
+    probeCookieListener(details);
     if (flags.cookieCapture) observeCookieHeader(details);
     var policy = flags.refererPolicy || "";
     if (!policy) return {};
@@ -797,6 +844,7 @@
       isSegmentNoise: isSegmentNoise,
       cookieNamesFromHeaders: cookieNamesFromHeaders,
       cookieCaptureInScope: cookieCaptureInScope,
+      probeCookieListener: probeCookieListener,
       onBeforeSendHeaders: onBeforeSendHeaders,
       isManifest: isManifest,
       sameSite: sameSite,
