@@ -173,7 +173,7 @@ class SelectionTranslationTest {
         manager.translateSelection("Bonjour le monde")
         val result = manager.selectionResult.value
         assertTrue(result is SelectionTranslationState.Unavailable)
-        assertTrue((result as SelectionTranslationState.Unavailable).message.contains("not supported"))
+        assertTrue((result as SelectionTranslationState.Unavailable).message.contains("isn't supported"))
         assertTrue(opened.isEmpty())
     }
 
