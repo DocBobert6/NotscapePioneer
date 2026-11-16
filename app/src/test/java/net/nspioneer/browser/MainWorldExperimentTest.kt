@@ -28,10 +28,15 @@ import org.robolectric.annotation.Config
  * same split as alpha.51's button option.
  *
  * The shipped manifest/script shape is pinned here in CI;
- * the live accept/reject outcome is device-proven only (the
- * manifest's "world" may be ignored or may fail the install
- * — either way the verdict is REJECTED, which is the
- * expected outcome confirming the ceiling).
+ * the live accept/reject outcome is device-proven only.
+ * Alpha.66 re-tests after the alpha.52 false negative: the
+ * old script reported via the extension messaging API,
+ * which does not exist in MAIN world, so its "rejection"
+ * proved nothing about whether MAIN-world code runs.
+ * The expected outcome is unknown — that is the point of
+ * the re-test. A rejection now would confirm the ceiling
+ * for real; an acceptance opens page-context interception
+ * as a later, separately approved build.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -159,18 +164,32 @@ class MainWorldExperimentTest {
         assertTrue(manifest.contains("pioneer-main-world@pioneer"))
         assertTrue(manifest.contains("main-world.js"))
         assertTrue(manifest.contains("\"manifest_version\":2"))
+        // Alpha.66 re-test: document_start (page-context work
+        // needs the earliest run) and the host permission the
+        // alpha.52 manifest lacked.
+        assertTrue(manifest.contains("\"run_at\":\"document_start\""))
+        assertTrue(manifest.contains("\"*://*/*\""))
     }
 
     @Test
     fun sentinel_script_shape() {
         val js = asset("extensions/pioneer-main-world/main-world.js")
-        assertTrue(js.contains("probe-main-world-ok"))
-        // The structural MAIN-world discriminator: both checks
-        // must agree, so a disagreement reports isolated.
+        // Alpha.66 re-test: the script reports by writing to
+        // the page itself — a window flag + a CustomEvent —
+        // and the ISOLATED-world probe relays it. The
+        // structural MAIN-world discriminator is unchanged:
+        // both checks must agree, so a disagreement reports
+        // isolated.
+        assertTrue(js.contains("__pioneerMainWorldProbe"))
+        assertTrue(js.contains("CustomEvent(\"pioneer-main-world-probe\""))
         assertTrue(js.contains("typeof window.wrappedJSObject === \"undefined\""))
         assertTrue(js.contains("this === window"))
-        // One sentinel, nothing else: no patching, no fetch.
-        assertTrue(js.contains("browser.runtime.sendNativeMessage(\"pioneer\""))
+        // The alpha.52 bug, pinned as absent: MAIN world has
+        // NO extension APIs, so the script must never call
+        // one — and it no longer sends the native message
+        // itself (probe.js relays it). No patching, no fetch.
+        assertFalse(js.contains("browser."))
+        assertFalse(js.contains("probe-main-world-ok"))
         assertFalse(js.contains("XMLHttpRequest"))
         assertFalse(js.contains("fetch("))
     }

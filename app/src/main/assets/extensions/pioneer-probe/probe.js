@@ -671,6 +671,48 @@
   document.addEventListener("loadedmetadata", function () { report("loadedmetadata"); }, true);
   document.addEventListener("durationchange", function () { report("durationchange"); }, true);
 
+  /* Alpha.66 — MAIN-world re-test relay (gap plan row A-2).
+   * The MAIN-world script (main-world.js, document_start)
+   * cannot call any extension API, so it reports by writing
+   * to the page itself: a window flag
+   * (__pioneerMainWorldProbe) and a CustomEvent
+   * (pioneer-main-world-probe), both carrying whether the
+   * script found itself in the page's own world. This
+   * ISOLATED-world probe reads both and relays the result
+   * to the app with the existing probe-main-world-ok native
+   * message — the ISOLATED world has the APIs, the MAIN
+   * world does not. The flag is the durable path (the MAIN
+   * script runs first, at document_start, so the flag is
+   * set before this probe runs at document_idle); the event
+   * is the live path if this probe ever loads first. Top
+   * frame only, and at most one relay per page load — the
+   * app's verdict is first-wins either way. A malformed
+   * event (no boolean in detail) relays false: never a
+   * false accept. */
+  var mainWorldRelayed = false;
+  function relayMainWorld(mainWorld) {
+    if (mainWorldRelayed) return;
+    mainWorldRelayed = true;
+    try {
+      browser.runtime.sendNativeMessage("pioneer", {
+        type: "probe-main-world-ok",
+        mainWorld: !!mainWorld
+      });
+    } catch (e) { /* native bridge not ready */ }
+  }
+  function installMainWorldRelay() {
+    try {
+      if (window.top !== window) return;
+      window.addEventListener("pioneer-main-world-probe", function (e) {
+        var detail = (e && e.detail) || {};
+        relayMainWorld(detail.mainWorld === true);
+      });
+      var flag = window.__pioneerMainWorldProbe;
+      if (flag && typeof flag.mainWorld === "boolean") relayMainWorld(flag.mainWorld);
+    } catch (e) { /* a locked-down page simply never relays */ }
+  }
+
+  installMainWorldRelay();
   installVideoPopup();
   report("idle");
   queryZoom();
