@@ -496,12 +496,29 @@ class BlockingObserver(private val host: BlockingHost) {
         }.getOrDefault(false)
     }
 
+    /** Post one message to the background script's port.
+     *  Alpha.64: the cookie requester sends
+     *  `cookies-request` on this same port. Returns false
+     *  when no background port is open — the caller treats
+     *  that as "no channel" and proceeds without cookies.
+     *  Never throws. */
+    fun sendToBackground(message: JSONObject): Boolean {
+        val port = backgroundPort ?: return false
+        return runCatching {
+            port.postMessage(message)
+            true
+        }.getOrDefault(false)
+    }
+
     /** The background script connected its native port
      *  (`sender.session == null`). Hand it here — NOT through
      *  the tab-port registration, which disconnects session-less
      *  ports. Pushes the current rule set at once. */
     fun onBackgroundPortConnected(port: WebExtension.Port) {
         backgroundPort = port
+        // Alpha.64: the cookie requester sends on this port
+        // from now until it disconnects.
+        CookieRequester.registerSender { sendToBackground(it) }
         host.noteStatus("background port: connected")
         pushRulesUpdate()
     }
@@ -509,6 +526,9 @@ class BlockingObserver(private val host: BlockingHost) {
     fun onBackgroundPortDisconnected(port: WebExtension.Port) {
         if (backgroundPort === port) {
             backgroundPort = null
+            // Alpha.64: the port is gone — cookie requests
+            // answer empty at once until it reconnects.
+            CookieRequester.clearSender()
             host.noteStatus("background port: disconnected")
         }
     }

@@ -313,8 +313,7 @@ class ExtensionManager(
         // for the probed page — or an error name when getAll
         // threw. A missing `api` reads as absent, a missing
         // `stores` array as empty — never a false accept.
-        if (type == "cookie-api-probe") {
-            val storesArray = message.optJSONArray("stores")
+        if (type == "cookie-api-probe") {            val storesArray = message.optJSONArray("stores")
             val stores = if (storesArray != null) {
                 List(storesArray.length()) { i ->
                     val obj = storesArray.optJSONObject(i)
@@ -334,6 +333,34 @@ class ExtensionManager(
                 message.optString("host"),
                 message.optString("error").takeIf { it.isNotEmpty() },
                 stores
+            )
+            return true
+        }
+        // Alpha.64: the download job's cookie reply. The
+        // background script answers a `cookies-request`
+        // with name/value pairs for the requested URL (the
+        // one path where cookie VALUES exist in Kotlin —
+        // replay needs them). They flow straight into the
+        // pending request and are never logged, never put
+        // in Diagnostics, never persisted. A missing
+        // `cookies` array reads as empty; an `error` makes
+        // the request complete empty — the job proceeds
+        // without cookies either way.
+        if (type == "cookies-response") {
+            val cookiesArray = message.optJSONArray("cookies")
+            val cookies = if (cookiesArray != null) {
+                List(cookiesArray.length()) { i ->
+                    val obj = cookiesArray.optJSONObject(i)
+                    (obj?.optString("name") ?: "") to
+                        (obj?.optString("value") ?: "")
+                }.filter { it.first.isNotEmpty() }
+            } else {
+                emptyList()
+            }
+            CookieRequester.onResponse(
+                message.optString("id"),
+                cookies,
+                message.optString("error").takeIf { it.isNotEmpty() }
             )
             return true
         }

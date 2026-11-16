@@ -258,6 +258,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // fire-and-forget — the result lands in
         // translationManager.supported and gates every offer.
         translationManager.checkSupported()
+        // Alpha.64: the cookie requester's count-only status
+        // sink — a job's first attach per host lands as
+        // "cookies: N for <host>" in the status log (count +
+        // host only, never names or values). The sink is
+        // best-effort: a worker in a process without an
+        // engine simply attaches silently.
+        CookieRequester.statusSink = { line -> statusPanel.status(line) }
     }
 
     /** The Activity hosting this engine, for fullscreen

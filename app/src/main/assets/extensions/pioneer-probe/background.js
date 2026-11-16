@@ -697,6 +697,52 @@
     });
   }
 
+  /* Cookies wiring (alpha.64): the download job asks for
+   * ONE host's cookies so it can replay them host-scoped.
+   * The app sends {type:"cookies-request", id, url} on the
+   * native port; the answer is {type:"cookies-response",
+   * id, url, cookies:[{name, value}]} on the same port.
+   * The default store only (no storeId) — alpha.63 proved
+   * the tab's cookies live there. VALUES ARE INCLUDED
+   * HERE — replay needs them — and this is the one path
+   * where values leave the background script: the reply
+   * goes straight to the job, never to a log, a status
+   * line, or Diagnostics, and never to disk. An absent
+   * API or a throwing getAll answers {cookies:[], error}
+   * instead of failing the job. Never throws. */
+  function handleCookiesRequest(msg) {
+    var id = String((msg && msg.id) || "");
+    var url = String((msg && msg.url) || "");
+    if (typeof browser === "undefined" || !browser.cookies ||
+        typeof browser.cookies.getAll !== "function") {
+      postNative({
+        type: "cookies-response", id: id, url: url,
+        cookies: [], error: "unavailable"
+      });
+      return;
+    }
+    try {
+      Promise.resolve(browser.cookies.getAll({ url: url })).then(function (cs) {
+        var out = [];
+        for (var i = 0; i < (cs || []).length; i++) {
+          var c = cs[i] || {};
+          if (c.name) out.push({ name: String(c.name), value: String(c.value || "") });
+        }
+        postNative({ type: "cookies-response", id: id, url: url, cookies: out });
+      }, function (e) {
+        postNative({
+          type: "cookies-response", id: id, url: url,
+          cookies: [], error: (e && e.name) || "Error"
+        });
+      });
+    } catch (e) {
+      postNative({
+        type: "cookies-response", id: id, url: url,
+        cookies: [], error: (e && e.name) || "Error"
+      });
+    }
+  }
+
   /* ---- native messaging: the background port ---- */
 
   /* Alpha.61: every background-script report goes out on
@@ -978,6 +1024,13 @@
             // guaranteed to land. Idempotent: the app just
             // sets the background state true.
             tryPost({ type: "background-alive" });
+          } else if (msg && msg.type === "cookies-request" &&
+              msg.id && msg.url) {
+            // Alpha.64: the download job asks for one
+            // host's cookies; the reply goes back on this
+            // same port. No flag gates it — this is
+            // production wiring, not an experiment.
+            handleCookiesRequest(msg);
           }
         });
         if (port.onDisconnect && port.onDisconnect.addListener) {
@@ -1051,6 +1104,7 @@
       cookieCaptureInScope: cookieCaptureInScope,
       probeCookieListener: probeCookieListener,
       probeCookiesApi: probeCookiesApi,
+      handleCookiesRequest: handleCookiesRequest,
       cookieNamesOf: cookieNamesOf,
       onBeforeSendHeaders: onBeforeSendHeaders,
       isManifest: isManifest,
