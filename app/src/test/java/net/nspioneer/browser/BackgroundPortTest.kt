@@ -133,7 +133,17 @@ class BackgroundPortTest {
             message: JSONObject,
             senderSession: GeckoSession?
         ): GeckoResult<Any>? {
-            calls.add("blocking:" + message.optString("type"))
+            // The real bridge is a no-op for types it does
+            // not own; only owned types are recorded, so an
+            // unknown type leaves no trace — as in production.
+            val type = message.optString("type")
+            if (type in setOf(
+                    "media-net", "headers-state", "blocked",
+                    "cosmetic-query", "rules-request"
+                )
+            ) {
+                calls.add("blocking:$type")
+            }
             return null
         }
         override fun onBackgroundPortConnected(port: WebExtension.Port) {
