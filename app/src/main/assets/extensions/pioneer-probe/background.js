@@ -539,7 +539,7 @@
     if (cookieProbe.events % 10 === 0 || details.type === "main_frame") {
       if (cookieProbe.lastReported !== cookieProbe.events) {
         cookieProbe.lastReported = cookieProbe.events;
-        sendNative({
+        postNative({
           type: "cookie-capture-probe",
           events: cookieProbe.events,
           inScope: cookieProbe.inScope,
@@ -565,7 +565,7 @@
       }
       if (Object.keys(cookieObs.reported).length > 64) cookieObs.reported = {};
       if (fresh.length) {
-        sendNative({
+        postNative({
           type: "cookie-capture", host: urlHost, names: fresh,
           requests: cookieObs.requests
         });
@@ -575,22 +575,72 @@
     if (cookieObs.requests % 10 === 0 || details.type === "main_frame") {
       if (cookieObs.lastTicked !== cookieObs.requests) {
         cookieObs.lastTicked = cookieObs.requests;
-        sendNative({
+        postNative({
           type: "cookie-capture-tick", requests: cookieObs.requests
         });
       }
     }
   }
 
-  /* ---- native messaging ---- */
+  /* ---- native messaging: the background port ---- */
 
-  function sendNative(msg) {
+  /* Alpha.61: every background-script report goes out on
+   * the native port opened by connectPort() below — never
+   * on the one-shot native-message call. Device evidence
+   * (alpha.60) showed background one-shot reports never
+   * arrive (the headers-state report, sent once
+   * unconditionally at startup, never reached
+   * Diagnostics), while the content script's one-shot
+   * reports arrive fine — the session-less background
+   * messages have no per-tab delegate to land on. The
+   * port is the channel that does reach the app for the
+   * background script (the app's onConnect fires for it,
+   * and the app pushes rules-update on it), so all
+   * background sends use it. The one-shot call is NOT
+   * kept as a fallback: it is the silently-losing
+   * channel, and falling back to it would reintroduce
+   * exactly the silent loss this alpha removes. When no
+   * port is live yet, reports queue (bounded, 64) and
+   * flush on connect; a post on a dead port clears the
+   * reference and re-queues, so nothing is silently
+   * lost. */
+  var nativePort = null;
+  var nativePortOutbox = [];
+  var nativePortOutboxCap = 64;
+
+  /* Post one message on the live port. True when posted;
+   * false when there is no live port. Never throws and
+   * never connects — the caller decides what to do. */
+  function tryPost(msg) {
+    if (!nativePort) return false;
     try {
-      if (typeof browser !== "undefined" && browser.runtime &&
-          browser.runtime.sendNativeMessage) {
-        browser.runtime.sendNativeMessage("pioneer", msg).catch(function () {});
-      }
-    } catch (e) { /* native bridge not ready */ }
+      nativePort.postMessage(msg);
+      return true;
+    } catch (e) {
+      nativePort = null;
+      return false;
+    }
+  }
+
+  function flushOutbox() {
+    while (nativePortOutbox.length) {
+      if (!tryPost(nativePortOutbox[0])) return;
+      nativePortOutbox.shift();
+    }
+  }
+
+  /* The one sender every background report uses. Posts
+   * on the live port when there is one; otherwise queues
+   * (oldest dropped past the cap — probe reports are
+   * cumulative, so the freshest supersedes) and tries to
+   * connect. Never blocks, never waits on a reply. */
+  function postNative(msg) {
+    if (tryPost(msg)) return;
+    if (nativePortOutbox.length >= nativePortOutboxCap) {
+      nativePortOutbox.shift();
+    }
+    nativePortOutbox.push(msg);
+    connectPort();
   }
 
   function pageHostForTab(tabId, fallbackHost) {
@@ -609,7 +659,7 @@
     if (category !== null && category !== undefined) msg.category = category;
     if (mime) msg.mime = mime;
     if (contentLength) msg.contentLength = contentLength;
-    sendNative(msg);
+    postNative(msg);
   }
 
   /* ---- the webRequest listener ---- */
@@ -759,33 +809,51 @@
 
   /* ---- startup: native port + initial rules ---- */
 
+  /* Re-ask for the rule set on the port. Fire-and-forget:
+   * the app answers with a `rules-update` port message
+   * (and also pushes one at connect), but no reply is
+   * ever waited on — if none comes, the defaults stand
+   * and the next app-side push delivers the rules, so a
+   * missing reply can never stall this script. Called
+   * from connectPort() on every (re)connection, never
+   * directly. */
   function requestRules() {
-    try {
-      if (typeof browser !== "undefined" && browser.runtime &&
-          browser.runtime.sendNativeMessage) {
-        browser.runtime.sendNativeMessage("pioneer", { type: "rules-request" })
-          .then(function (reply) {
-            if (reply && reply.type === "rules-update" && reply.rules) {
-              applyRules(reply);
-            }
-          })
-          .catch(function () { /* app answers on next push */ });
-      }
-    } catch (e) { /* native bridge not ready */ }
+    tryPost({ type: "rules-request" });
   }
 
+  /* Open the native port and keep it: every background
+   * report goes out on it (see postNative). One
+   * handshake per connection, posted on the live port
+   * itself, then the queued reports flush, then the
+   * rules are re-asked (the app also pushes them at
+   * connect — this request is a re-ask only).
+   * Idempotent: a live port is never re-opened. A
+   * disconnect clears the reference, so the next
+   * report reconnects, re-handshakes and re-asks. */
   function connectPort() {
+    if (nativePort) return;
     try {
       if (typeof browser !== "undefined" && browser.runtime &&
           browser.runtime.connectNative) {
         var port = browser.runtime.connectNative("pioneer");
+        nativePort = port;
         port.onMessage.addListener(function (msg) {
           if (msg && msg.type === "rules-update" && msg.rules) {
             applyRules(msg);
           }
         });
+        if (port.onDisconnect && port.onDisconnect.addListener) {
+          port.onDisconnect.addListener(function () {
+            if (nativePort === port) nativePort = null;
+          });
+        }
+        if (!tryPost({ type: "background-alive" })) return;
+        flushOutbox();
+        requestRules();
       }
-    } catch (e) { /* live push unavailable; rules-request still applies */ }
+    } catch (e) {
+      nativePort = null;
+    }
   }
 
   if (typeof browser !== "undefined" && browser.webRequest &&
@@ -796,7 +864,6 @@
       ["blocking"]
     );
     connectPort();
-    requestRules();
   }
 
   if (typeof browser !== "undefined" && browser.webRequest &&
@@ -828,7 +895,7 @@
       headersReceivedOn = true;
     } catch (e) { /* listener rejected; probe keeps working URL-only */ }
   }
-  sendNative({ type: "headers-state", on: headersReceivedOn });
+  postNative({ type: "headers-state", on: headersReceivedOn });
 
   /* Node test harness: the matcher is exported without the
    * browser wiring, so the Kotlin↔JS agreement check can run
