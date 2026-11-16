@@ -1,9 +1,9 @@
 package net.nspioneer.browser
 
 import net.nspioneer.browser.data.PioneerStore
-import net.nspioneer.browser.engine.SelectionTranslationState
 import net.nspioneer.browser.engine.TranslateTab
 import net.nspioneer.browser.engine.TranslationManager
+import net.nspioneer.browser.engine.TranslationManager.SelectionTranslationState
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
