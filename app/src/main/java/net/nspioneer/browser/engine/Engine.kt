@@ -306,6 +306,9 @@ interface Engine {
     // alpha.59: "cookie capture: off/unknown/accepted/
     // rejected · N hosts, names ..." — for Diagnostics
     val cookieCaptureState: State<String>
+    // alpha.60: "cookie observer: N events · M in scope ·
+    // flag on/off" — the probe counts, for Diagnostics
+    val cookieObserverState: State<String>
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result
     // alpha.33: remove Google Search Fixer Refreshed; its state reports it.

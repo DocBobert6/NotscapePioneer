@@ -300,6 +300,21 @@ class ExtensionManager(
                 host.noteCookieCaptureTick(message.optInt("requests", 0))
                 return null
             }
+            // Alpha.60: the cookie-capture probe. The probe
+            // reports how many onBeforeSendHeaders invocations
+            // it has seen, how many were in scope, and the
+            // background script's own flag value — counts and
+            // the flag only, no URLs, no names, no values.
+            // A missing field reads as zero / off — never a
+            // false positive.
+            if (type == "cookie-capture-probe") {
+                host.noteCookieCaptureProbe(
+                    message.optInt("events", 0),
+                    message.optInt("inScope", 0),
+                    message.optBoolean("flagOn", false)
+                )
+                return null
+            }
             // Phase 3 (Worker A wiring): a `webRequest`
             // observation from the probe background script.
             // The sender is the background script, so
@@ -606,6 +621,12 @@ interface ProbeHost {
      *  in-scope requests observed with no `Cookie` header
      *  yet. */
     fun noteCookieCaptureTick(requests: Int) {}
+    /** Alpha.60: a probe report from the background script —
+     *  [events] onBeforeSendHeaders invocations seen,
+     *  [inScope] of them in scope, and the background
+     *  script's own flag value [flagOn]. Counts and the
+     *  flag only — no URLs, no names, no values. */
+    fun noteCookieCaptureProbe(events: Int, inScope: Int, flagOn: Boolean) {}
     /** Alpha.59: a probe report means a page loaded — arm
      *  the bounded wait for a `Cookie` header (re-arms per
      *  load while the verdict is UNKNOWN). */

@@ -3749,6 +3749,15 @@ fun DiagnosticsScreen(
                 engine.cookieCaptureState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
+            // alpha.60: the observer counts — how many
+            // onBeforeSendHeaders invocations the background
+            // script has seen, how many were in scope, and
+            // its own flag value. The three suspects read
+            // straight off this line.
+            Text(
+                engine.cookieObserverState.value,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Text(
                 "— status —",
                 style = MaterialTheme.typography.labelLarge,

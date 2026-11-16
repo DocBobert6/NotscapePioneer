@@ -396,6 +396,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         )
     override val cookieCaptureState: State<String> get() = _cookieCaptureState
 
+    private val _cookieObserverState =
+        mutableStateOf(
+            CookieCaptureExperiment.observerStateText(0, 0, false)
+        )
+    override val cookieObserverState: State<String> get() = _cookieObserverState
+
     /** Refresh the MAIN-world experiment status line from the
      *  verdict (alpha.52: `mainWorldState` ←
      *  `mainWorldStateText()`). Posted to the main thread:
@@ -1456,6 +1462,20 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun noteCookieCaptureTick(requests: Int) {
         if (!CookieCaptureExperiment.isEnabled(store)) return
         cookieCaptureExperiment.noteTick(requests)
+    }
+
+    /** Alpha.60: a probe report from the background script —
+     *  [events] onBeforeSendHeaders invocations seen,
+     *  [inScope] of them in scope, and the background
+     *  script's own flag value [flagOn]. Accepted regardless
+     *  of the store flag: learning whether the flag arrived
+     *  here is the point. Posted to the main thread: probe
+     *  reports can arrive off it. */
+    override fun noteCookieCaptureProbe(events: Int, inScope: Int, flagOn: Boolean) {
+        mainHandler.post {
+            _cookieObserverState.value =
+                CookieCaptureExperiment.observerStateText(events, inScope, flagOn)
+        }
     }
 
     /** Alpha.52: 10 s bounded wait for the sentinel, armed

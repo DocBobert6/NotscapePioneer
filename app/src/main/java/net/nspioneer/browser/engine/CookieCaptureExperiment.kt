@@ -51,6 +51,13 @@ class CookieCaptureExperiment {
         /** How many cookie names per host the ACCEPTED line
          *  shows before "+N more". */
         const val MAX_NAMES_SHOWN = 8
+
+        /** Alpha.60: the observer line — "cookie observer: N
+         *  events · M in scope · flag on/off". Pure, so the
+         *  Diagnostics text is pinned in tests. */
+        fun observerStateText(events: Int, inScope: Int, flagOn: Boolean): String =
+            "cookie observer: $events events · $inScope in scope · " +
+                "flag ${if (flagOn) "on" else "off"}"
     }
 
     var verdict: Verdict = Verdict.UNKNOWN

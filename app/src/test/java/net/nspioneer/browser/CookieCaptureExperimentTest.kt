@@ -207,4 +207,40 @@ class CookieCaptureExperimentTest {
         // The flag rides the rules-update push.
         assertTrue(js.contains("r.cookieCapture"))
     }
+
+    // ---------- observer line (alpha.60) ----------
+
+    @Test
+    fun observer_text_initial() {
+        assertEquals(
+            "cookie observer: 0 events · 0 in scope · flag off",
+            CookieCaptureExperiment.observerStateText(0, 0, false)
+        )
+    }
+
+    @Test
+    fun observer_text_counts_and_flag() {
+        assertEquals(
+            "cookie observer: 27 events · 12 in scope · flag on",
+            CookieCaptureExperiment.observerStateText(27, 12, true)
+        )
+        assertEquals(
+            "cookie observer: 10 events · 0 in scope · flag off",
+            CookieCaptureExperiment.observerStateText(10, 0, false)
+        )
+    }
+
+    @Test
+    fun background_js_probe_shape() {
+        val js = asset("extensions/pioneer-probe/background.js")
+        assertTrue(js.contains("probeCookieListener"))
+        assertTrue(js.contains("type: \"cookie-capture-probe\""))
+        assertTrue(js.contains("flagOn: !!flags.cookieCapture"))
+        // The probe message carries counts + the flag only.
+        assertTrue(js.contains("events: cookieProbe.events"))
+        assertTrue(js.contains("inScope: cookieProbe.inScope"))
+        // Still names-only: no value of any kind anywhere.
+        assertFalse(js.contains("cookieValue"))
+        assertFalse(js.contains("cookie-value"))
+    }
 }
