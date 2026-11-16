@@ -840,6 +840,17 @@
         port.onMessage.addListener(function (msg) {
           if (msg && msg.type === "rules-update" && msg.rules) {
             applyRules(msg);
+            // Alpha.62: re-post the handshake here. The
+            // first handshake goes out inside connectPort,
+            // but a handshake posted before the app-side
+            // Port exists is dropped (GeckoView creates
+            // the app Port only once the Connect reaches
+            // a registered delegate), so a rules-update —
+            // which the app only pushes after onConnect —
+            // proves the port is live, and this re-post is
+            // guaranteed to land. Idempotent: the app just
+            // sets the background state true.
+            tryPost({ type: "background-alive" });
           }
         });
         if (port.onDisconnect && port.onDisconnect.addListener) {
