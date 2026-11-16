@@ -644,7 +644,7 @@ interface BlockingHost {
 
     /** Alpha.59: the cookie-capture experiment flag
      *  (`probeCookieCapture`, default OFF). */
-    fun cookieCaptureEnabled(): Boolean = false""
+    fun cookieCaptureEnabled(): Boolean = false
 
     /** Status-panel line (diagnostics only). */
     fun noteStatus(line: String) {}
