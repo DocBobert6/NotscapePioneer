@@ -603,6 +603,11 @@ fun PlayerScreen(
             .setUri(u)
             .setMediaId(u)
             .setMediaMetadata(MediaMetadata.Builder().setTitle(playTitles.getOrNull(i) ?: "").build())
+            // Alpha.65: an InnerTube manifest URL has no
+            // extension, so ExoPlayer cannot infer HLS /
+            // DASH from it — the mime hint tells it. Null
+            // for every other URL (setMimeType accepts it).
+            .setMimeType(MediaLog.innerTubeManifestMime(u))
             .build()
     }
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
@@ -636,6 +641,10 @@ fun PlayerScreen(
             .setUri(u)
             .setMediaId(u)
             .setMediaMetadata(MediaMetadata.Builder().setTitle(playTitles.getOrNull(i) ?: "").build())
+            // Alpha.65: the InnerTube mime hint, as in
+            // buildItems above — extension-less manifests
+            // need it, everything else ignores the null.
+            .setMimeType(MediaLog.innerTubeManifestMime(u))
             .setSubtitleConfigurations(
                 if (i == forIndex) sidecarSubs else emptyList()
             )
@@ -1115,6 +1124,9 @@ fun PlayerScreen(
             .setUri(uri.toString())
             .setMediaId(uri.toString())
             .setMediaMetadata(MediaMetadata.Builder().setTitle(name).build())
+            // Alpha.65: the InnerTube mime hint, as in
+            // buildItems above.
+            .setMimeType(MediaLog.innerTubeManifestMime(uri.toString()))
             .build()
         p.setMediaItems(listOf(item), 0, 0)
         p.prepare()

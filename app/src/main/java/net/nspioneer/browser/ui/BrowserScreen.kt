@@ -1114,7 +1114,8 @@ fun BrowserScreen(
                 qualitySheet = QualitySheetRequest(
                     media, variants,
                     formatLabel = if (media.url.substringBefore('?')
-                        .endsWith(".mpd", ignoreCase = true)
+                        .endsWith(".mpd", ignoreCase = true) ||
+                        MediaLog.isInnerTubeDashManifest(media.url)
                     ) "DASH • ${variants.size} qualities"
                     else "HLS • ${variants.size} qualities"
                 )

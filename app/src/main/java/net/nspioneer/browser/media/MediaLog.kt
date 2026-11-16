@@ -120,11 +120,40 @@ object MediaLog {
         return segmentNoisePattern.containsMatchIn(url)
     }
 
+    /** InnerTube manifest shape (alpha.65): YouTube's
+     *  player response returns extension-less manifest
+     *  URLs on manifest.googlevideo.com — the path
+     *  /api/manifest/hls_playlist/… is an HLS master,
+     *  /api/manifest/dash/… a DASH manifest. No other
+     *  site serves from that path, so the shape is
+     *  YouTube-only by construction. Must agree with
+     *  BlockingObserver's copy and background.js
+     *  `isManifest`. */
+    fun isInnerTubeHlsManifest(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("manifest.googlevideo.com/api/manifest/hls_playlist/")
+    }
+
+    fun isInnerTubeDashManifest(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("manifest.googlevideo.com/api/manifest/dash/")
+    }
+
+    /** The manifest MIME for an InnerTube manifest URL,
+     *  or null for any other URL. Lets the player tell
+     *  ExoPlayer the type of an extension-less manifest. */
+    fun innerTubeManifestMime(url: String): String? = when {
+        isInnerTubeHlsManifest(url) -> "application/x-mpegurl"
+        isInnerTubeDashManifest(url) -> "application/dash+xml"
+        else -> null
+    }
+
     /** True for a manifest observation: a manifest URL, or
      *  a manifest MIME. The size floor never applies to
      *  one. */
     fun isManifest(url: String, mime: String?): Boolean {
         if (manifestUrlPattern.containsMatchIn(url)) return true
+        if (isInnerTubeHlsManifest(url) || isInnerTubeDashManifest(url)) return true
         val type = mime?.substringBefore(";")?.trim()?.lowercase()
             ?: return false
         return type == "application/x-mpegurl" ||

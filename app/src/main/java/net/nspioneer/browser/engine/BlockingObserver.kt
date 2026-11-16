@@ -161,8 +161,16 @@ class BlockingObserver(private val host: BlockingHost) {
          *  KB, and flooring them would break the detection
          *  the floor exists to clean up. Pure, so unit
          *  tests pin it down. */
+        /** InnerTube manifest shape (alpha.65): see
+         *  MediaLog's copy — extension-less manifests on
+         *  manifest.googlevideo.com. Must agree with it
+         *  and with background.js `isManifest`. */
         fun isManifest(url: String, mime: String?): Boolean {
             if (MANIFEST_URL_RE.containsMatchIn(url)) return true
+            val lower = url.lowercase()
+            if (lower.contains("manifest.googlevideo.com/api/manifest/hls_playlist/") ||
+                lower.contains("manifest.googlevideo.com/api/manifest/dash/")
+            ) return true
             val type = mime?.substringBefore(";")?.trim()?.lowercase()
                 ?: return false
             return type == "application/x-mpegurl" ||

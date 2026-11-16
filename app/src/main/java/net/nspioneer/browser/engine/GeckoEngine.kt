@@ -25,6 +25,7 @@ import kotlinx.coroutines.withContext
 import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.media.DetectedMedia
 import net.nspioneer.browser.media.Downloads
+import net.nspioneer.browser.media.InnerTube
 import net.nspioneer.browser.media.MediaLog
 import net.nspioneer.browser.media.VideoPopup
 import org.json.JSONObject
@@ -1994,6 +1995,27 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 tab.lastNavigatedUrl = u
                 if (clearMediaLog) MediaLog.clear(tab.id)
                 tab.onNavigate?.invoke(u, tab.title.value)
+                // Alpha.65: YouTube-only InnerTube route —
+                // a watch page (full load or SPA navigation)
+                // starts the ladder for this tab; it reports
+                // a validated manifest into this tab's media
+                // log, or nothing at all. Fire-and-forget:
+                // never blocks the navigation, and other
+                // sites never reach it (extractVideoId is
+                // null for them).
+                InnerTube.onNavigate(
+                    tab.id, u,
+                    isStillOn = { id, videoId ->
+                        tabs.firstOrNull { it.id == id }?.url?.value
+                            ?.let { InnerTube.extractVideoId(it) } == videoId
+                    },
+                    report = { id, manifestUrl, mime ->
+                        val target = tabs.firstOrNull { it.id == id }
+                            ?: return@onNavigate
+                        MediaLog.inspect(id, manifestUrl, mime)
+                        refreshTabMedia(target)
+                    }
+                )
                 // Batch 4: per-site JavaScript. The load path
                 // (GeckoTab.load) applies the value before
                 // loadUri; this covers loads the engine did not

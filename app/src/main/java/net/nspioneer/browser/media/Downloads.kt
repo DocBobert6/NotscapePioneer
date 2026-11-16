@@ -781,8 +781,10 @@ object Downloads {
             return
         }
         val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
-            contentType?.contains("mpegurl", ignoreCase = true) == true
-        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
+            contentType?.contains("mpegurl", ignoreCase = true) == true ||
+            MediaLog.isInnerTubeHlsManifest(url)
+        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true) ||
+            MediaLog.isInnerTubeDashManifest(url)
         if (isDash) {
             // DASH downloads: segments are fetched, assembled
             // per track and remuxed into one MP4 by a WorkManager
@@ -914,8 +916,10 @@ object Downloads {
         val appCtx = context.applicationContext
         ioScope.launch {
             val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
-                contentType?.contains("mpegurl", ignoreCase = true) == true
-            val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
+                contentType?.contains("mpegurl", ignoreCase = true) == true ||
+                MediaLog.isInnerTubeHlsManifest(url)
+            val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true) ||
+                MediaLog.isInnerTubeDashManifest(url)
             val resolved = if (isHls) {
                 // The saved file is a joined MPEG-TS stream: name it .ts so
                 // other players treat it as what it is.
@@ -1852,8 +1856,33 @@ object Downloads {
     private fun dashSegFile(trackDir: File, index: Int): File =
         File(trackDir, "seg-%05d.m4s".format(index))
 
-    private fun fetchText(url: String, referer: String?, cookie: String? = null): String {
+    internal fun fetchText(url: String, referer: String?, cookie: String? = null): String {
         val conn = openGet(url, referer, cookie)
+        return checkedBytes(conn).decodeToString()
+    }
+
+    /** POST a JSON body and return the response text
+     *  (alpha.65: the InnerTube player call). Same
+     *  timeouts and UA as [openGet]; the caller sets the
+     *  per-client User-Agent via [userAgent] when the
+     *  endpoint expects the impersonated client's UA.
+     *  Throws on a non-2xx status, like [fetchText]. */
+    internal fun postJsonText(
+        url: String, body: String, referer: String?,
+        userAgent: String? = null
+    ): String {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = true
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 30_000
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("User-Agent", userAgent ?: UA)
+        referer?.takeIf { it.isNotBlank() }?.let {
+            conn.setRequestProperty("Referer", it)
+        }
+        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
         return checkedBytes(conn).decodeToString()
     }
 
@@ -2242,8 +2271,10 @@ object Downloads {
         url: String, contentType: String?, referer: String?
     ): List<DownloadVariant> {
         val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
-            contentType?.contains("mpegurl", ignoreCase = true) == true
-        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
+            contentType?.contains("mpegurl", ignoreCase = true) == true ||
+            MediaLog.isInnerTubeHlsManifest(url)
+        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true) ||
+            MediaLog.isInnerTubeDashManifest(url)
         if (!isHls && !isDash) return emptyList()
         return runCatching {
             // Alpha.64: a cookie-gated master shows its
@@ -2300,7 +2331,7 @@ object Downloads {
             }
         }
         val lower = baseUrl.substringBefore('?').lowercase()
-        if (lower.endsWith(".mpd")) {
+        if (lower.endsWith(".mpd") || MediaLog.isInnerTubeDashManifest(baseUrl)) {
             runCatching {
                 for (rep in parseDashManifest(text, baseUrl)) {
                     val ref = rep.baseUrl ?: continue
@@ -2979,8 +3010,10 @@ object Downloads {
         // Alpha.64: one jar for the plain side — the HLS /
         // DASH sides build their own inside their jobs.
         val cookies = JobCookieJar()
-        val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)
-        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
+        val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
+            MediaLog.isInnerTubeHlsManifest(url)
+        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true) ||
+            MediaLog.isInnerTubeDashManifest(url)
         when {
             isHls -> {
                 val side = rec.copy(url = url)
