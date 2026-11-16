@@ -196,6 +196,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
+    /** Alpha.59: the cookie-capture experiment verdict. The
+     *  callback refreshes the Diagnostics state line and
+     *  logs the verdict once (first-wins, so exactly one
+     *  line per session). */
+    private val cookieCaptureExperiment = CookieCaptureExperiment().also {
+        it.onStateChanged = {
+            refreshCookieCaptureState()
+            val reason = it.rejectReason?.let { r -> " ($r)" } ?: ""
+            statusPanel.status("cookie capture: ${it.verdict.name.lowercase()}$reason")
+        }
+    }
+
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
@@ -203,14 +215,22 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // toggled by BlockingSettings (which never touches the
         // engine), so the engine watches the settings and
         // re-pushes the rule set (syncBlockingFlags) when
-        // either flips. The first emission is the current
+        // any of them flips. The first emission is the current
         // value — skipped: the background script already reads
         // the flags fresh from the rules-request reply / the
         // port-connect push.
         engineScope.launch {
             snapshotFlow {
-                store.setting("blockAds", "true") to
-                    store.setting("blockTrackers", "true")
+                Triple(
+                    store.setting("blockAds", "true"),
+                    store.setting("blockTrackers", "true"),
+                    // alpha.59: the cookie-capture flag rides
+                    // the same push — flipping the experiment
+                    // toggle re-sends rules-update at once.
+                    store.setting(
+                        CookieCaptureExperiment.flagKey(), "false"
+                    )
+                )
             }.distinctUntilChanged().drop(1).collect {
                 blockingObserver.syncBlockingFlags()
             }
@@ -368,6 +388,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         )
     override val mainWorldState: State<String> get() = _mainWorldState
 
+    private val _cookieCaptureState =
+        mutableStateOf(
+            cookieCaptureExperiment.cookieCaptureStateText(
+                CookieCaptureExperiment.isEnabled(store)
+            )
+        )
+    override val cookieCaptureState: State<String> get() = _cookieCaptureState
+
     /** Refresh the MAIN-world experiment status line from the
      *  verdict (alpha.52: `mainWorldState` ←
      *  `mainWorldStateText()`). Posted to the main thread:
@@ -377,6 +405,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         mainHandler.post {
             _mainWorldState.value = mainWorldExperiment.mainWorldStateText(
                 MainWorldExperiment.isEnabled(store)
+            )
+        }
+    }
+
+    /** Refresh the cookie-capture experiment status line
+     *  from the verdict (alpha.59: `cookieCaptureState` ←
+     *  `cookieCaptureStateText()`). Posted to the main
+     *  thread: the capture reports can arrive off it. */
+    private fun refreshCookieCaptureState() {
+        mainHandler.post {
+            _cookieCaptureState.value = cookieCaptureExperiment.cookieCaptureStateText(
+                CookieCaptureExperiment.isEnabled(store)
             )
         }
     }
@@ -1269,6 +1309,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun refererPolicy(): String =
         store.setting("refererPolicy", "")
 
+    /** Alpha.59: the cookie-capture experiment flag
+     *  (`probeCookieCapture`, default OFF). */
+    override fun cookieCaptureEnabled(): Boolean =
+        CookieCaptureExperiment.isEnabled(store)
+
     override fun noteStatus(line: String) {
         statusPanel.status(line)
     }
@@ -1397,6 +1442,22 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         mainWorldExperiment.noteSentinel(mainWorld)
     }
 
+    /** Alpha.59: one `Cookie` header seen on [host] for
+     *  [names] (names only — the probe never sends values).
+     *  Reports only count while the flag is on. */
+    override fun noteCookieCapture(host: String, names: List<String>, requests: Int) {
+        if (!CookieCaptureExperiment.isEnabled(store)) return
+        cookieCaptureExperiment.noteCookieNames(host, names, requests)
+    }
+
+    /** Alpha.59: a tick from the probe — [requests]
+     *  in-scope requests observed with no `Cookie` header
+     *  yet. */
+    override fun noteCookieCaptureTick(requests: Int) {
+        if (!CookieCaptureExperiment.isEnabled(store)) return
+        cookieCaptureExperiment.noteTick(requests)
+    }
+
     /** Alpha.52: 10 s bounded wait for the sentinel, armed
      *  once per session on the first page load AFTER the
      *  install completed — a load that merely triggered the
@@ -1416,6 +1477,26 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         ) return
         mainWorldTimeoutArmed = true
         mainHandler.postDelayed({ mainWorldExperiment.noteTimeout() }, 10_000)
+    }
+
+    /** Alpha.59: 10 s bounded wait for a `Cookie` header,
+     *  armed once per page load while the verdict is UNKNOWN
+     *  (a probe report means a page loaded). Unlike the
+     *  MAIN-world wait it re-arms: a timeout with zero
+     *  requests observed leaves the verdict UNKNOWN (no
+     *  evidence either way), so the next load tries again. */
+    private var cookieCaptureTimeoutArmed = false
+
+    override fun noteCookieCapturePageLoad() {
+        if (!CookieCaptureExperiment.isEnabled(store)) return
+        if (cookieCaptureExperiment.verdict != CookieCaptureExperiment.Verdict.UNKNOWN ||
+            cookieCaptureTimeoutArmed
+        ) return
+        cookieCaptureTimeoutArmed = true
+        mainHandler.postDelayed({
+            cookieCaptureExperiment.noteTimeout()
+            cookieCaptureTimeoutArmed = false
+        }, 10_000)
     }
 
     /** Worker A fallthrough: the blocking bridge owns

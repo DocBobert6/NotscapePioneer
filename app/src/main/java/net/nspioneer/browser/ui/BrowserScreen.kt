@@ -3740,6 +3740,15 @@ fun DiagnosticsScreen(
                 engine.mainWorldState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
+            // alpha.59: the cookie-capture experiment verdict —
+            // off until the flag flips on, unknown until the
+            // first report, then accepted with the hosts and
+            // cookie names seen (names only — never values),
+            // or rejected with the request count.
+            Text(
+                engine.cookieCaptureState.value,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Text(
                 "— status —",
                 style = MaterialTheme.typography.labelLarge,

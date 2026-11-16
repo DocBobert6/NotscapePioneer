@@ -274,6 +274,32 @@ class ExtensionManager(
                 host.noteMainWorldSentinel(message.optBoolean("mainWorld", false))
                 return null
             }
+            // Alpha.59: the cookie-capture experiment. The
+            // probe reports cookie NAMES only — never values —
+            // for an in-scope request that carried a `Cookie`
+            // header (`cookie-capture`), and a tick with the
+            // in-scope request count (`cookie-capture-tick`).
+            // The verdict lives in CookieCaptureExperiment
+            // (first-wins, conservative — only a seen header
+            // accepts). A missing `names` array reads as
+            // empty — never a false accept.
+            if (type == "cookie-capture") {
+                val namesArray = message.optJSONArray("names")
+                val names = if (namesArray != null) {
+                    List(namesArray.length()) { namesArray.optString(it) }
+                } else {
+                    emptyList()
+                }
+                host.noteCookieCapture(
+                    message.optString("host"), names,
+                    message.optInt("requests", 0)
+                )
+                return null
+            }
+            if (type == "cookie-capture-tick") {
+                host.noteCookieCaptureTick(message.optInt("requests", 0))
+                return null
+            }
             // Phase 3 (Worker A wiring): a `webRequest`
             // observation from the probe background script.
             // The sender is the background script, so
@@ -329,6 +355,10 @@ class ExtensionManager(
             // here (and a mid-session flip-on attempts the
             // install on this load).
             host.noteMainWorldPageLoad()
+            // Alpha.59: the same report arms the bounded wait
+            // for a `Cookie` header (re-arms per load while
+            // the verdict is UNKNOWN).
+            host.noteCookieCapturePageLoad()
             status.status(
                 "probe tab $tabNumber [${message.optString("phase")}]: " +
                     "$count media URLs on $url" +
@@ -565,6 +595,21 @@ interface ProbeHost {
      *  bounded wait for the sentinel, and attempt the install
      *  if the flag was flipped on mid-session. */
     fun noteMainWorldPageLoad() {}
+    /** Alpha.59: the cookie-capture experiment flag
+     *  (`probeCookieCapture`, default OFF). */
+    fun cookieCaptureEnabled(): Boolean = false
+    /** Alpha.59: one `Cookie` header seen on [host] for
+     *  [names] (names only — never values); [requests] is
+     *  the probe's in-scope request count at that moment. */
+    fun noteCookieCapture(host: String, names: List<String>, requests: Int) {}
+    /** Alpha.59: a tick from the probe — [requests]
+     *  in-scope requests observed with no `Cookie` header
+     *  yet. */
+    fun noteCookieCaptureTick(requests: Int) {}
+    /** Alpha.59: a probe report means a page loaded — arm
+     *  the bounded wait for a `Cookie` header (re-arms per
+     *  load while the verdict is UNKNOWN). */
+    fun noteCookieCapturePageLoad() {}
     /** alpha.10 (Save offline): the content script answered
      *  a `page-html-request` with this page's outerHTML. */
     fun notePageHtml(session: GeckoSession?, html: String)

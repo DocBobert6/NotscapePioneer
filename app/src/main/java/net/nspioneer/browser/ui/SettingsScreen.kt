@@ -68,6 +68,7 @@ import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.engine.DE_AMP_KEY
 import net.nspioneer.browser.engine.Engine
+import net.nspioneer.browser.engine.CookieCaptureExperiment
 import net.nspioneer.browser.engine.MainWorldExperiment
 import net.nspioneer.browser.engine.SearchTemplate
 import net.nspioneer.browser.engine.TranslationLanguages
@@ -1713,6 +1714,19 @@ fun SettingsScreen(
                     onCheckedChange = {
                         store.putSetting(MainWorldExperiment.flagKey(), it.toString())
                         if (it) engine.installMainWorldExperiment()
+                    }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Cookie capture experiment",
+                    supporting = "Observe whether GeckoView delivers the Cookie header " +
+                        "to the web request observer, and report accepted/rejected " +
+                        "in Diagnostics. Only cookie NAMES are ever recorded — " +
+                        "never values — and only for media requests and the page's " +
+                        "own host. Nothing is wired into downloads by this experiment.",
+                    checked = CookieCaptureExperiment.isEnabled(store),
+                    onCheckedChange = {
+                        store.putSetting(CookieCaptureExperiment.flagKey(), it.toString())
                     }
                 )
             }
