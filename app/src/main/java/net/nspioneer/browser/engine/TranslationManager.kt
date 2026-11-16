@@ -4,6 +4,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import net.nspioneer.browser.data.PioneerStore
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.PageExtractionController
 import org.mozilla.geckoview.TranslationsController.RuntimeTranslation
 import org.mozilla.geckoview.TranslationsController.SessionTranslation
 
@@ -178,12 +179,47 @@ class TranslationManager(
             RuntimeTranslation.setNeverTranslateSpecifiedSite(never, host)
         }
     },
+    /** Selection translation (alpha.67, D-6a): the hidden
+     *  session route. The engine supplies the live
+     *  versions; tests inject fakes. A null factory or
+     *  file URL means the host cannot run a selection
+     *  translation — the manager answers with a plain
+     *  message, never a crash, never a download. The
+     *  model list is injectable for the same reason the
+     *  never-site writer is: tests never touch the
+     *  static RuntimeTranslation API. */
+    private val selectionSessionFactory: () -> GeckoSession? = { null },
+    private val openSelectionSession: (GeckoSession) -> Unit = {},
+    private val closeSelectionSession: (GeckoSession) -> Unit = {},
+    private val writeSelectionFile: (String) -> String? = { null },
+    private val deleteSelectionFile: (String) -> Unit = {},
+    private val listSelectionModels: ((List<RuntimeTranslation.LanguageModel>?) -> Unit) -> Unit =
+        { onResult ->
+            runCatching {
+                RuntimeTranslation.listModelDownloadStates().accept(
+                    { models -> postToMain { onResult(models) } },
+                    { postToMain { onResult(null) } },
+                )
+            }.onFailure { postToMain { onResult(null) } }
+        },
+    private val postDelayedToMain: (Runnable, Long) -> Unit =
+        { r, _ -> postToMain(r) },
 ) {
     companion object {
         /** Stored eight-language setting: comma-separated codes;
          *  absent means all eight. */
         const val LANGUAGES_KEY = "translateLanguages"
         const val TARGET_LANGUAGE = "en"
+        /** Selections longer than this are declined with a
+         *  plain message — the synthetic page + extraction
+         *  loop is built for a passage, not an article. */
+        const val MAX_SELECTION_CHARS = 5000
+        /** Bounded waits for the hidden-session loop:
+         *  detection of the synthetic page, then the
+         *  translation itself. A timeout is a plain
+         *  message, never a hang. */
+        const val SELECTION_DETECT_TIMEOUT_MS = 8000L
+        const val SELECTION_TRANSLATE_TIMEOUT_MS = 20000L
     }
 
     val supported: State<Boolean?> get() = _supported
@@ -256,13 +292,25 @@ class TranslationManager(
     internal fun onSupportedResult(ok: Boolean) {
         _supported.value = ok
         status("translate: engine ${if (ok) "supported" else "not supported on this device"}")
-        if (!ok) return
+        if (!ok) {
+            pendingSelectionText?.let {
+                pendingSelectionText = null
+                finishSelectionUnavailable(
+                    "Translation isn't supported on this device."
+                )
+            }
+            return
+        }
         pendingOffer.toList().forEach { tabId ->
             val from = detectedLang[tabId] ?: return@forEach
             val tab = selectedTab?.takeIf { it.id == tabId }
                 ?: return@forEach
             pendingOffer.remove(tabId)
             loadOfferDetails(tab, from)
+        }
+        pendingSelectionText?.let { text ->
+            pendingSelectionText = null
+            startSelectionFlow(text, selectionGen)
         }
     }
 
@@ -641,6 +689,12 @@ class TranslationManager(
     // ---------- selection / lifecycle ----------
 
     fun onTabSelected(tab: TranslateTab) {
+        // A selection result belongs to the tab it came
+        // from — switching tabs dismisses it, like the
+        // page offer hides for background tabs.
+        if (selectionTabId != null && selectionTabId != tab.id) {
+            dismissSelectionResult()
+        }
         selectedTab = tab
         refreshPageState(tab.id)
     }
@@ -650,11 +704,369 @@ class TranslationManager(
         pendingOffer.remove(tabId)
         lastOffer.remove(tabId)
         translatedFrom.remove(tabId)
+        if (selectionTabId == tabId) dismissSelectionResult()
         if (_offer.value?.tabId == tabId) _offer.value = null
         if (selectedTab?.id == tabId) {
             selectedTab = null
             _pageState.value = TranslatePageState.Hidden
         }
+    }
+
+    // ---------- selection translation (alpha.67, D-6a) ----------
+
+    /** What a text selection translates to (or why it
+     *  cannot). The shell renders the result card from
+     *  this state, in the same place and shape as the
+     *  page offer card. */
+    sealed interface SelectionTranslationState {
+        data object Hidden : SelectionTranslationState
+        data object Translating : SelectionTranslationState
+        data class Translated(
+            val fromCode: String,
+            val fromName: String,
+            val original: String,
+            val translated: String,
+        ) : SelectionTranslationState
+        data class Unavailable(val message: String) : SelectionTranslationState
+    }
+
+    val selectionResult: State<SelectionTranslationState>
+        get() = _selectionResult
+    private val _selectionResult =
+        mutableStateOf<SelectionTranslationState>(
+            SelectionTranslationState.Hidden
+        )
+
+    /** The translations delegate for the hidden selection
+     *  session — a second delegate, because the page
+     *  delegate routes through tabForSession and the
+     *  synthetic session has no tab. The offer is ignored:
+     *  the synthetic page is offerable (file: is a
+     *  supported scheme), but the flow calls translate()
+     *  directly once detection lands. */
+    val selectionDelegate = object : SessionTranslation.Delegate {
+        override fun onOfferTranslate(session: GeckoSession) {
+            // No offer for a synthetic page.
+        }
+
+        override fun onExpectedTranslate(session: GeckoSession) {
+            // Nothing to do, same as the page delegate.
+        }
+
+        override fun onTranslationStateChange(
+            session: GeckoSession,
+            state: SessionTranslation.TranslationState?,
+        ) {
+            if (state == null) return
+            handleSelectionStateChange(session, state)
+        }
+    }
+
+    /** Generation token: every new selection bumps it, so
+     *  a late timeout from an abandoned run can never
+     *  land on a newer one. State changes and extraction
+     *  callbacks are guarded on session identity instead. */
+    private var selectionGen = 0
+    private var selectionSession: GeckoSession? = null
+    private var selectionFileUrl: String? = null
+    private var selectionOriginal = ""
+    private var selectionFrom: String? = null
+    private var selectionTabId: Int? = null
+    private var pendingSelectionText: String? = null
+
+    /** The floating-toolbar action's entry point: translate
+     *  the selected text into English with the already
+     *  downloaded model for its language. Nothing is ever
+     *  downloaded on this path — a missing model is a
+     *  plain message. */
+    fun translateSelection(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        if (clean.length > MAX_SELECTION_CHARS) {
+            _selectionResult.value = SelectionTranslationState.Unavailable(
+                "That selection is too long to translate " +
+                    "(over $MAX_SELECTION_CHARS characters)."
+            )
+            status("translate selection: too long (${clean.length} chars)")
+            return
+        }
+        cancelSelectionWork()
+        selectionOriginal = clean
+        selectionTabId = selectedTab?.id
+        _selectionResult.value = SelectionTranslationState.Translating
+        if (_supported.value == false) {
+            finishSelectionUnavailable(
+                "Translation isn't supported on this device."
+            )
+            return
+        }
+        if (_supported.value == null) {
+            // Gate check still in flight: wait for it,
+            // exactly like the page offer waits in
+            // pendingOffer.
+            checkSupported()
+            pendingSelectionText = clean
+            return
+        }
+        startSelectionFlow(clean, selectionGen)
+    }
+
+    /** Dismiss the result card and cancel any run in
+     *  flight (the hidden session closes, the temp file
+     *  is deleted). */
+    fun dismissSelectionResult() {
+        cancelSelectionWork()
+        _selectionResult.value = SelectionTranslationState.Hidden
+    }
+
+    /** The synthetic page: the selection as a minimal
+     *  HTML document. The text is escaped, so a
+     *  selection containing markup can never execute as
+     *  code in the hidden session; line breaks become
+     *  breaks, so the extracted translation keeps the
+     *  passage's shape. */
+    internal fun selectionPageHtml(text: String): String {
+        val escaped = text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<br>")
+        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" +
+            "</head><body><p>$escaped</p></body></html>"
+    }
+
+    /** Open the hidden session on the synthetic page and
+     *  wait for the toolkit to detect its language. The
+     *  page is a temp file: URL, not data: — the
+     *  TranslationsChild actor is created for file: (and
+     *  http/https), but not for data:, so a data: page
+     *  could never translate. */
+    private fun startSelectionFlow(text: String, gen: Int) {
+        val fileUrl = runCatching {
+            writeSelectionFile(selectionPageHtml(text))
+        }.getOrNull()
+        if (fileUrl.isNullOrBlank()) {
+            finishSelectionUnavailable(
+                "Couldn't prepare that text for translation."
+            )
+            return
+        }
+        val session = runCatching { selectionSessionFactory() }.getOrNull()
+        if (session == null) {
+            runCatching { deleteSelectionFile(fileUrl) }
+            finishSelectionUnavailable(
+                "Translation isn't available right now."
+            )
+            return
+        }
+        selectionSession = session
+        selectionFileUrl = fileUrl
+        selectionFrom = null
+        runCatching { openSelectionSession(session) }.onFailure {
+            finishSelectionUnavailable("Couldn't start translation.")
+            return
+        }
+        runCatching { session.loadUri(fileUrl) }.onFailure {
+            finishSelectionUnavailable("Couldn't start translation.")
+            return
+        }
+        postDelayedToMain(
+            Runnable { onSelectionTimeout(gen) },
+            SELECTION_DETECT_TIMEOUT_MS,
+        )
+    }
+
+    private fun handleSelectionStateChange(
+        session: GeckoSession,
+        state: SessionTranslation.TranslationState,
+    ) {
+        if (session !== selectionSession) return
+        if (_selectionResult.value !is SelectionTranslationState.Translating) return
+        val err = state.error
+        if (err != null) {
+            finishSelectionUnavailable("Translation failed.")
+            return
+        }
+        if (state.hasVisibleChange == true) {
+            // The synthetic page translated in place: read
+            // the translated text back out of it.
+            extractSelectionResult(session)
+            return
+        }
+        val docLang = state.detectedLanguages?.docLangTag
+            ?.takeIf { it.isNotBlank() }
+            ?.let { TranslationLanguages.normalizeCode(it) }
+        if (docLang != null && selectionFrom == null) {
+            selectionFrom = docLang
+            onSelectionLanguageDetected(session, docLang)
+        }
+    }
+
+    private fun onSelectionLanguageDetected(
+        session: GeckoSession,
+        from: String,
+    ) {
+        if (from == TARGET_LANGUAGE) {
+            finishSelectionUnavailable("This text is already in English.")
+            return
+        }
+        if (!TranslationLanguages.isOfferable(from)) {
+            finishSelectionUnavailable(
+                "Translation from '$from' isn't available — " +
+                    "Pioneer translates Spanish, French, German, " +
+                    "Italian, Portuguese, Russian, Mandarin " +
+                    "Chinese and Hindi into English."
+            )
+            return
+        }
+        // Model state first: the selection path never
+        // downloads. A missing model is a plain message,
+        // not a download.
+        listSelectionModels { models ->
+            onSelectionModelStatesLoaded(session, models, from)
+        }
+    }
+
+    /** Pure handler: the model decision. Guarded on
+     *  session identity and the detected language, so a
+     *  late callback from an abandoned run is ignored. */
+    internal fun onSelectionModelStatesLoaded(
+        session: GeckoSession,
+        models: List<RuntimeTranslation.LanguageModel>?,
+        from: String,
+    ) {
+        if (session !== selectionSession) return
+        if (_selectionResult.value !is SelectionTranslationState.Translating) return
+        if (selectionFrom != from) return
+        val lang = TranslationLanguages.languageFor(from) ?: return
+        val downloaded = models?.firstOrNull {
+            it.language?.code?.equals(from, ignoreCase = true) == true
+        }?.isDownloaded == true
+        if (!downloaded) {
+            finishSelectionUnavailable(
+                "The ${lang.name} model isn't downloaded yet. " +
+                    "Download it in Settings to translate selections."
+            )
+            return
+        }
+        val translation = session.sessionTranslation
+        if (translation == null) {
+            finishSelectionUnavailable("Translation failed.")
+            return
+        }
+        var issued = false
+        runCatching {
+            translation.translate(
+                from,
+                TARGET_LANGUAGE,
+                SessionTranslation.TranslationOptions.Builder()
+                    .downloadModel(false)
+                    .build(),
+            )?.accept(
+                {
+                    // Completion arrives as a state change
+                    // (hasVisibleChange); nothing to do here.
+                },
+                {
+                    postToMain {
+                        finishSelectionUnavailable("Translation failed.")
+                    }
+                },
+            )
+            issued = true
+        }.onFailure {
+            finishSelectionUnavailable("Translation failed.")
+        }
+        if (issued) {
+            val gen = selectionGen
+            postDelayedToMain(
+                Runnable { onSelectionTimeout(gen) },
+                SELECTION_TRANSLATE_TIMEOUT_MS,
+            )
+        }
+    }
+
+    private fun extractSelectionResult(session: GeckoSession) {
+        runCatching {
+            session.sessionPageExtractor.getPageContent(
+                PageExtractionController.ContentParams(true, true),
+            ).accept(
+                { text -> postToMain { onSelectionExtracted(session, text) } },
+                {
+                    postToMain {
+                        finishSelectionUnavailable(
+                            "Couldn't read the translation back."
+                        )
+                    }
+                },
+            )
+        }.onFailure {
+            finishSelectionUnavailable(
+                "Couldn't read the translation back."
+            )
+        }
+    }
+
+    /** Pure handler: publish the extracted translation.
+     *  Guarded on session identity and the Translating
+     *  state, so a late callback from an abandoned run
+     *  is ignored. */
+    internal fun onSelectionExtracted(
+        session: GeckoSession,
+        text: String?,
+    ) {
+        if (session !== selectionSession) return
+        if (_selectionResult.value !is SelectionTranslationState.Translating) return
+        val clean = text?.trim().orEmpty()
+        if (clean.isEmpty()) {
+            finishSelectionUnavailable("Translation came back empty.")
+            return
+        }
+        val from = selectionFrom ?: run {
+            finishSelectionUnavailable("Translation failed.")
+            return
+        }
+        val lang = TranslationLanguages.languageFor(from)
+        _selectionResult.value = SelectionTranslationState.Translated(
+            fromCode = from,
+            fromName = lang?.name ?: from,
+            original = selectionOriginal,
+            translated = clean,
+        )
+        status("translate selection: $from → en done")
+        cleanupSelectionWork()
+    }
+
+    private fun onSelectionTimeout(gen: Int) {
+        if (gen != selectionGen) return
+        if (_selectionResult.value !is SelectionTranslationState.Translating) return
+        finishSelectionUnavailable(
+            "Translation timed out. Try again with a shorter selection."
+        )
+    }
+
+    private fun finishSelectionUnavailable(message: String) {
+        _selectionResult.value = SelectionTranslationState.Unavailable(message)
+        status("translate selection: $message")
+        cancelSelectionWork()
+    }
+
+    private fun cancelSelectionWork() {
+        selectionGen++
+        pendingSelectionText = null
+        cleanupSelectionWork()
+    }
+
+    private fun cleanupSelectionWork() {
+        selectionSession?.let { session ->
+            runCatching { closeSelectionSession(session) }
+        }
+        selectionSession = null
+        selectionFileUrl?.let { url ->
+            runCatching { deleteSelectionFile(url) }
+        }
+        selectionFileUrl = null
+        selectionFrom = null
     }
 
     private fun refreshPageState(tabId: Int) {
