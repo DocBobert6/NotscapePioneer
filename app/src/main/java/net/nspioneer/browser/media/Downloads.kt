@@ -220,6 +220,12 @@ object Downloads {
         private val cache = mutableMapOf<String, CookieSnapshot?>()
         private val counts = mutableMapOf<String, Int>()
         private val noted = mutableSetOf<String>()
+        // Hosts already asked, including ones that answered
+        // empty: getOrPut cannot cache a null value (a null
+        // reads as absent and recomputes), so the asked set
+        // is what makes "once per host" hold for empty
+        // replies too.
+        private val asked = mutableSetOf<String>()
 
         /** The Cookie header for [url], or null when this
          *  job has no cookies for the URL's host. Asks the
@@ -229,15 +235,18 @@ object Downloads {
         fun headerFor(url: String): String? {
             val host = originHostOf(url)
             if (host.isBlank()) return null
-            val snap = cache.getOrPut(host) {
+            if (host !in asked) {
+                asked += host
                 val cookies = runCatching { request(url) }.getOrDefault(emptyList())
-                if (cookies.isEmpty()) {
+                val snap = if (cookies.isEmpty()) {
                     legacy?.takeIf { it.host == host && it.cookie.isNotBlank() }
                 } else {
                     counts[host] = cookies.size
                     CookieSnapshot(host, cookies.joinToString("; ") { (n, v) -> "$n=$v" })
                 }
+                if (snap != null) cache[host] = snap
             }
+            val snap = cache[host]
             if (snap != null && noted.add(host)) {
                 val count = counts[host]
                     ?: (snap.cookie.count { it == ';' } + 1)
