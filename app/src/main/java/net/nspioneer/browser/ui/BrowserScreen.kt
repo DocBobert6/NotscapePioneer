@@ -3768,6 +3768,15 @@ fun DiagnosticsScreen(
                 engine.cookieObserverState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
+            // alpha.63: the cookies-API experiment verdict —
+            // off until the flag flips on, unknown until the
+            // first probe, then accepted with the host and the
+            // per-store cookie names seen (names only — never
+            // values), or rejected with the reason.
+            Text(
+                engine.cookieApiState.value,
+                style = MaterialTheme.typography.bodyMedium
+            )
             Text(
                 "— status —",
                 style = MaterialTheme.typography.labelLarge,

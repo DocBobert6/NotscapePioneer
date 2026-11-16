@@ -307,6 +307,36 @@ class ExtensionManager(
             )
             return true
         }
+        // Alpha.63: the cookies-API probe. The background
+        // script reports whether browser.cookies is exposed
+        // there, and per-store cookie NAMES (never values)
+        // for the probed page — or an error name when getAll
+        // threw. A missing `api` reads as absent, a missing
+        // `stores` array as empty — never a false accept.
+        if (type == "cookie-api-probe") {
+            val storesArray = message.optJSONArray("stores")
+            val stores = if (storesArray != null) {
+                List(storesArray.length()) { i ->
+                    val obj = storesArray.optJSONObject(i)
+                    val namesArray = obj?.optJSONArray("names")
+                    val names = if (namesArray != null) {
+                        List(namesArray.length()) { namesArray.optString(it) }
+                    } else {
+                        emptyList()
+                    }
+                    (obj?.optString("storeId") ?: "") to names
+                }
+            } else {
+                emptyList()
+            }
+            host.noteCookiesApiProbe(
+                message.optBoolean("api", false),
+                message.optString("host"),
+                message.optString("error").takeIf { it.isNotEmpty() },
+                stores
+            )
+            return true
+        }
         // Alpha.61: the startup handshake — the background
         // script is alive and the port channel works.
         if (type == "background-alive") {
@@ -450,6 +480,10 @@ class ExtensionManager(
             // for a `Cookie` header (re-arms per load while
             // the verdict is UNKNOWN).
             host.noteCookieCapturePageLoad()
+            // Alpha.63: the same report arms the bounded wait
+            // for a cookie name (re-arms per load while the
+            // verdict is UNKNOWN).
+            host.noteCookiesApiPageLoad()
             status.status(
                 "probe tab $tabNumber [${message.optString("phase")}]: " +
                     "$count media URLs on $url" +
@@ -707,6 +741,23 @@ interface ProbeHost {
      *  the bounded wait for a `Cookie` header (re-arms per
      *  load while the verdict is UNKNOWN). */
     fun noteCookieCapturePageLoad() {}
+    /** Alpha.63: the cookies-API experiment flag
+     *  (`probeCookiesApi`, default OFF). */
+    fun cookiesApiEnabled(): Boolean = false
+    /** Alpha.63: one cookies-API probe report — [apiPresent]
+     *  false means browser.cookies is undefined in the
+     *  background script; [error] names a getAll failure;
+     *  [stores] maps storeId to cookie NAMES (never values). */
+    fun noteCookiesApiProbe(
+        apiPresent: Boolean,
+        host: String,
+        error: String?,
+        stores: List<Pair<String, List<String>>>
+    ) {}
+    /** Alpha.63: a probe report means a page loaded — arm
+     *  the bounded wait for a cookie name (re-arms per load
+     *  while the verdict is UNKNOWN). */
+    fun noteCookiesApiPageLoad() {}
     /** Alpha.61: the background script posted its startup
      *  handshake (`background-alive`) on the native port —
      *  it is alive and the port channel works. */

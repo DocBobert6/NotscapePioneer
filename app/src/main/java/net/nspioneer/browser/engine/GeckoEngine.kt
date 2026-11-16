@@ -208,6 +208,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
+    /** Alpha.63: the cookies-API experiment verdict. The
+     *  callback refreshes the Diagnostics state line and
+     *  logs the verdict once (first-wins, so exactly one
+     *  line per session). */
+    private val cookieApiExperiment = CookieApiExperiment().also {
+        it.onStateChanged = {
+            refreshCookiesApiState()
+            val reason = it.rejectReason?.let { r -> " ($r)" } ?: ""
+            statusPanel.status("cookies API: ${it.verdict.name.lowercase()}$reason")
+        }
+    }
+
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
@@ -221,7 +233,7 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // port-connect push.
         engineScope.launch {
             snapshotFlow {
-                Triple(
+                listOf(
                     store.setting("blockAds", "true"),
                     store.setting("blockTrackers", "true"),
                     // alpha.59: the cookie-capture flag rides
@@ -229,6 +241,13 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                     // toggle re-sends rules-update at once.
                     store.setting(
                         CookieCaptureExperiment.flagKey(), "false"
+                    ),
+                    // alpha.63: the cookies-API flag rides the
+                    // same push — flipping its toggle re-sends
+                    // rules-update at once. (A list, not a
+                    // Triple: four values do not fit one.)
+                    store.setting(
+                        CookieApiExperiment.flagKey(), "false"
                     )
                 )
             }.distinctUntilChanged().drop(1).collect {
@@ -402,6 +421,14 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         )
     override val cookieObserverState: State<String> get() = _cookieObserverState
 
+    private val _cookieApiState =
+        mutableStateOf(
+            cookieApiExperiment.cookiesApiStateText(
+                CookieApiExperiment.isEnabled(store)
+            )
+        )
+    override val cookieApiState: State<String> get() = _cookieApiState
+
     /** Alpha.61: "background: alive · port connected" once
      *  the background script has posted its startup
      *  handshake on the native port, "background: not seen
@@ -433,6 +460,18 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         mainHandler.post {
             _cookieCaptureState.value = cookieCaptureExperiment.cookieCaptureStateText(
                 CookieCaptureExperiment.isEnabled(store)
+            )
+        }
+    }
+
+    /** Refresh the cookies-API experiment status line
+     *  from the verdict (alpha.63: `cookieApiState` ←
+     *  `cookiesApiStateText()`). Posted to the main
+     *  thread: the probe reports can arrive off it. */
+    private fun refreshCookiesApiState() {
+        mainHandler.post {
+            _cookieApiState.value = cookieApiExperiment.cookiesApiStateText(
+                CookieApiExperiment.isEnabled(store)
             )
         }
     }
@@ -1330,6 +1369,11 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun cookieCaptureEnabled(): Boolean =
         CookieCaptureExperiment.isEnabled(store)
 
+    /** Alpha.63: the cookies-API experiment flag
+     *  (`probeCookiesApi`, default OFF). */
+    override fun cookiesApiEnabled(): Boolean =
+        CookieApiExperiment.isEnabled(store)
+
     override fun noteStatus(line: String) {
         statusPanel.status(line)
     }
@@ -1536,6 +1580,67 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         mainHandler.postDelayed({
             cookieCaptureExperiment.noteTimeout()
             cookieCaptureTimeoutArmed = false
+        }, 10_000)
+    }
+
+    /** Alpha.63: one cookies-API probe report from the
+     *  background script. Accepted regardless of the store
+     *  flag (like the alpha.60 probe): a report that
+     *  arrives after a mid-flight flip-off is still
+     *  evidence, and the Diagnostics line reads "off"
+     *  while the flag is off anyway. Posted to the main
+     *  thread: probe reports can arrive off it. The first
+     *  report also logs a status line with the per-store
+     *  counts, so Copy status shows what the probe found. */
+    override fun noteCookiesApiProbe(
+        apiPresent: Boolean,
+        host: String,
+        error: String?,
+        stores: List<Pair<String, List<String>>>
+    ) {
+        val first = cookieApiExperiment.probesRun == 0
+        mainHandler.post {
+            if (!apiPresent) {
+                cookieApiExperiment.noteApiAbsent(host)
+            } else if (error != null) {
+                cookieApiExperiment.noteApiError(host, error)
+            } else {
+                cookieApiExperiment.noteProbe(
+                    host,
+                    stores.map { CookieApiExperiment.StoreResult(it.first, it.second) }
+                )
+            }
+            refreshCookiesApiState()
+            if (first) {
+                val summary = when {
+                    !apiPresent -> "browser.cookies undefined"
+                    error != null -> "error: $error"
+                    else -> stores.joinToString("; ") { (id, names) ->
+                        "$id: ${names.size} name(s)"
+                    }
+                }
+                statusPanel.status("cookies API: probed $host · $summary")
+            }
+        }
+    }
+
+    /** Alpha.63: 10 s bounded wait for a cookie name,
+     *  armed once per page load while the verdict is UNKNOWN
+     *  (a probe report means a page loaded). Unlike the
+     *  MAIN-world wait it re-arms: a timeout with zero
+     *  probe runs leaves the verdict UNKNOWN (no evidence
+     *  either way), so the next load tries again. */
+    private var cookiesApiTimeoutArmed = false
+
+    override fun noteCookiesApiPageLoad() {
+        if (!CookieApiExperiment.isEnabled(store)) return
+        if (cookieApiExperiment.verdict != CookieApiExperiment.Verdict.UNKNOWN ||
+            cookiesApiTimeoutArmed
+        ) return
+        cookiesApiTimeoutArmed = true
+        mainHandler.postDelayed({
+            cookieApiExperiment.noteTimeout()
+            cookiesApiTimeoutArmed = false
         }, 10_000)
     }
 

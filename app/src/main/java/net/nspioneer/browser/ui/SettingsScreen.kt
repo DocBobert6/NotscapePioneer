@@ -68,6 +68,7 @@ import net.nspioneer.browser.data.PioneerStore
 import net.nspioneer.browser.data.StorageInfo
 import net.nspioneer.browser.engine.DE_AMP_KEY
 import net.nspioneer.browser.engine.Engine
+import net.nspioneer.browser.engine.CookieApiExperiment
 import net.nspioneer.browser.engine.CookieCaptureExperiment
 import net.nspioneer.browser.engine.MainWorldExperiment
 import net.nspioneer.browser.engine.SearchTemplate
@@ -1727,6 +1728,19 @@ fun SettingsScreen(
                     checked = CookieCaptureExperiment.isEnabled(store),
                     onCheckedChange = {
                         store.putSetting(CookieCaptureExperiment.flagKey(), it.toString())
+                    }
+                )
+                InsetDivider()
+                ToggleRow(
+                    label = "Cookies API experiment",
+                    supporting = "Ask the browser's cookies API for the current page's " +
+                        "cookies and report accepted/rejected in Diagnostics. " +
+                        "Only cookie NAMES are ever recorded — never values — " +
+                        "and only for the page's own URL. Nothing is wired into " +
+                        "downloads by this experiment.",
+                    checked = CookieApiExperiment.isEnabled(store),
+                    onCheckedChange = {
+                        store.putSetting(CookieApiExperiment.flagKey(), it.toString())
                     }
                 )
             }
