@@ -59,6 +59,84 @@
     return SEGMENT_NOISE_RE.test(lower);
   }
 
+  /* Alpha.65 DOM fallback — the YouTube helpers.
+   * The page's own ytInitialPlayerResponse may carry
+   * an HLS / DASH manifest (the WEB client usually
+   * does not — SABR-only — so this is a supplementary
+   * source; the InnerTube ladder is the real route).
+   * YouTube hosts only, and only when the response is
+   * for this page's video: videoDetails.videoId must
+   * match the id in the page URL, or a stale script
+   * tag (YouTube SPA navigations do not re-emit it)
+   * would report the previous video's manifest. */
+  function isYouTubeHost(host) {
+    var h = String(host || "").toLowerCase().replace(/\.$/, "");
+    return h === "youtube.com" || h.endsWith(".youtube.com") ||
+      h === "youtu.be" ||
+      h === "youtube-nocookie.com" || h.endsWith(".youtube-nocookie.com");
+  }
+
+  var YT_VIDEO_ID_RE = /^[0-9A-Za-z_-]{11}$/;
+  function videoIdFromUrl(url) {
+    var u = String(url || "");
+    var host = "";
+    try { host = new URL(u).hostname.toLowerCase(); } catch (e) { return null; }
+    if (!isYouTubeHost(host)) return null;
+    if (host === "youtu.be") {
+      var seg = "";
+      try { seg = new URL(u).pathname.replace(/^\/+/, "").split("/")[0]; } catch (e) { return null; }
+      return YT_VIDEO_ID_RE.test(seg) ? seg : null;
+    }
+    var m = u.match(/[?&#]v=([0-9A-Za-z_-]{11})(?:[&#]|$)/);
+    if (m) return m[1];
+    m = u.match(/\/(?:embed|v|e|shorts|live)\/([0-9A-Za-z_-]{11})(?:[\/?#]|$)/);
+    return m ? m[1] : null;
+  }
+
+  /* The ytInitialPlayerResponse object from one
+   * <script> text: the object literal after the
+   * marker, taken with a balanced-brace scan that is
+   * string-aware (a brace inside a string cannot
+   * close the object early). Returns the parsed
+   * object or null. */
+  function extractYtInitialPlayerResponse(scriptText) {
+    var text = String(scriptText || "");
+    var marker = text.indexOf("ytInitialPlayerResponse");
+    if (marker < 0) return null;
+    var start = text.indexOf("{", marker);
+    if (start < 0) return null;
+    var depth = 0, inStr = null, esc = false;
+    for (var i = start; i < text.length; i++) {
+      var ch = text[i];
+      if (esc) { esc = false; continue; }
+      if (ch === "\\" && inStr) { esc = true; continue; }
+      if (inStr) { if (ch === inStr) inStr = null; continue; }
+      if (ch === '"' || ch === "'") { inStr = ch; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try { return JSON.parse(text.slice(start, i + 1)); } catch (e) { return null; }
+        }
+      }
+    }
+    return null;
+  }
+
+  /* (hls, dash) manifest URLs from a parsed player
+   * response, each null when absent — and both null
+   * when the response is not for this page's video. */
+  function ytInitialManifests(playerResponse, pageVideoId) {
+    var pr = playerResponse || {};
+    var videoId = "";
+    try { videoId = String((pr.videoDetails || {}).videoId || ""); } catch (e) { videoId = ""; }
+    if (!videoId || videoId !== String(pageVideoId || "")) return { hls: null, dash: null };
+    var sd = pr.streamingData || {};
+    var hls = (typeof sd.hlsManifestUrl === "string" && sd.hlsManifestUrl) ? sd.hlsManifestUrl : null;
+    var dash = (typeof sd.dashManifestUrl === "string" && sd.dashManifestUrl) ? sd.dashManifestUrl : null;
+    return { hls: hls, dash: dash };
+  }
+
   /* Text zoom (Phase 2): per-site, via the app. There is no
    * per-session text-zoom API in GeckoView and no JS-eval API, so
    * the app pushes the factor over a native port and the script
@@ -309,6 +387,36 @@
         }
       }
     } catch (e) { /* performance API unavailable */ }
+    /* Alpha.65 DOM fallback (see the helpers above):
+     * the page's ytInitialPlayerResponse, when it
+     * carries a manifest for THIS video. One
+     * successful extraction per document; a script tag
+     * whose text has not changed since the last try is
+     * never re-parsed, so the ~1 MB parse runs at most
+     * once per tag. HLS first, as the ladder prefers
+     * it; DASH only when there is no HLS manifest, so
+     * the picker never shows two rows for one video. */
+    if (!window.__nsYtInitialDone && isYouTubeHost(location.hostname || "")) {
+      var pageVideoId = videoIdFromUrl(location.href || "");
+      if (pageVideoId) {
+        var scripts = document.querySelectorAll("script");
+        for (var si = 0; si < scripts.length; si++) {
+          var txt = scripts[si].textContent || "";
+          if (txt.indexOf("ytInitialPlayerResponse") < 0) continue;
+          if (txt.length === window.__nsYtInitialTriedLen) break;
+          window.__nsYtInitialTriedLen = txt.length;
+          var pr = extractYtInitialPlayerResponse(txt);
+          if (!pr) break;
+          var man = ytInitialManifests(pr, pageVideoId);
+          var murl = man.hls || man.dash;
+          if (murl) {
+            add(murl, "video", "");
+            window.__nsYtInitialDone = true;
+          }
+          break;
+        }
+      }
+    }
     return out;
   }
 
@@ -570,4 +678,17 @@
   queryAutoplay();
   setTimeout(function () { report("t+2s"); }, 2000);
   setTimeout(function () { report("t+6s"); }, 6000);
+
+  /* Node test harness: the pure YouTube helpers are
+   * exported without the browser wiring, as
+   * background.js exports its matcher. */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      isYouTubeHost: isYouTubeHost,
+      videoIdFromUrl: videoIdFromUrl,
+      extractYtInitialPlayerResponse: extractYtInitialPlayerResponse,
+      ytInitialManifests: ytInitialManifests,
+      isSegmentNoise: isSegmentNoise
+    };
+  }
 })();

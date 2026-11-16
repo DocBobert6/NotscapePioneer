@@ -446,9 +446,15 @@
    * one: HLS / DASH manifests are routinely a few KB, and
    * flooring them would break the detection the floor
    * exists to clean up. */
+  /* InnerTube manifest shape (alpha.65): see
+   * MediaLog's copy — extension-less manifests on
+   * manifest.googlevideo.com. Must agree with it and
+   * with BlockingObserver's copy. */
   function isManifest(url, mime) {
     var lower = String(url || "").toLowerCase();
     if (MANIFEST_URL_RE.test(lower)) return true;
+    if (lower.indexOf("manifest.googlevideo.com/api/manifest/hls_playlist/") >= 0 ||
+        lower.indexOf("manifest.googlevideo.com/api/manifest/dash/") >= 0) return true;
     if (mime) {
       var type = String(mime).split(";")[0].trim().toLowerCase();
       if (type === "application/x-mpegurl" ||
