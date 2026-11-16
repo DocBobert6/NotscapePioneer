@@ -2175,6 +2175,95 @@ object Downloads {
         }.getOrDefault(emptyList())
     }
 
+    // ---------- Resolve-to-one (alpha.58) ----------
+
+    /** Playlist URLs a master manifest references, resolved
+     *  to absolute URLs against [baseUrl].
+     *
+     *  HLS: every URI line following an #EXT-X-STREAM-INF
+     *  tag (the video media playlists) plus every
+     *  #EXT-X-MEDIA URI (audio renditions, subtitles) —
+     *  ALL of them, not just the default audio group, so a
+     *  second-language audio playlist is hidden too. A
+     *  media playlist (segments only, no STREAM-INF or
+     *  MEDIA tags) references nothing and yields an empty
+     *  set, which is how the picker tells master from
+     *  media without classifying first: every manifest in
+     *  the list is asked, and only masters answer.
+     *
+     *  DASH: an MPD has no sub-playlists — its media is
+     *  segments, not manifests — so the only referenced
+     *  manifest URLs are Representation BaseURLs that
+     *  themselves end in .mpd (a chained MPD; rare in
+     *  practice, caught defensively). A normal MPD yields
+     *  an empty set.
+     *
+     *  Pure and total: malformed input yields an empty
+     *  set, never a throw. */
+    internal fun referencedMediaPlaylists(text: String, baseUrl: String): Set<String> {
+        val out = mutableSetOf<String>()
+        val lines = text.lines()
+        for (i in lines.indices) {
+            val line = lines[i].trim()
+            when {
+                line.startsWith("#EXT-X-MEDIA") -> {
+                    val uri = parseHlsAttrs(line)["URI"] ?: continue
+                    out += resolveUrl(baseUrl, uri)
+                }
+                line.startsWith("#EXT-X-STREAM-INF") -> {
+                    val uri = lines.getOrNull(i + 1)?.trim().orEmpty()
+                    if (uri.isNotBlank() && !uri.startsWith("#")) {
+                        out += resolveUrl(baseUrl, uri)
+                    }
+                }
+            }
+        }
+        val lower = baseUrl.substringBefore('?').lowercase()
+        if (lower.endsWith(".mpd")) {
+            runCatching {
+                for (rep in parseDashManifest(text, baseUrl)) {
+                    val ref = rep.baseUrl ?: continue
+                    if (ref.substringBefore('?').endsWith(".mpd", ignoreCase = true)) {
+                        out += resolveUrl(baseUrl, ref)
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /** Fetch one manifest and return the media-playlist
+     *  URLs it references (see [referencedMediaPlaylists]).
+     *  A failed fetch — signed or transient URL, offline —
+     *  yields an empty set, so the picker falls back to
+     *  today's behaviour (every row listed) instead of
+     *  hiding anything on a guess. Uses the same
+     *  no-cookie fetch as [fetchDownloadVariants]; a master
+     *  whose fetch needs the page's cookies cannot be
+     *  resolved, and its media playlists stay listed. */
+    fun fetchReferencedPlaylists(manifestUrl: String, referer: String?): Set<String> =
+        runCatching {
+            referencedMediaPlaylists(fetchText(manifestUrl, referer), manifestUrl)
+        }.getOrDefault(emptySet())
+
+    /** Resolve-to-one for the media sheet: hide every
+     *  manifest row whose URL is in [referenced] — the
+     *  media playlists a present master references. The
+     *  master itself stays, as does any media playlist no
+     *  master references (orphan case: it is the only way
+     *  to download that stream), any direct file, and
+     *  everything else. Only manifest rows are ever
+     *  hidden, even if a non-manifest URL somehow lands
+     *  in [referenced]. Pure. */
+    fun resolvePickerItems(
+        items: List<DetectedMedia>, referenced: Set<String>
+    ): List<DetectedMedia> {
+        if (referenced.isEmpty()) return items
+        return items.filter { item ->
+            !(MediaLog.isManifest(item.url, null) && item.url in referenced)
+        }
+    }
+
     // ---------- DASH ----------
 
     data class DashOutcome(val ok: Boolean, val bytes: Long = 0, val error: String? = null)
