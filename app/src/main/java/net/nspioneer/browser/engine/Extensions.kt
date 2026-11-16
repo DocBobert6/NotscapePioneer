@@ -87,6 +87,7 @@ class ExtensionManager(
                         status.status("probe extension: installed (${ext?.id})")
                         ext?.let { extension ->
                             probeExtension = extension
+                            registerBackgroundDelegate(extension)
                             sessionProvider().forEach { session ->
                                 registerSession(session)
                             }
@@ -96,6 +97,30 @@ class ExtensionManager(
                 )
         } catch (e: Throwable) {
             status.status("probe extension: threw ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * Alpha.62: register the probe message delegate on the
+     * extension object itself, so session-less background
+     * traffic reaches it. GeckoView routes a background
+     * sender (session == null, environmentType ==
+     * ENV_TYPE_EXTENSION) to the delegate on the runtime
+     * controller's Listener
+     * (WebExtension.setMessageDelegate, GeckoView 160) —
+     * per-session registration alone never receives it,
+     * and the pending queue for session == null is never
+     * released by a tab registering. getDelegate picks
+     * exactly one delegate per message by sender session,
+     * so there is no double-feed with the per-session
+     * delegate. Also releases any background messages
+     * queued while no delegate was registered.
+     */
+    fun registerBackgroundDelegate(extension: WebExtension) {
+        runCatching {
+            extension.setMessageDelegate(probeMessageDelegate, PROBE_APP)
+        }.onFailure { e ->
+            status.status("probe: background delegate failed: ${e.message}")
         }
     }
 

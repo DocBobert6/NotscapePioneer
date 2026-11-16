@@ -498,11 +498,15 @@ class BlockingObserver(private val host: BlockingHost) {
      *  ports. Pushes the current rule set at once. */
     fun onBackgroundPortConnected(port: WebExtension.Port) {
         backgroundPort = port
+        host.noteStatus("background port: connected")
         pushRulesUpdate()
     }
 
     fun onBackgroundPortDisconnected(port: WebExtension.Port) {
-        if (backgroundPort === port) backgroundPort = null
+        if (backgroundPort === port) {
+            backgroundPort = null
+            host.noteStatus("background port: disconnected")
+        }
     }
 
     /** Re-push the rule set after a list toggle changed

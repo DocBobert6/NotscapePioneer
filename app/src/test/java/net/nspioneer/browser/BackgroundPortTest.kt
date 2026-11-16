@@ -1,5 +1,6 @@
 package net.nspioneer.browser
 
+import net.nspioneer.browser.engine.BlockingHost
 import net.nspioneer.browser.engine.BlockingObserver
 import net.nspioneer.browser.engine.ExtensionManager
 import net.nspioneer.browser.engine.ProbeHost
@@ -10,7 +11,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.verify
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
@@ -86,6 +89,12 @@ class BackgroundPortTest {
         // Still names-only: no value of any kind anywhere.
         assertFalse(js.contains("cookieValue"))
         assertFalse(js.contains("document.cookie"))
+        // Alpha.62: the handshake is posted twice — once
+        // in connectPort, once when a rules-update lands
+        // (a handshake posted before the app-side Port
+        // exists is dropped, and rules-update only
+        // arrives after onConnect).
+        assertEquals(2, js.split("background-alive").size - 1)
     }
 
     // ---------- port delegate routing ----------
@@ -276,6 +285,46 @@ class BackgroundPortTest {
     fun port_ignores_unknown_type() {
         val host = routed(RecordingHost(), """{"type":"zoom-query"}""")
         assertEquals(emptyList<String>(), host.calls)
+    }
+
+    // ---------- runtime delegate registration (alpha.62) ----------
+
+    @Test
+    fun install_registers_runtime_delegate() {
+        val host = RecordingHost()
+        val manager = manager(host)
+        val ext = mock(WebExtension::class.java)
+        manager.registerBackgroundDelegate(ext)
+        val field = ExtensionManager::class.java
+            .getDeclaredField("probeMessageDelegate")
+        field.isAccessible = true
+        val delegate = field.get(manager) as WebExtension.MessageDelegate
+        verify(ext).setMessageDelegate(eq(delegate), eq("pioneer"))
+    }
+
+    /** Records BlockingHost.noteStatus lines. */
+    private class RecordingBlockingHost : BlockingHost {
+        val statusLines = mutableListOf<String>()
+        override fun tabIdForPageHost(pageHost: String): Int = -1
+        override fun onMediaObserved(tabId: Int, url: String, kind: String) {}
+        override fun disabledHosts(): Set<String> = emptySet()
+        override fun noteStatus(line: String) {
+            statusLines.add(line)
+        }
+    }
+
+    @Test
+    fun port_connect_and_disconnect_log_status_lines() {
+        val host = RecordingBlockingHost()
+        val observer = BlockingObserver(host)
+        val port = mock(WebExtension.Port::class.java)
+        observer.onBackgroundPortConnected(port)
+        assertTrue(host.statusLines.contains("background port: connected"))
+        val other = mock(WebExtension.Port::class.java)
+        observer.onBackgroundPortDisconnected(other)
+        assertFalse(host.statusLines.contains("background port: disconnected"))
+        observer.onBackgroundPortDisconnected(port)
+        assertTrue(host.statusLines.contains("background port: disconnected"))
     }
 
     @Test
