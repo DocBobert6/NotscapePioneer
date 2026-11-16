@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
  * YouTube's web client no longer serves segments as
  * range-GETs: since July 2026 it uses SABR/UMP (one
  * POST to serverAbrStreamingUrl, binary protobuf), so
- * Pioneer's webRequest/MIME detection sees no video/*
+ * Pioneer's webRequest/MIME detection sees no video
  * responses on YouTube. The fix is to ask YouTube's
  * InnerTube player endpoint AS A DIFFERENT CLIENT
  * that still returns an HLS (or DASH) manifest, then
