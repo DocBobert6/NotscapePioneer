@@ -23,6 +23,7 @@ import androidx.media3.transformer.Transformer
 import androidx.work.ForegroundInfo
 import net.nspioneer.browser.data.DownloadRecord
 import net.nspioneer.browser.data.PioneerStore
+import net.nspioneer.browser.engine.CookieRequester
 import java.io.File
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
@@ -50,14 +51,15 @@ import java.net.URL
  *   contentType fields on 159). PDFs download as files (§8.2:
  *   no PDF viewer in Phase 3; Mariner's PDF diversion is
  *   NOT ported).
- * - Cookies: GeckoView exposes no cookie API to the app
- *   (there is no CookieManager equivalent), so the cookie
- *   snapshot Mariner takes at tap time is always empty in
- *   Pioneer — workers send no cookies. Recorded as a known
- *   gap: authenticated / signed media URLs that need the
- *   page's cookies may fail to download. The snapshot
- *   plumbing (host-scoped, replayed only to its own host)
- *   is kept so a future cookie source can plug in.
+ * - Cookies (alpha.64): the background script's cookies
+ *   API now feeds the snapshot — a job asks the extension
+ *   for one host's cookies at job time and replays them
+ *   host-scoped ([JobCookieJar]). Values live in memory
+ *   only, for the job's lifetime: they are never written
+ *   to the job bundle or the store, never logged, never
+ *   shown. A host the API cannot serve (port down,
+ *   timeout, error, empty) simply downloads without
+ *   cookies — the safe fallback, never a failure.
  * - EPUB auto-shelf is DROPPED (§8.2): reader is Phase 4,
  *   EPUBs download as files like any other.
  * - Subtitle renditions on HLS downloads are not fetched
@@ -171,9 +173,11 @@ object Downloads {
     // the download leaves the active set (cancel, delete, or
     // terminal completion). It never holds credentials beyond the
     // referer/cookie the engine already sends.
-    // The cookie snapshot is always empty in Pioneer (GeckoView
-    // exposes no cookie API — see the file header); the plumbing
-    // stays host-scoped for a future cookie source.
+    // The cookie source arrived in alpha.64: the job asks the
+    // background script's cookies API per host at fetch time
+    // ([JobCookieJar], memory-only, host-scoped) — the bundle's
+    // "cookie" key stays empty and is only the legacy fallback
+    // the jar reads, so values are never persisted here.
 
     /** WebView cookies for one host, captured at download-tap time. Host-scoped by construction. */
     internal data class CookieSnapshot(val host: String, val cookie: String)
@@ -191,6 +195,59 @@ object Downloads {
             if (host != null && host == snapshot.host) return snapshot.cookie
         }
         return liveCookie?.takeIf { it.isNotBlank() }
+    }
+
+    /** Alpha.64: per-job cookie jar. One snapshot per host,
+     *  asked once (the first fetch for that host) through the
+     *  background script's cookies API and cached for the
+     *  job's lifetime only — in memory, never persisted.
+     *  A host the API cannot serve (port down, timeout,
+     *  error, empty) caches as absent and the job proceeds
+     *  without cookies for it. [legacy] is the bundle
+     *  snapshot (always empty today, kept so an older
+     *  bundle shape still replays host-scoped). The first
+     *  attach per host notes a count-only line via the
+     *  requester ("cookies: N for <host>" — no names, no
+     *  values). Synchronized: the segmented engine calls
+     *  [headerFor] from parallel chunk coroutines. */
+    internal class JobCookieJar(
+        private val request: (String) -> List<Pair<String, String>> =
+            CookieRequester::requestCookies,
+        private val legacy: CookieSnapshot? = null,
+        private val noteAttach: (String, Int) -> Unit =
+            { host, count -> CookieRequester.noteAttach(host, count) },
+    ) {
+        private val cache = mutableMapOf<String, CookieSnapshot?>()
+        private val counts = mutableMapOf<String, Int>()
+        private val noted = mutableSetOf<String>()
+
+        /** The Cookie header for [url], or null when this
+         *  job has no cookies for the URL's host. Asks the
+         *  API once per host; later URLs for the same host
+         *  reuse the cached snapshot. */
+        @Synchronized
+        fun headerFor(url: String): String? {
+            val host = originHostOf(url)
+            if (host.isBlank()) return null
+            val snap = cache.getOrPut(host) {
+                val cookies = runCatching { request(url) }.getOrDefault(emptyList())
+                if (cookies.isEmpty()) {
+                    legacy?.takeIf { it.host == host && it.cookie.isNotBlank() }
+                } else {
+                    counts[host] = cookies.size
+                    CookieSnapshot(host, cookies.joinToString("; ") { (n, v) -> "$n=$v" })
+                }
+            }
+            if (snap != null && noted.add(host)) {
+                val count = counts[host]
+                    ?: (snap.cookie.count { it == ';' } + 1)
+                noteAttach(host, count)
+            }
+            // The host match runs through the one primitive
+            // (cache is keyed by host, so this always hits —
+            // the call keeps the rule in exactly one place).
+            return cookieForRequest(url, snap, null)
+        }
     }
 
     internal fun encodeJobBundle(fields: Map<String, String>): String =
@@ -886,10 +943,13 @@ object Downloads {
                 userAgent = UA
             )
             store.addDownload(rec)
-            // Cookie snapshot: always empty in Pioneer — GeckoView
-            // exposes no cookie API (see the file header). The
-            // bundle keys stay so the workers' host-scoped replay
-            // works unchanged if a cookie source ever plugs in.
+            // Cookie snapshot (alpha.64): the bundle still
+            // carries an empty cookie — values are NEVER
+            // persisted. The job asks the background
+            // script's cookies API per host at fetch time
+            // ([JobCookieJar], memory-only, host-scoped),
+            // so the bundle keys stay only as the legacy
+            // fallback the jar reads.
             val snapHost = runCatching {
                 android.net.Uri.parse(url).host
             }.getOrNull() ?: ""
@@ -1065,7 +1125,8 @@ object Downloads {
     }
 
     private fun openSegmentedGet(
-        appCtx: Context, url: String, referer: String?, range: String?
+        appCtx: Context, url: String, referer: String?, range: String?,
+        cookie: String? = null,
     ): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.instanceFollowRedirects = true
@@ -1074,6 +1135,9 @@ object Downloads {
         conn.setRequestProperty("User-Agent", UA)
         referer?.takeIf { it.isNotBlank() }?.let {
             conn.setRequestProperty("Referer", it)
+        }
+        cookie?.takeIf { it.isNotBlank() }?.let {
+            conn.setRequestProperty("Cookie", it)
         }
         range?.let { conn.setRequestProperty("Range", it) }
         conn.connect()
@@ -1898,13 +1962,13 @@ object Downloads {
      *  keeps the byte count cumulative across sides. */
     private fun downloadHlsMedia(
         appCtx: Context, store: PioneerStore, rec: DownloadRecord,
-        mediaUrl: String, referer: String?, snapshot: CookieSnapshot?,
+        mediaUrl: String, referer: String?, cookies: JobCookieJar,
         dir: File, progressBase: Double, progressSpan: Double,
         bytesOffset: Long = 0L, onProgress: (Int) -> Unit = {},
     ): Pair<File, Long> {
         val mediaText = fetchText(
             mediaUrl, referer,
-            cookieForRequest(mediaUrl, snapshot, null)
+            cookies.headerFor(mediaUrl)
         )
         val media = parseHlsMedia(mediaText, mediaUrl)
         if (media.segments.isEmpty()) throw java.io.IOException("Empty HLS media playlist")
@@ -1920,7 +1984,7 @@ object Downloads {
                 throw InterruptedException("paused")
             }
             if (index in done) continue
-            val segCookie = cookieForRequest(seg.url, snapshot, null)
+            val segCookie = cookies.headerFor(seg.url)
             val bytes = runCatching {
                 checkedBytes(openGet(seg.url, referer, segCookie))
             }.getOrElse {
@@ -1935,7 +1999,7 @@ object Downloads {
             val plain = if (seg.keyUri != null) {
                 if (seg.keyUri != lastKeyUri) {
                     keyBytes = checkedBytes(
-                        openGet(seg.keyUri, referer, cookieForRequest(seg.keyUri, snapshot, null))
+                        openGet(seg.keyUri, referer, cookies.headerFor(seg.keyUri))
                     )
                     lastKeyUri = seg.keyUri
                 }
@@ -1994,14 +2058,18 @@ object Downloads {
         val bundle = readJobBundle(store, rec.id)
         val cookie = bundle?.get("cookie")?.takeIf { it.isNotBlank() }
         val cookieHost = bundle?.get("cookieHost") ?: ""
-        val snapshot = if (!cookie.isNullOrBlank() && cookieHost.isNotBlank()) {
+        // Alpha.64: the legacy bundle snapshot (empty
+        // today) is only the fallback — the jar asks the
+        // cookies API per host at fetch time, memory-only.
+        val legacy = if (!cookie.isNullOrBlank() && cookieHost.isNotBlank()) {
             CookieSnapshot(cookieHost, cookie)
         } else null
+        val cookies = JobCookieJar(legacy = legacy)
         val variantBw = bundle?.get("variantBandwidth")?.toLongOrNull()
         return runCatching {
             val masterText = fetchText(
                 rec.url, referer,
-                cookieForRequest(rec.url, snapshot, null)
+                cookies.headerFor(rec.url)
             )
             val chosen: HlsVariant? = if (masterText.contains("#EXT-X-STREAM-INF")) {
                 val variants = parseHlsMaster(masterText, rec.url)
@@ -2012,7 +2080,7 @@ object Downloads {
             } else null
             val dir = stagingDir(appCtx, rec)
             val (videoFile, videoBytes) = downloadHlsMedia(
-                appCtx, store, rec, chosen?.url ?: rec.url, referer, snapshot,
+                appCtx, store, rec, chosen?.url ?: rec.url, referer, cookies,
                 dir, 0.0, if (chosen?.audioUrl != null) 0.8 else 1.0, 0L, onProgress
             )
             var fetchedBytes = videoBytes
@@ -2024,7 +2092,7 @@ object Downloads {
                 // one MP4.
                 val audioDir = File(dir, "audio").apply { mkdirs() }
                 val (audioFile, audioBytes) = downloadHlsMedia(
-                    appCtx, store, rec, chosen.audioUrl, referer, snapshot,
+                    appCtx, store, rec, chosen.audioUrl, referer, cookies,
                     audioDir, 0.8, 0.2, videoBytes, onProgress
                 )
                 fetchedBytes += audioBytes
@@ -2169,7 +2237,11 @@ object Downloads {
         val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
         if (!isHls && !isDash) return emptyList()
         return runCatching {
-            val text = fetchText(url, referer)
+            // Alpha.64: a cookie-gated master shows its
+            // variants too — the jar asks the API once for
+            // this host (a main-thread call answers empty
+            // at once, so the dialog never blocks on it).
+            val text = fetchText(url, referer, JobCookieJar().headerFor(url))
             if (isHls) hlsVariantsToDownload(parseHlsMaster(text, url))
             else dashRepsToVariants(parseDashManifest(text, url))
         }.getOrDefault(emptyList())
@@ -2237,13 +2309,18 @@ object Downloads {
      *  A failed fetch — signed or transient URL, offline —
      *  yields an empty set, so the picker falls back to
      *  today's behaviour (every row listed) instead of
-     *  hiding anything on a guess. Uses the same
-     *  no-cookie fetch as [fetchDownloadVariants]; a master
-     *  whose fetch needs the page's cookies cannot be
-     *  resolved, and its media playlists stay listed. */
+     *  hiding anything on a guess. Alpha.64: the fetch
+     *  carries the job jar's cookies, so a cookie-gated
+     *  master can be resolved. */
     fun fetchReferencedPlaylists(manifestUrl: String, referer: String?): Set<String> =
         runCatching {
-            referencedMediaPlaylists(fetchText(manifestUrl, referer), manifestUrl)
+            // Alpha.64: as in fetchDownloadVariants — a
+            // cookie-gated master can be resolved instead
+            // of leaving every media playlist listed.
+            referencedMediaPlaylists(
+                fetchText(manifestUrl, referer, JobCookieJar().headerFor(manifestUrl)),
+                manifestUrl
+            )
         }.getOrDefault(emptySet())
 
     /** Resolve-to-one for the media sheet: hide every
@@ -2438,8 +2515,11 @@ object Downloads {
         val appCtx = context.applicationContext
         val bundle = readJobBundle(store, rec.id)
         val variantBw = bundle?.get("variantBandwidth")?.toLongOrNull()
+        // Alpha.64: one jar per job — the manifest, init,
+        // and segment fetches below share it.
+        val cookies = JobCookieJar()
         return runCatching {
-            val manifestText = fetchText(rec.url, referer)
+            val manifestText = fetchText(rec.url, referer, cookies.headerFor(rec.url))
             val reps = parseDashManifest(manifestText, rec.url)
             val videos = reps.filter { it.mime.contains("video") || it.width > 0 }
             val audios = reps.filter { it.mime.contains("audio") }
@@ -2449,12 +2529,14 @@ object Downloads {
             val audio = audios.maxByOrNull { it.bandwidth }
             val dir = stagingDir(appCtx, rec)
             val videoFile = downloadDashTrack(
-                appCtx, store, rec, video, rec.url, referer, dir, "track0", onProgress, 0.0, 0.8
+                appCtx, store, rec, video, rec.url, referer, dir, "track0", onProgress, 0.0, 0.8,
+                cookies
             )
             var audioFile: File? = null
             if (audio != null) {
                 audioFile = downloadDashTrack(
-                    appCtx, store, rec, audio, rec.url, referer, dir, "track1", onProgress, 0.8, 0.2
+                    appCtx, store, rec, audio, rec.url, referer, dir, "track1", onProgress, 0.8, 0.2,
+                    cookies
                 )
             }
             val staged = File(dir, "joined.mp4")
@@ -2505,6 +2587,7 @@ object Downloads {
         rep: DashRep, baseUrl: String, referer: String?, dir: File,
         prefix: String, onProgress: (Int) -> Unit,
         progressBase: Double, progressSpan: Double,
+        cookies: JobCookieJar,
     ): File {
         val trackDir = File(dir, prefix).apply { mkdirs() }
         val done = readSegJournal(trackDir)
@@ -2514,7 +2597,7 @@ object Downloads {
         rep.initTemplate?.let { init ->
             if (DASH_INIT_JOURNAL_INDEX !in done) {
                 val initUrl = resolveUrl(baseUrl, init)
-                initFile.writeBytes(checkedBytes(openGet(initUrl, referer)))
+                initFile.writeBytes(checkedBytes(openGet(initUrl, referer, cookies.headerFor(initUrl))))
                 done += DASH_INIT_JOURNAL_INDEX
                 writeSegJournal(trackDir, done)
             }
@@ -2573,7 +2656,7 @@ object Downloads {
                     throw InterruptedException("paused")
                 }
                 if (i in done) continue
-                val conn = runCatching { openGet(segUrl, referer) }.getOrNull()
+                val conn = runCatching { openGet(segUrl, referer, cookies.headerFor(segUrl)) }.getOrNull()
                 if (conn == null) {
                     writeSegJournal(trackDir, done)
                     break
@@ -2630,12 +2713,14 @@ object Downloads {
     internal fun downloadPlain(
         context: Context, store: PioneerStore, rec: DownloadRecord,
         url: String, referer: String?, dest: File,
+        cookies: JobCookieJar? = null,
     ): File {
         val appCtx = context.applicationContext
         val part = File(dest.parentFile, dest.name + ".part")
         var downloaded = if (part.exists()) part.length() else 0L
         val conn = openGet(
             url, referer,
+            cookies?.headerFor(url),
             range = if (downloaded > 0) "bytes=$downloaded-" else null
         )
         checkStatus(conn)
@@ -2697,13 +2782,16 @@ object Downloads {
         val bundle = readJobBundle(store, rec.id)
         val finalUrl = bundle?.get("finalUrl")?.takeIf { it.isNotBlank() } ?: rec.url
         val total = bundle?.get("total")?.toLongOrNull() ?: -1L
+        // Alpha.64: one jar per job — the chunk fetches
+        // and the plain fallbacks below share it.
+        val cookies = JobCookieJar()
         return runCatching {
             if (total <= 0) {
                 // No usable probe total: fall through to a
                 // plain single-connection download.
                 val dir = stagingDir(appCtx, rec)
                 val staged = File(dir, "plain")
-                downloadPlain(appCtx, store, rec, finalUrl, referer, staged)
+                downloadPlain(appCtx, store, rec, finalUrl, referer, staged, cookies)
                 if (!finishDownload(appCtx, store, rec, staged)) {
                     throw java.io.IOException("Could not place finished file")
                 }
@@ -2727,7 +2815,8 @@ object Downloads {
                     var have = if (part.exists()) part.length() else 0L
                     val conn = openSegmentedGet(
                         appCtx, finalUrl, referer,
-                        range = "bytes=${start + have}-$end"
+                        range = "bytes=${start + have}-$end",
+                        cookie = cookies.headerFor(finalUrl)
                     )
                     if (conn.responseCode == 429) {
                         conn.disconnect()
@@ -2796,7 +2885,7 @@ object Downloads {
                     val dir = stagingDir(appCtx, rec)
                     val staged = File(dir, "plain")
                     return runCatching {
-                        downloadPlain(appCtx, store, rec, finalUrl, referer, staged)
+                        downloadPlain(appCtx, store, rec, finalUrl, referer, staged, cookies)
                         if (!finishDownload(appCtx, store, rec, staged)) {
                             throw java.io.IOException("Could not place finished file")
                         }
@@ -2878,6 +2967,9 @@ object Downloads {
         appCtx: Context, store: PioneerStore, rec: DownloadRecord,
         url: String, referer: String?, dest: File
     ) {
+        // Alpha.64: one jar for the plain side — the HLS /
+        // DASH sides build their own inside their jobs.
+        val cookies = JobCookieJar()
         val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)
         val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
         when {
@@ -2891,7 +2983,7 @@ object Downloads {
                 val outcome = runDashJob(appCtx, store, side, referer, stageOnly = dest)
                 if (!outcome.ok) throw java.io.IOException(outcome.error ?: "DASH side failed")
             }
-            else -> downloadPlain(appCtx, store, rec, url, referer, dest)
+            else -> downloadPlain(appCtx, store, rec, url, referer, dest, cookies)
         }
     }
 

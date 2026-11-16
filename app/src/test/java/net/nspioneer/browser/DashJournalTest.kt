@@ -119,7 +119,8 @@ class DashJournalTest {
         return Downloads.downloadDashTrack(
             RuntimeEnvironment.getApplication().applicationContext,
             store, r, videoRep(), baseUrl(), null, dir, "track0",
-            onProgress = {}, progressBase = 0.0, progressSpan = 1.0
+            onProgress = {}, progressBase = 0.0, progressSpan = 1.0,
+            cookies = Downloads.JobCookieJar()
         )
     }
 
