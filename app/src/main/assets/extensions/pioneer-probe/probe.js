@@ -40,6 +40,24 @@
   var MEDIA_RE = /\.(m3u8|mpd|mp4|webm|m4s|mp3|aac|ogg|oga|wav|ts)(\?|#|$)/i;
   var DRM_RE = /drm|shaka|bitmovin|castlabs|widevine|eme/i;
 
+  /* Segment noise (alpha.50, alpha.57): the DOM scan's
+   * resource-entries loop reports every fetched segment,
+   * and each one became a media-sheet row of its own.
+   * Token-for-token the same set as background.js
+   * isSegmentNoise and the Kotlin copies in MediaLog and
+   * BlockingObserver: .m4s segments, segment- / fragment /
+   * bytes= URLs, and HLS / DASH init segments
+   * (_init.mp4 / -init.mp4). A manifest (.m3u8 / .mpd)
+   * is never noise. */
+  var MANIFEST_URL_RE = /\.(m3u8|mpd)(\?|#|$)/i;
+  var SEGMENT_NOISE_RE = /\.m4s(\?|#|$)|segment-|fragment|bytes=|_init\.mp4(\?|#|$)|-init\.mp4(\?|#|$)/i;
+  function isSegmentNoise(url) {
+    if (!url) return false;
+    var lower = String(url).toLowerCase();
+    if (MANIFEST_URL_RE.test(lower)) return false;
+    return SEGMENT_NOISE_RE.test(lower);
+  }
+
   /* Text zoom (Phase 2): per-site, via the app. There is no
    * per-session text-zoom API in GeckoView and no JS-eval API, so
    * the app pushes the factor over a native port and the script
@@ -239,6 +257,9 @@
       if (!u) return;
       try { u = new URL(u, document.baseURI).href; } catch (e) { return; }
       if (u.indexOf("blob:") === 0) return;
+      // alpha.57: segment / init noise never reaches the
+      // media sheet — only downloadable items do.
+      if (isSegmentNoise(u)) return;
       if (seen[u]) return;
       seen[u] = 1;
       out.push({ url: u, kind: kind, label: label || "" });

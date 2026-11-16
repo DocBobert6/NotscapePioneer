@@ -373,9 +373,12 @@
    * media-sheet row of its own. A manifest (.m3u8 / .mpd)
    * is never noise, even if its path happens to carry a
    * noise-shaped token. Must agree with the Kotlin copies
-   * in BlockingObserver and MediaLog. */
+   * in BlockingObserver and MediaLog, and with the probe.js
+   * copy. alpha.57 adds the init-segment tokens
+   * (_init.mp4 / -init.mp4) and applies the filter in the
+   * DOM half too (probe.js add(), MediaLog.noteDom). */
   var MANIFEST_URL_RE = /\.(m3u8|mpd)(\?|#|$)/i;
-  var SEGMENT_NOISE_RE = /\.m4s(\?|#|$)|segment-|fragment|bytes=/i;
+  var SEGMENT_NOISE_RE = /\.m4s(\?|#|$)|segment-|fragment|bytes=|_init\.mp4(\?|#|$)|-init\.mp4(\?|#|$)/i;
   function isSegmentNoise(url) {
     if (!url) return false;
     var lower = String(url).toLowerCase();

@@ -136,13 +136,14 @@ class BlockingObserver(private val host: BlockingHost) {
          *  happens to carry a noise-shaped token. Pure, so
          *  unit tests pin it down. Must agree with
          *  background.js `isSegmentNoise` and MediaLog's
-         *  copy. */
+         *  copy, and with the probe.js copy. alpha.57 adds
+         *  the init-segment tokens (_init.mp4 / -init.mp4). */
         private val MANIFEST_URL_RE = Regex(
             """\.(m3u8|mpd)(\?|#|$)""",
             RegexOption.IGNORE_CASE
         )
         private val SEGMENT_NOISE_RE = Regex(
-            """\.m4s(\?|#|$)|segment-|fragment|bytes=""",
+            """\.m4s(\?|#|$)|segment-|fragment|bytes=|_init\.mp4(\?|#|$)|-init\.mp4(\?|#|$)""",
             RegexOption.IGNORE_CASE
         )
 
