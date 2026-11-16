@@ -933,6 +933,14 @@ fun BrowserScreen(
     // notice below) and drains it (Open once / Open all).
     var showPopupNotice by remember { mutableStateOf(false) }
     var mediaSheetOpen by remember { mutableStateOf(false) }
+    // alpha.58 resolve-to-one: the media sheet shows one
+    // row per video — media playlists a present master
+    // references are hidden. The resolved list replaces
+    // the raw log only while the sheet is open; null means
+    // "not resolved yet", so the sheet shows the raw list
+    // until the first resolution lands (a fetch that fails
+    // resolves to the raw list — today's behaviour).
+    var resolvedPickerItems by remember { mutableStateOf<List<DetectedMedia>?>(null) }
     var siteInfoOpen by remember { mutableStateOf(false) }
     var pendingFileCallback by remember { mutableStateOf<((List<Uri>?) -> Unit)?>(null) }
     val castAvailable = rememberCastAvailable()
@@ -1257,6 +1265,37 @@ fun BrowserScreen(
     // so it stays hidden until the next capture arrives.
     LaunchedEffect(engine.popupCaptures.size) {
         if (engine.popupCaptures.isNotEmpty()) showPopupNotice = true
+    }
+
+    // alpha.58 resolve-to-one: when the media sheet opens
+    // (or the set of manifest URLs changes while it is
+    // open), fetch each manifest once and hide the media
+    // playlists it references. Sheet-open time, not
+    // detect time: no fetch happens unless the user opens
+    // the picker, and the live log — and the toolbar pill
+    // count — are untouched. A failed fetch resolves to
+    // the raw list.
+    val pickerManifestUrls = remember(MediaLog.forTab(tab.id)) {
+        MediaLog.forTab(tab.id)
+            .filter { MediaLog.isManifest(it.url, null) }
+            .map { it.url }.toSet()
+    }
+    LaunchedEffect(mediaSheetOpen, pickerManifestUrls) {
+        if (!mediaSheetOpen) {
+            resolvedPickerItems = null
+            return@LaunchedEffect
+        }
+        if (pickerManifestUrls.isEmpty()) {
+            resolvedPickerItems = MediaLog.forTab(tab.id)
+            return@LaunchedEffect
+        }
+        val referenced = withContext(Dispatchers.IO) {
+            pickerManifestUrls.flatMap { url ->
+                Downloads.fetchReferencedPlaylists(url, tabUrl)
+            }.toSet()
+        }
+        resolvedPickerItems =
+            Downloads.resolvePickerItems(MediaLog.forTab(tab.id), referenced)
     }
 
     fun openMediaSheet() {
@@ -3449,7 +3488,7 @@ fun BrowserScreen(
     // (or a video-popup long-press) after runMediaScan().
     if (mediaSheetOpen) {
         MediaSheet(
-            media = MediaLog.forTab(tab.id),
+            media = resolvedPickerItems ?: MediaLog.forTab(tab.id),
             pageTitle = tab.title.value,
             pageUrl = tabUrl,
             isPrivate = tab.isPrivate,
