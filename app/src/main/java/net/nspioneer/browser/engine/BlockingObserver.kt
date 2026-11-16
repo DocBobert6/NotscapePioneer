@@ -173,6 +173,15 @@ class BlockingObserver(private val host: BlockingHost) {
          *  size is known and below this is not media. */
         const val MEDIA_SIZE_FLOOR_BYTES: Long = 10240L
 
+        /** Alpha.61: the background-script handshake line —
+         *  "background: alive · port connected" once the
+         *  background script has posted its startup
+         *  handshake on the native port, "background: not
+         *  seen yet" until then. Pure, so the Diagnostics
+         *  text is pinned in tests. */
+        fun backgroundStateText(alive: Boolean): String =
+            "background: " + if (alive) "alive · port connected" else "not seen yet"
+
         /** Response-header classification (alpha.47): the MIME
          *  companion to [STREAM_RE]. A response whose
          *  Content-Type matches is media even when its URL has
@@ -469,8 +478,10 @@ class BlockingObserver(private val host: BlockingHost) {
 
     /** Push the current compiled set to the background script's
      *  port. Returns false when no background port is open (the
-     *  background script then gets its rules from the
-     *  `rules-request` reply on its next startup instead). */
+     *  background script then gets its rules from the port
+     *  reply to its next `rules-request` instead — alpha.61,
+     *  the reply goes back on the port, not on a one-shot
+     *  promise). */
     fun pushRulesUpdate(): Boolean {
         val port = backgroundPort ?: return false
         return runCatching {

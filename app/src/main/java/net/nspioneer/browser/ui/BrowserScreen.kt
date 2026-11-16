@@ -3740,6 +3740,16 @@ fun DiagnosticsScreen(
                 engine.mainWorldState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
+            // alpha.61: the background-script handshake —
+            // alive once the background script has posted its
+            // startup handshake on the native port, not seen
+            // yet until then. Reads first so the next device
+            // test can say whether the background script is
+            // alive at all before reading the observer line.
+            Text(
+                engine.backgroundState.value,
+                style = MaterialTheme.typography.bodyMedium
+            )
             // alpha.59: the cookie-capture experiment verdict —
             // off until the flag flips on, unknown until the
             // first report, then accepted with the hosts and

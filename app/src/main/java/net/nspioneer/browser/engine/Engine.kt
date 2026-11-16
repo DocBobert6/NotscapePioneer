@@ -309,6 +309,11 @@ interface Engine {
     // alpha.60: "cookie observer: N events · M in scope ·
     // flag on/off" — the probe counts, for Diagnostics
     val cookieObserverState: State<String>
+    // alpha.61: "background: alive · port connected" once
+    // the background script has posted its startup
+    // handshake on the native port, "background: not seen
+    // yet" until then — for Diagnostics
+    val backgroundState: State<String>
     fun uninstallUBlock()                 // WebExtensionController.uninstall;
                                           // uBlockState reports the result
     // alpha.33: remove Google Search Fixer Refreshed; its state reports it.

@@ -402,6 +402,16 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         )
     override val cookieObserverState: State<String> get() = _cookieObserverState
 
+    /** Alpha.61: "background: alive · port connected" once
+     *  the background script has posted its startup
+     *  handshake on the native port, "background: not seen
+     *  yet" until then. */
+    private val _backgroundState =
+        mutableStateOf(
+            BlockingObserver.backgroundStateText(false)
+        )
+    override val backgroundState: State<String> get() = _backgroundState
+
     /** Refresh the MAIN-world experiment status line from the
      *  verdict (alpha.52: `mainWorldState` ←
      *  `mainWorldStateText()`). Posted to the main thread:
@@ -1478,6 +1488,16 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
+    /** Alpha.61: the background script posted its startup
+     *  handshake on the native port — it is alive and the
+     *  port channel works. Posted to the main thread: the
+     *  handshake can arrive off it. */
+    override fun noteBackgroundAlive() {
+        mainHandler.post {
+            _backgroundState.value = BlockingObserver.backgroundStateText(true)
+        }
+    }
+
     /** Alpha.52: 10 s bounded wait for the sentinel, armed
      *  once per session on the first page load AFTER the
      *  install completed — a load that merely triggered the
@@ -1529,6 +1549,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         message: JSONObject, senderSession: GeckoSession?
     ): GeckoResult<Any>? =
         blockingObserver.handleNativeMessage(message, senderSession)
+
+    /** Alpha.61: answer a port `rules-request` by pushing
+     *  the rule set on the background script's native port
+     *  (the one-shot promise path does not exist there). */
+    override fun pushRulesUpdateToBackground(): Boolean =
+        blockingObserver.pushRulesUpdate()
 
     /** The background script's native port
      *  (`sender.session == null`): NOT a tab port — the

@@ -190,18 +190,125 @@ class ExtensionManager(
 
     /** The background script's native port
      *  (`browser.runtime.connectNative("pioneer")`): the app
-     *  pushes `rules-update` on it; the background script
-     *  never posts on it (its messages arrive via
-     *  sendNativeMessage instead). */
+     *  pushes `rules-update` on it, and — since alpha.61 —
+     *  the background script posts all of its reports on it
+     *  too (headers-state, media-net, blocked, cookie-*,
+     *  background-alive, rules-request). Its one-shot
+     *  messages never arrived (alpha.60 device evidence),
+     *  so the port is the only channel for them; they are
+     *  routed into the same handlers as the one-shot
+     *  delegate below. */
     private val backgroundPortDelegate = object : WebExtension.PortDelegate {
         override fun onPortMessage(message: Any, port: WebExtension.Port) {
-            // The background script never posts on the native
-            // port — nothing to route.
+            if (message !is JSONObject) return
+            // Alpha.61: the rules-request reply goes back on
+            // the port itself — there is no one-shot promise
+            // to resolve here. The connect-time push already
+            // sent the rules once; this is a re-ask, and a
+            // lost reply stalls nothing.
+            if (message.optString("type") == "rules-request") {
+                host.pushRulesUpdateToBackground()
+                return
+            }
+            if (handleBackgroundMessage(message, null)) return
+            // Headers-state and blocked reports ride the same
+            // bridge as before; anything else is not owned
+            // here and is dropped (a reply, if any, is
+            // ignored — the background script never sends a
+            // type that carries one on this channel).
+            host.handleBlockingMessage(message, null)
         }
 
         override fun onDisconnect(port: WebExtension.Port) {
             host.onBackgroundPortDisconnected(port)
         }
+    }
+
+    /**
+     * Alpha.61: one sink for the background script's
+     * reports, shared by the one-shot delegate below and
+     * the native-port delegate above. A message arrives
+     * on exactly one channel, never both — the background
+     * script posts on the port only — so a type is handled
+     * in exactly one place. Returns true when the message
+     * was a background report handled here; false for
+     * anything else (the caller falls through to the
+     * blocking bridge). Content-script types are never
+     * handled here.
+     */
+    private fun handleBackgroundMessage(
+        message: JSONObject,
+        senderSession: GeckoSession?
+    ): Boolean {
+        val type = message.optString("type")
+        // Alpha.59: the cookie-capture experiment. The probe
+        // reports cookie NAMES only — never values — for an
+        // in-scope request that carried a `Cookie` header
+        // (`cookie-capture`), and a tick with the in-scope
+        // request count (`cookie-capture-tick`). The verdict
+        // lives in CookieCaptureExperiment (first-wins,
+        // conservative — only a seen header accepts). A
+        // missing `names` array reads as empty — never a
+        // false accept.
+        if (type == "cookie-capture") {
+            val namesArray = message.optJSONArray("names")
+            val names = if (namesArray != null) {
+                List(namesArray.length()) { namesArray.optString(it) }
+            } else {
+                emptyList()
+            }
+            host.noteCookieCapture(
+                message.optString("host"), names,
+                message.optInt("requests", 0)
+            )
+            return true
+        }
+        if (type == "cookie-capture-tick") {
+            host.noteCookieCaptureTick(message.optInt("requests", 0))
+            return true
+        }
+        // Alpha.60: the cookie-capture probe. The probe
+        // reports how many onBeforeSendHeaders invocations
+        // it has seen, how many were in scope, and the
+        // background script's own flag value — counts and
+        // the flag only, no URLs, no names, no values.
+        // A missing field reads as zero / off — never a
+        // false positive.
+        if (type == "cookie-capture-probe") {
+            host.noteCookieCaptureProbe(
+                message.optInt("events", 0),
+                message.optInt("inScope", 0),
+                message.optBoolean("flagOn", false)
+            )
+            return true
+        }
+        // Alpha.61: the startup handshake — the background
+        // script is alive and the port channel works.
+        if (type == "background-alive") {
+            host.noteBackgroundAlive()
+            return true
+        }
+        // Phase 3 (Worker A wiring): a `webRequest`
+        // observation from the probe background script.
+        // The sender is the background script, so
+        // sender.session is null — the engine attributes
+        // the URL by host match, falling back to the
+        // active tab (design section 7). Routed into MediaLog.
+        // alpha.47: a `media-net` from `onHeadersReceived`
+        // carries the response Content-Type as `mime`;
+        // URL-only `onBeforeRequest` observations carry
+        // none — the engine classifies by MIME when one
+        // is present, by URL otherwise.
+        if (type == "media-net") {
+            host.noteNetMedia(
+                senderSession,
+                message.optString("url"),
+                message.optString("mime").takeIf { it.isNotEmpty() },
+                message.optString("contentLength").toLongOrNull()
+            )
+            return true
+        }
+        return false
     }
 
     private val probeMessageDelegate = object : WebExtension.MessageDelegate {
@@ -274,67 +381,11 @@ class ExtensionManager(
                 host.noteMainWorldSentinel(message.optBoolean("mainWorld", false))
                 return null
             }
-            // Alpha.59: the cookie-capture experiment. The
-            // probe reports cookie NAMES only — never values —
-            // for an in-scope request that carried a `Cookie`
-            // header (`cookie-capture`), and a tick with the
-            // in-scope request count (`cookie-capture-tick`).
-            // The verdict lives in CookieCaptureExperiment
-            // (first-wins, conservative — only a seen header
-            // accepts). A missing `names` array reads as
-            // empty — never a false accept.
-            if (type == "cookie-capture") {
-                val namesArray = message.optJSONArray("names")
-                val names = if (namesArray != null) {
-                    List(namesArray.length()) { namesArray.optString(it) }
-                } else {
-                    emptyList()
-                }
-                host.noteCookieCapture(
-                    message.optString("host"), names,
-                    message.optInt("requests", 0)
-                )
-                return null
-            }
-            if (type == "cookie-capture-tick") {
-                host.noteCookieCaptureTick(message.optInt("requests", 0))
-                return null
-            }
-            // Alpha.60: the cookie-capture probe. The probe
-            // reports how many onBeforeSendHeaders invocations
-            // it has seen, how many were in scope, and the
-            // background script's own flag value — counts and
-            // the flag only, no URLs, no names, no values.
-            // A missing field reads as zero / off — never a
-            // false positive.
-            if (type == "cookie-capture-probe") {
-                host.noteCookieCaptureProbe(
-                    message.optInt("events", 0),
-                    message.optInt("inScope", 0),
-                    message.optBoolean("flagOn", false)
-                )
-                return null
-            }
-            // Phase 3 (Worker A wiring): a `webRequest`
-            // observation from the probe background script.
-            // The sender is the background script, so
-            // sender.session is null — the engine attributes
-            // the URL by host match, falling back to the
-            // active tab (design §7). Routed into MediaLog.
-            // alpha.47: a `media-net` from `onHeadersReceived`
-            // carries the response Content-Type as `mime`;
-            // URL-only `onBeforeRequest` observations carry
-            // none — the engine classifies by MIME when one
-            // is present, by URL otherwise.
-            if (type == "media-net") {
-                host.noteNetMedia(
-                    sender.session,
-                    message.optString("url"),
-                    message.optString("mime").takeIf { it.isNotEmpty() },
-                    message.optString("contentLength").toLongOrNull()
-                )
-                return null
-            }
+            // Alpha.61: the background script's reports
+            // (cookie-*, media-net, background-alive) share
+            // one sink with the native-port delegate — see
+            // handleBackgroundMessage above.
+            if (handleBackgroundMessage(message, sender.session)) return null
             // alpha.10: Save offline — the content script
             // answers a `page-html-request` port message with
             // this page's outerHTML. Routed to the tab's
@@ -631,6 +682,15 @@ interface ProbeHost {
      *  the bounded wait for a `Cookie` header (re-arms per
      *  load while the verdict is UNKNOWN). */
     fun noteCookieCapturePageLoad() {}
+    /** Alpha.61: the background script posted its startup
+     *  handshake (`background-alive`) on the native port —
+     *  it is alive and the port channel works. */
+    fun noteBackgroundAlive() {}
+    /** Alpha.61: re-push the rule set on the background
+     *  script's native port (answers a port
+     *  `rules-request`). Returns false when no background
+     *  port is open. */
+    fun pushRulesUpdateToBackground(): Boolean = false
     /** alpha.10 (Save offline): the content script answered
      *  a `page-html-request` with this page's outerHTML. */
     fun notePageHtml(session: GeckoSession?, html: String)
