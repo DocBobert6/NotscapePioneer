@@ -466,6 +466,11 @@ interface Engine {
     // One language on/off in the six-language setting.
     fun setTranslateLanguageEnabled(code: String, enabled: Boolean)
     fun isTranslateLanguageEnabled(code: String): Boolean
+    // Text-selection translation (alpha.67, D-6a): the
+    // result of the floating-toolbar Translate action.
+    // The shell renders the result card from this state.
+    val selectionTranslation: State<TranslationManager.SelectionTranslationState>
+    fun dismissSelectionTranslation()
 }
 
 // ---- Phase 3: downloads ----

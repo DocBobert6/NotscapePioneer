@@ -38,6 +38,7 @@ import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.StorageController
 import org.mozilla.geckoview.WebExtension
+import java.io.File
 
 /**
  * Notscape Pioneer — Phase 2 engine: the [Engine] interface over
@@ -161,6 +162,16 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 TranslateTab(tab.id, tab.session, tab.url.value)
             }
         },
+        // alpha.67: selection translation (D-6a) — the
+        // hidden-session route. The session factory makes a
+        // plain session; openSelectionSession wires the
+        // manager's selection delegate and opens it.
+        selectionSessionFactory = { GeckoSession() },
+        openSelectionSession = ::openSelectionSession,
+        closeSelectionSession = { it.close() },
+        writeSelectionFile = ::writeSelectionFile,
+        deleteSelectionFile = ::deleteSelectionFile,
+        postDelayedToMain = { r, ms -> mainHandler.postDelayed(r, ms) },
     )
 
     /** Phase 3 blocking bridge (Worker A): owns the app side
@@ -272,6 +283,12 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
      *  system-bars handling (Fullscreen.kt). Null when the
      *  engine was built with a non-activity context. */
     private val activity: Activity? = context as? Activity
+
+    /** Cache dir for the selection-translation temp file
+     *  (alpha.67): the constructor context is only visible
+     *  in property initializers, so it is kept here. */
+    private val appCacheDir: File? =
+        runCatching { context.applicationContext.cacheDir }.getOrNull()
 
     /** Phase 3 delegates (Worker B). Lazy so they can
      *  close over [runtime], which is created just below. */
@@ -1122,6 +1139,44 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         translationManager.setLanguageEnabled(code, enabled)
     override fun isTranslateLanguageEnabled(code: String): Boolean =
         translationManager.isLanguageEnabled(code)
+    override val selectionTranslation: State<TranslationManager.SelectionTranslationState>
+        get() = translationManager.selectionResult
+    override fun dismissSelectionTranslation() =
+        translationManager.dismissSelectionResult()
+
+    /** Selection translation (alpha.67): open a hidden
+     *  session for the synthetic file: page — the
+     *  manager's selection delegate, not the page
+     *  delegate, since the session has no tab. */
+    private fun openSelectionSession(session: GeckoSession) {
+        session.setTranslationsSessionDelegate(
+            translationManager.selectionDelegate
+        )
+        session.open(runtime)
+    }
+
+    /** Write the synthetic selection page to a temp file
+     *  in the private cache dir; returns its file: URL,
+     *  or null when it cannot be written. */
+    private fun writeSelectionFile(html: String): String? {
+        val dir = appCacheDir ?: return null
+        return runCatching {
+            val file = File(
+                File(dir, "selection-translate").apply { mkdirs() },
+                "selection.html",
+            )
+            file.writeText(html)
+            Uri.fromFile(file).toString()
+        }.getOrNull()
+    }
+
+    /** Delete the temp file behind a selection file: URL. */
+    private fun deleteSelectionFile(url: String) {
+        runCatching {
+            val path = Uri.parse(url).path ?: return
+            File(path).delete()
+        }
+    }
 
     // ------------------------------------------------------------------
     // Batch 4: settings the engine enforces
@@ -1969,6 +2024,20 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         // one shared instance owned by TranslationManager;
         // the engine only routes the session to a tab.
         session.setTranslationsSessionDelegate(translationManager.delegate)
+
+        // alpha.67: the text-selection toolbar, with a
+        // Translate action (D-6a). Setting a delegate is
+        // what makes the floating bar appear at all —
+        // without one, a long-press selection shows handles
+        // but no actions — so selection now also gets the
+        // standard Copy / Select all / Share actions.
+        activity?.let { act ->
+            session.setSelectionActionDelegate(
+                SelectionTranslateDelegate(act) { text ->
+                    translationManager.translateSelection(text)
+                }
+            )
+        }
 
         session.navigationDelegate = object : GeckoSession.NavigationDelegate {
             override fun onLocationChange(

@@ -191,6 +191,7 @@ import net.nspioneer.browser.engine.GeckoEngine
 import net.nspioneer.browser.engine.LongPressTarget
 import net.nspioneer.browser.engine.PermPrompt
 import net.nspioneer.browser.engine.PopupChoice
+import net.nspioneer.browser.engine.TranslationManager.SelectionTranslationState
 import net.nspioneer.browser.engine.TranslateChoice
 import net.nspioneer.browser.engine.TranslationLanguages
 import net.nspioneer.browser.engine.UserBlockRules
@@ -2377,6 +2378,162 @@ fun BrowserScreen(
                     }
                 }
             }
+        }
+    }
+
+    // alpha.67: selection translation result (D-6a) — same
+    // floating card, same place as the page offer card
+    // above (if both are up at once, this one draws over
+    // the offer — both stay dismissible). Shows the
+    // translated selection with the original underneath,
+    // or the plain message when it could not be
+    // translated, or a spinner while it runs.
+    when (val selection = engine.selectionTranslation.value) {
+        is SelectionTranslationState.Translated -> {
+            var copied by remember { mutableStateOf(false) }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 92.dp)
+                    .fillMaxWidth()
+            ) {
+                Surface(
+                    shape = Frost.CardShape,
+                    color = Frost.cardColor(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.Translate, contentDescription = "Translate",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "Translated from ${selection.fromName} to English",
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Text(
+                                    selection.translated,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier
+                                        .padding(top = 6.dp)
+                                        .heightIn(max = 220.dp)
+                                        .verticalScroll(rememberScrollState())
+                                )
+                                Text(
+                                    "Original: " + selection.original.take(200) +
+                                        if (selection.original.length > 200) "…" else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 6.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { engine.dismissSelectionTranslation() },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(onClick = {
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                cm.setPrimaryClip(ClipData.newPlainText("translation", selection.translated))
+                                copied = true
+                            }) {
+                                Text(if (copied) "Copied" else "Copy translation")
+                            }
+                            OutlinedButton(onClick = {
+                                engine.dismissSelectionTranslation()
+                            }) { Text("Done") }
+                        }
+                    }
+                }
+            }
+        }
+        is SelectionTranslationState.Translating -> {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 92.dp)
+                    .fillMaxWidth()
+            ) {
+                Surface(
+                    shape = Frost.CardShape,
+                    color = Frost.cardColor(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Translate, contentDescription = "Translate",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "Translating selection…",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { engine.dismissSelectionTranslation() },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+        }
+        is SelectionTranslationState.Unavailable -> {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 92.dp)
+                    .fillMaxWidth()
+            ) {
+                Surface(
+                    shape = Frost.CardShape,
+                    color = Frost.cardColor(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Translate, contentDescription = "Translate",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            selection.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { engine.dismissSelectionTranslation() },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+        }
+        SelectionTranslationState.Hidden -> {
+            // Nothing to show.
         }
     }
 
