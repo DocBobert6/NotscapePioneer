@@ -16,17 +16,26 @@ import net.nspioneer.browser.data.PioneerStore
  * The experiment extension (pioneer-main-world: own manifest
  * asking for `"world": "MAIN"` + main-world.js) is installed
  * ONLY when the [flagKey] store flag is on (default OFF). The
- * script sends one sentinel native message
+ * script reports by writing to the page itself — a window
+ * flag + a CustomEvent — and the ISOLATED-world probe relays
+ * the result as one sentinel native message
  * (`probe-main-world-ok`) per page load, carrying only whether
- * it found itself in the MAIN world. The verdict is first-wins
- * and conservative: it is ACCEPTED only when the sentinel
- * proves MAIN world; anything else (install failure, an
- * isolated-world sentinel, no sentinel within 10 s of a page
- * load) is REJECTED.
+ * the script found itself in the MAIN world. The verdict is
+ * first-wins and conservative: it is ACCEPTED only when the
+ * sentinel proves MAIN world; anything else (install failure,
+ * an isolated-world sentinel, no sentinel within 10 s of a
+ * page load) is REJECTED.
  *
- * The expected outcome is REJECTION — that confirms the
- * ceiling. A rejection is a successful experiment, not a
- * failure, and no further MAIN-world work follows from it.
+ * Alpha.66 re-test: the alpha.52 verdict was a FALSE
+ * NEGATIVE, never a proven ceiling. The old script reported
+ * via the extension messaging API, which does not exist in
+ * MAIN world, so its "rejection" proved nothing about
+ * whether MAIN-world code runs. The expected outcome is
+ * unknown — that is the point of the re-test. A rejection
+ * now would confirm the ceiling for real; an acceptance
+ * opens page-context interception as a later, separately
+ * approved build, and nothing is built on it here. A
+ * rejection is a successful experiment, not a failure.
  * Turning the flag off stops new attempts and the Diagnostics
  * line reads "off"; an already-installed experiment script
  * stays installed for the session (no uninstall is wired —
