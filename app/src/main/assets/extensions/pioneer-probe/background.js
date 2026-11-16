@@ -167,13 +167,33 @@
     return s;
   }
 
-  var flags = { blockAds: true, blockTrackers: true, refererPolicy: "" };
+  var flags = { blockAds: true, blockTrackers: true, refererPolicy: "", cookieCapture: false };
+
+  /* Cookie-capture experiment (alpha.59) — observation
+   * state. `requests` counts in-scope requests seen while
+   * the flag is on; `reported` is the per-host set of cookie
+   * names already sent to the app; `lastTicked` is the
+   * request count of the last tick sent. Reset when the
+   * flag flips off, so a later flip-on reports fresh. */
+  function freshCookieObs() {
+    return { requests: 0, reported: {}, lastTicked: 0 };
+  }
+
+  var cookieObs = freshCookieObs();
 
   function applyRules(r) {
     r = r || {};
     if (r.blockAds !== undefined) flags.blockAds = !!r.blockAds;
     if (r.blockTrackers !== undefined) flags.blockTrackers = !!r.blockTrackers;
     if (r.refererPolicy !== undefined) flags.refererPolicy = String(r.refererPolicy || "");
+    if (r.cookieCapture !== undefined) {
+      var wasCapture = flags.cookieCapture;
+      flags.cookieCapture = !!r.cookieCapture;
+      /* Flipping the experiment off clears the observation
+       * state, so a later flip-on reports names fresh
+       * instead of staying silent on already-seen names. */
+      if (wasCapture && !flags.cookieCapture) cookieObs = freshCookieObs();
+    }
     r = r.rules || r;
     rules.hosts = toSet(r.hosts);
     rules.trackerHosts = toSet(r.trackerHosts);
@@ -435,6 +455,90 @@
     return AUDIO_RE.test(url.toLowerCase()) ? "audio" : "video";
   }
 
+  /* Cookie-capture experiment (alpha.59): does GeckoView
+   * deliver the `Cookie` header to the webRequest observer?
+   * Desktop Firefox does (MDN's onSendHeaders example logs
+   * cookies from requestHeaders); the app already has the
+   * host-scoped CookieSnapshot plumbing waiting for a source.
+   * This alpha PROVES the source and wires nothing into
+   * downloads.
+   *
+   * SECURITY — names only, NEVER values: the experiment
+   * records cookie NAMES (e.g. "sessionid, csrftoken").
+   * No cookie value is logged, stored, persisted, or sent
+   * anywhere. A Diagnostics line showing names proves
+   * delivery without ever touching a secret. */
+  function cookieNamesFromHeaders(headers) {
+    var names = [];
+    var seen = {};
+    for (var i = 0; i < headers.length; i++) {
+      var h = headers[i] || {};
+      if (String(h.name || "").toLowerCase() !== "cookie") continue;
+      var pairs = String(h.value || "").split(";");
+      for (var j = 0; j < pairs.length; j++) {
+        var name = pairs[j].split("=")[0].trim();
+        if (name && !seen[name]) { seen[name] = 1; names.push(name); }
+      }
+    }
+    return names;
+  }
+
+  /* In scope: the request URL looks like media (any media
+   * extension, segments included — the segment-noise filter
+   * is a picker concern, not an observation concern), or it
+   * goes to the page's own host. Everything else
+   * (third-party trackers, ads, analytics) is never
+   * observed. */
+  function cookieCaptureInScope(url, pageHost) {
+    if (STREAM_RE.test(url || "")) return true;
+    /* Segments (.m4s) are not in STREAM_RE's extension list,
+     * but a segment request to a media host is in scope. */
+    if (/\.m4s(\?|#|$)/i.test(url || "")) return true;
+    var host = hostFromUrl(url);
+    return !!host && host === String(pageHost || "").toLowerCase();
+  }
+
+  /* One in-scope request passed the observer. A Cookie
+   * header is reported once per host per name (names only,
+   * never values); requests without one advance the tick
+   * count, so the app's rejection verdict can state how
+   * many requests were observed with zero Cookie headers.
+   * Ticks go out every 10th in-scope request and on every
+   * main-frame load — bounded traffic, not one message per
+   * request. */
+  function observeCookieHeader(details) {
+    var url = details.url || "";
+    var pageHost = hostFromUrl(details.originUrl || details.documentUrl || "");
+    if (!cookieCaptureInScope(url, pageHost)) return;
+    var urlHost = hostFromUrl(url);
+    cookieObs.requests++;
+    var names = cookieNamesFromHeaders(details.requestHeaders || []);
+    if (names.length) {
+      var known = cookieObs.reported[urlHost] ||
+        (cookieObs.reported[urlHost] = {});
+      var fresh = [];
+      for (var i = 0; i < names.length; i++) {
+        if (!known[names[i]]) { known[names[i]] = 1; fresh.push(names[i]); }
+      }
+      if (Object.keys(cookieObs.reported).length > 64) cookieObs.reported = {};
+      if (fresh.length) {
+        sendNative({
+          type: "cookie-capture", host: urlHost, names: fresh,
+          requests: cookieObs.requests
+        });
+      }
+      return;
+    }
+    if (cookieObs.requests % 10 === 0 || details.type === "main_frame") {
+      if (cookieObs.lastTicked !== cookieObs.requests) {
+        cookieObs.lastTicked = cookieObs.requests;
+        sendNative({
+          type: "cookie-capture-tick", requests: cookieObs.requests
+        });
+      }
+    }
+  }
+
   /* ---- native messaging ---- */
 
   function sendNative(msg) {
@@ -548,6 +652,11 @@
    *  header, "origin" truncates it to scheme://host/.
    *  "Default" (empty) leaves it alone. */
   function onBeforeSendHeaders(details) {
+    /* Cookie-capture experiment (alpha.59): observe first —
+     * this runs even when there is no referer policy, so the
+     * early return below must not skip it. Observation never
+     * modifies headers. */
+    if (flags.cookieCapture) observeCookieHeader(details);
     var policy = flags.refererPolicy || "";
     if (!policy) return {};
     var headers = details.requestHeaders || [];
@@ -686,6 +795,9 @@
       mediaKindFor: mediaKindFor,
       mediaKindForMime: mediaKindForMime,
       isSegmentNoise: isSegmentNoise,
+      cookieNamesFromHeaders: cookieNamesFromHeaders,
+      cookieCaptureInScope: cookieCaptureInScope,
+      onBeforeSendHeaders: onBeforeSendHeaders,
       isManifest: isManifest,
       sameSite: sameSite,
       registrableDomain: registrableDomain,
