@@ -318,6 +318,11 @@ private data class PendingDownload(
     // alpha.46: the variant pre-chosen in the quality sheet;
     // null when the choice is still open (dialog rows).
     val chosenVariant: Downloads.DownloadVariant? = null,
+    // alpha.68: the manifest text fetched at tap time; the
+    // job downloads from this text instead of re-fetching a
+    // listed URL that may have expired. Null for ordinary
+    // downloads and for DASH.
+    val manifestText: String? = null,
 )
 
 /** Mariner's permission resource words ("Allow $host to
@@ -1078,12 +1083,14 @@ fun BrowserScreen(
         contentType: String?, suggestedName: String?,
         referer: String?, isPrivate: Boolean,
         stagedFile: File? = null,
-        chosenVariant: Downloads.DownloadVariant? = null
+        chosenVariant: Downloads.DownloadVariant? = null,
+        manifestText: String? = null
     ) {
         if (store.setting("confirmDownloads", "true") == "true") {
             pendingDownload = PendingDownload(
                 title, url, media, contentType, suggestedName, referer, isPrivate,
-                stagedFile = stagedFile, chosenVariant = chosenVariant
+                stagedFile = stagedFile, chosenVariant = chosenVariant,
+                manifestText = manifestText
             )
             confirmName = suggestedName
                 ?: Uri.parse(url).lastPathSegment
@@ -1096,7 +1103,8 @@ fun BrowserScreen(
                 context, store, title, url, media = media,
                 contentType = contentType, suggestedName = suggestedName,
                 referer = referer, isPrivate = isPrivate,
-                stagedFile = stagedFile
+                stagedFile = stagedFile,
+                manifestText = manifestText
             )
         }
     }
@@ -1105,12 +1113,17 @@ fun BrowserScreen(
      *  video with several renditions, fetch the variants and
      *  offer the Frost-style quality sheet; a single-variant
      *  source (or a failed fetch) goes straight to the usual
-     *  confirm dialog / download, with no extra step. */
+     *  confirm dialog / download, with no extra step.
+     *  Alpha.68: the manifest text fetched here rides to
+     *  the job, so the job downloads from tap-time text
+     *  instead of re-fetching a listed URL that may have
+     *  expired by job time. */
     fun beginQualityDownload(media: DetectedMedia) {
         snackScope.launch {
-            val variants = withContext(Dispatchers.IO) {
-                Downloads.fetchDownloadVariants(media.url, null, tabUrl)
+            val fetched = withContext(Dispatchers.IO) {
+                Downloads.fetchManifestForDownload(media.url, null, tabUrl)
             }
+            val variants = fetched.variants
             if (Downloads.offersQualityChoice(variants)) {
                 qualitySheet = QualitySheetRequest(
                     media, variants,
@@ -1118,13 +1131,15 @@ fun BrowserScreen(
                         .endsWith(".mpd", ignoreCase = true) ||
                         MediaLog.isInnerTubeDashManifest(media.url)
                     ) "DASH • ${variants.size} qualities"
-                    else "HLS • ${variants.size} qualities"
+                    else "HLS • ${variants.size} qualities",
+                    manifestText = fetched.text
                 )
             } else {
                 beginDownload(
                     media.label.ifBlank { media.url }, media.url,
                     media = true, contentType = null, suggestedName = null,
-                    referer = tabUrl, isPrivate = tab.isPrivate
+                    referer = tabUrl, isPrivate = tab.isPrivate,
+                    manifestText = fetched.text
                 )
             }
         }
@@ -3627,7 +3642,8 @@ fun BrowserScreen(
                                 location = confirmLocation,
                                 fileNameOverride = confirmName,
                                 variantBandwidth = chosen?.bandwidth,
-                                stagedFile = pending.stagedFile
+                                stagedFile = pending.stagedFile,
+                                manifestText = pending.manifestText
                             )
                         }
                         pendingDownload = null
@@ -3704,7 +3720,8 @@ fun BrowserScreen(
                     request.media.url,
                     media = true, contentType = null, suggestedName = null,
                     referer = tabUrl, isPrivate = tab.isPrivate,
-                    chosenVariant = chosen
+                    chosenVariant = chosen,
+                    manifestText = request.manifestText
                 )
             },
             onDismiss = { qualitySheet = null }

@@ -28,6 +28,10 @@ data class QualitySheetRequest(
     val media: DetectedMedia,
     val variants: List<Downloads.DownloadVariant>,
     val formatLabel: String,
+    // Alpha.68: the manifest text fetched at tap time; the
+    // job downloads from this text instead of re-fetching a
+    // listed URL that may have expired.
+    val manifestText: String? = null,
 )
 
 /** Download-quality picker (alpha.46): a bottom sheet in the

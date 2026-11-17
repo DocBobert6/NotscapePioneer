@@ -910,7 +910,12 @@ object Downloads {
         location: String? = null,
         fileNameOverride: String? = null,
         variantBandwidth: Long? = null,
-        stagedFile: File? = null
+        stagedFile: File? = null,
+        // Alpha.68: the manifest text fetched at tap time
+        // (null for ordinary downloads and for DASH). HLS
+        // jobs download from this text instead of re-fetching
+        // a listed URL that may have expired by job time.
+        manifestText: String? = null
     ): Long {
         val id = nextDownloadId(store)
         val appCtx = context.applicationContext
@@ -981,6 +986,19 @@ object Downloads {
                 "variantBandwidth" to (variantBandwidth?.toString() ?: ""),
                 "stagedFile" to (stagedFile?.absolutePath ?: "")
             ))
+            // Alpha.68: the tap-time manifest text rides to
+            // the job in a staging file (same lifecycle as
+            // the segment journal: kept across retries and
+            // resume, deleted on success). The job downloads
+            // from this text instead of re-fetching a listed
+            // URL that may have expired by job time. A
+            // missing or blank file falls back to fetching
+            // fresh, so older jobs are unaffected.
+            if (isHls && !manifestText.isNullOrBlank()) {
+                runCatching {
+                    File(stagingDir(appCtx, rec), "manifest.txt").writeText(manifestText)
+                }
+            }
             // The queue gate lives in promoteQueued alone: the
             // record starts at once when a slot is free and waits
             // (oldest first) when the limit is reached.
@@ -1861,6 +1879,28 @@ object Downloads {
         return checkedBytes(conn).decodeToString()
     }
 
+    /** [fetchText] with the stage tagged onto any fetch
+     *  failure, so the Downloads row names the failing
+     *  fetch ("Manifest: HTTP 404"). Only IOExceptions are
+     *  tagged; anything else propagates untouched. */
+    internal fun fetchTextStaged(
+        stage: String, url: String, referer: String?, cookie: String? = null
+    ): String = runCatching {
+        fetchText(url, referer, cookie)
+    }.getOrElse { e ->
+        if (e is java.io.IOException) throw stageFetchError(stage, e)
+        throw e
+    }
+
+    /** The manifest text fetched at tap time (alpha.68),
+     *  written by [start] into the job staging file, or
+     *  null when there is none — older jobs and jobs the
+     *  sheet never touched fetch fresh instead. */
+    internal fun readPrefetchedManifest(context: Context, rec: DownloadRecord): String? =
+        runCatching {
+            File(stagingDir(context, rec), "manifest.txt").readText().takeIf { it.isNotBlank() }
+        }.getOrNull()
+
     /** POST a JSON body and return the response text
      *  (alpha.65: the InnerTube player call). Same
      *  timeouts and UA as [openGet]; the caller sets the
@@ -2051,11 +2091,17 @@ object Downloads {
         mediaUrl: String, referer: String?, cookies: JobCookieJar,
         dir: File, progressBase: Double, progressSpan: Double,
         bytesOffset: Long = 0L, onProgress: (Int) -> Unit = {},
+        // Alpha.68: the media-playlist text already fetched
+        // at tap time (only when the media URL is the record
+        // URL — a master case fetches its variant playlist
+        // fresh instead). Null means fetch as before.
+        prefetchedText: String? = null,
     ): Pair<File, Long> {
-        val mediaText = fetchText(
-            mediaUrl, referer,
-            cookies.headerFor(mediaUrl)
-        )
+        val mediaText = prefetchedText?.takeIf { it.isNotBlank() }
+            ?: fetchTextStaged(
+                "Media playlist", mediaUrl, referer,
+                cookies.headerFor(mediaUrl)
+            )
         val media = parseHlsMedia(mediaText, mediaUrl)
         if (media.segments.isEmpty()) throw java.io.IOException("Empty HLS media playlist")
         val done = readSegJournal(dir)
@@ -2153,8 +2199,13 @@ object Downloads {
         val cookies = JobCookieJar(legacy = legacy)
         val variantBw = bundle?.get("variantBandwidth")?.toLongOrNull()
         return runCatching {
-            val masterText = fetchText(
-                rec.url, referer,
+            // Alpha.68: prefer the manifest text fetched at
+            // tap time (staging file, written by start) over
+            // re-fetching the listed URL — the URL may have
+            // expired between tap and job start. A missing or
+            // blank file fetches fresh, as before.
+            val masterText = readPrefetchedManifest(appCtx, rec) ?: fetchTextStaged(
+                "Manifest", rec.url, referer,
                 cookies.headerFor(rec.url)
             )
             val chosen: HlsVariant? = if (masterText.contains("#EXT-X-STREAM-INF")) {
@@ -2167,7 +2218,12 @@ object Downloads {
             val dir = stagingDir(appCtx, rec)
             val (videoFile, videoBytes) = downloadHlsMedia(
                 appCtx, store, rec, chosen?.url ?: rec.url, referer, cookies,
-                dir, 0.0, if (chosen?.audioUrl != null) 0.8 else 1.0, 0L, onProgress
+                dir, 0.0, if (chosen?.audioUrl != null) 0.8 else 1.0, 0L, onProgress,
+                // Alpha.68: a media playlist (no variant
+                // chosen) is the text already fetched — the
+                // job must not re-fetch its own URL. A master
+                // case fetches the variant playlist fresh.
+                prefetchedText = if (chosen == null) masterText else null
             )
             var fetchedBytes = videoBytes
             val staged: File
@@ -2311,29 +2367,60 @@ object Downloads {
     internal fun offersQualityChoice(variants: List<DownloadVariant>): Boolean =
         variants.size > 1
 
-    /** Fetch the quality variants for an HLS master playlist
-     *  or a DASH manifest while the confirmation dialog is
-     *  up; empty means no choice (single-variant source, or
-     *  the fetch failed). Highest bandwidth first. */
-    fun fetchDownloadVariants(
+    /** The result of fetching a manifest for a download:
+     *  the fetched text (null when the fetch failed or the
+     *  URL is not a manifest), the quality variants parsed
+     *  from it, and whether the link itself is dead (HTTP
+     *  404 — the URL is gone, not just unreachable). */
+    data class ManifestFetchResult(
+        val text: String?,
+        val variants: List<DownloadVariant>,
+        val deadLink: Boolean,
+    )
+
+    /** Fetch a manifest once and keep both the text and the
+     *  variants it parses to. The text is what the job
+     *  downloads from (alpha.68): handing the tap-time text
+     *  to the job means the job no longer depends on the
+     *  listed URL still being alive when it runs — a signed
+     *  URL can expire between tap and job start. A failed
+     *  fetch yields no text and no variants; only an HTTP
+     *  404 counts as a dead link (a 403 stays ambiguous,
+     *  timeouts are transient). */
+    fun fetchManifestForDownload(
         url: String, contentType: String?, referer: String?
-    ): List<DownloadVariant> {
+    ): ManifestFetchResult {
         val isHls = url.substringBefore('?').endsWith(".m3u8", ignoreCase = true) ||
             contentType?.contains("mpegurl", ignoreCase = true) == true ||
             MediaLog.isInnerTubeHlsManifest(url)
         val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true) ||
             MediaLog.isInnerTubeDashManifest(url)
-        if (!isHls && !isDash) return emptyList()
+        if (!isHls && !isDash) return ManifestFetchResult(null, emptyList(), false)
         return runCatching {
             // Alpha.64: a cookie-gated master shows its
             // variants too — the jar asks the API once for
             // this host (a main-thread call answers empty
             // at once, so the dialog never blocks on it).
             val text = fetchText(url, referer, JobCookieJar().headerFor(url))
-            if (isHls) hlsVariantsToDownload(parseHlsMaster(text, url))
+            val variants = if (isHls) hlsVariantsToDownload(parseHlsMaster(text, url))
             else dashRepsToVariants(parseDashManifest(text, url))
-        }.getOrDefault(emptyList())
+            ManifestFetchResult(text, variants, false)
+        }.getOrElse { e ->
+            ManifestFetchResult(
+                null, emptyList(),
+                isDeadLinkError(e as? Exception ?: java.io.IOException("$e"))
+            )
+        }
     }
+
+    /** Fetch the quality variants for an HLS master playlist
+     *  or a DASH manifest while the confirmation dialog is
+     *  up; empty means no choice (single-variant source, or
+     *  the fetch failed). Highest bandwidth first. */
+    fun fetchDownloadVariants(
+        url: String, contentType: String?, referer: String?
+    ): List<DownloadVariant> =
+        fetchManifestForDownload(url, contentType, referer).variants
 
     // ---------- Resolve-to-one (alpha.58) ----------
 
