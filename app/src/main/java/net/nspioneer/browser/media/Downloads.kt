@@ -2102,40 +2102,122 @@ object Downloads {
                 "Media playlist", mediaUrl, referer,
                 cookies.headerFor(mediaUrl)
             )
-        val media = parseHlsMedia(mediaText, mediaUrl)
+        var media = parseHlsMedia(mediaText, mediaUrl)
         if (media.segments.isEmpty()) throw java.io.IOException("Empty HLS media playlist")
         val done = readSegJournal(dir)
         val total = media.segments.size
         var keyBytes: ByteArray? = null
         var lastKeyUri: String? = null
         var fetchedBytes = 0L
-        for ((index, seg) in media.segments.withIndex()) {
+        // Alpha.68: whether the playlist has already been
+        // refreshed once for this media download (see
+        // fetchSegment) — one refresh only, so a
+        // systematically dead playlist fails fast.
+        var refreshed = false
+
+        // Fetch one segment's bytes. A 403/404 is not
+        // transient — the segment URL has expired — so
+        // instead of retrying the same dead URL, refresh
+        // the media playlist once and retry with the
+        // remapped URL (VOD only; see remappedSegment).
+        // Anything else keeps the old behaviour: one retry
+        // after a short wait, then the job fails. Returns
+        // the segment actually fetched with its bytes: after
+        // a refresh that is the remapped segment, whose key
+        // may have changed too.
+        fun fetchSegment(index: Int, seg: HlsSegment): Pair<HlsSegment, ByteArray> {
+            val first = runCatching {
+                checkedBytes(openGet(seg.url, referer, cookies.headerFor(seg.url)))
+            }
+            if (first.isSuccess) return seg to first.getOrThrow()
+            val e = first.exceptionOrNull()!!
+            val status = (e as? HttpStatusException)?.code
+            if (status != null && status in 403..404 && !refreshed && !media.isLive) {
+                refreshed = true
+                val fresh = runCatching {
+                    parseHlsMedia(
+                        fetchTextStaged(
+                            "Media playlist", mediaUrl, referer,
+                            cookies.headerFor(mediaUrl)
+                        ),
+                        mediaUrl
+                    )
+                }.getOrNull()
+                if (fresh != null) {
+                    val replacement = remappedSegment(media, fresh, index)
+                    if (replacement != null) {
+                        media = fresh
+                        return replacement to runCatching {
+                            checkedBytes(
+                                openGet(
+                                    replacement.url, referer,
+                                    cookies.headerFor(replacement.url)
+                                )
+                            )
+                        }.getOrElse { retryError ->
+                            if (retryError is java.io.IOException) {
+                                throw stageFetchError("Segment $index", retryError)
+                            }
+                            throw retryError
+                        }
+                    }
+                }
+            }
+            if (status != null && status in 403..404) {
+                // Dead URL and no remap: fail now — retrying
+                // the same URL after a wait cannot help.
+                if (e is java.io.IOException) throw stageFetchError("Segment $index", e)
+                throw e
+            }
+            // Transient failure: one retry after a short
+            // wait, as before; a second failure fails the job.
+            if (sleepChecked(rec.id, 2_000)) {
+                writeSegJournal(dir, done)
+                throw InterruptedException("paused")
+            }
+            return seg to runCatching {
+                checkedBytes(openGet(seg.url, referer, cookies.headerFor(seg.url)))
+            }.getOrElse { retryError ->
+                if (retryError is java.io.IOException) {
+                    throw stageFetchError("Segment $index", retryError)
+                }
+                throw retryError
+            }
+        }
+
+        // Alpha.68: index-based, not an iterator over the
+        // first playlist — a segment 403/404 refreshes the
+        // playlist (see fetchSegment), and the segments after
+        // the refresh come from the refreshed list.
+        var index = 0
+        while (index < media.segments.size) {
+            val seg = media.segments[index]
             if (isCancelled(rec.id)) throw InterruptedException("cancelled")
             if (isPaused(rec.id)) {
                 writeSegJournal(dir, done)
                 throw InterruptedException("paused")
             }
-            if (index in done) continue
-            val segCookie = cookies.headerFor(seg.url)
-            val bytes = runCatching {
-                checkedBytes(openGet(seg.url, referer, segCookie))
-            }.getOrElse {
-                // One transient failure retries once after a
-                // short wait; a second failure fails the job.
-                if (sleepChecked(rec.id, 2_000)) {
-                    writeSegJournal(dir, done)
-                    throw InterruptedException("paused")
-                }
-                checkedBytes(openGet(seg.url, referer, segCookie))
+            if (index in done) {
+                index++
+                continue
             }
-            val plain = if (seg.keyUri != null) {
-                if (seg.keyUri != lastKeyUri) {
-                    keyBytes = checkedBytes(
-                        openGet(seg.keyUri, referer, cookies.headerFor(seg.keyUri))
-                    )
-                    lastKeyUri = seg.keyUri
+            val (fetchedSeg, bytes) = fetchSegment(index, seg)
+            val plain = if (fetchedSeg.keyUri != null) {
+                val keyUri = fetchedSeg.keyUri
+                if (keyUri != lastKeyUri) {
+                    keyBytes = runCatching {
+                        checkedBytes(
+                            openGet(keyUri, referer, cookies.headerFor(keyUri))
+                        )
+                    }.getOrElse { keyError ->
+                        if (keyError is java.io.IOException) {
+                            throw stageFetchError("Segment $index key", keyError)
+                        }
+                        throw keyError
+                    }
+                    lastKeyUri = keyUri
                 }
-                val iv = seg.keyIv?.let { hex ->
+                val iv = fetchedSeg.keyIv?.let { hex ->
                     val padded = hex.padStart(32, '0')
                     ByteArray(16) { i ->
                         padded.substring(i * 2, i * 2 + 2).toInt(16).toByte()
@@ -2162,6 +2244,7 @@ object Downloads {
                 onProgress(pct)
                 notifyProgress(appCtx, rec, pct)
             }
+            index++
         }
         // Join in order into the staged output.
         val staged = File(dir, "joined.ts")
