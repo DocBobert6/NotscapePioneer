@@ -1117,11 +1117,24 @@ fun BrowserScreen(
      *  Alpha.68: the manifest text fetched here rides to
      *  the job, so the job downloads from tap-time text
      *  instead of re-fetching a listed URL that may have
-     *  expired by job time. */
+     *  expired by job time. A link already gone at tap time
+     *  (HTTP 404) stops here with a plain message instead
+     *  of starting a job that would fail invisibly later. */
     fun beginQualityDownload(media: DetectedMedia) {
         snackScope.launch {
             val fetched = withContext(Dispatchers.IO) {
                 Downloads.fetchManifestForDownload(media.url, null, tabUrl)
+            }
+            if (fetched.deadLink) {
+                // Alpha.68: the link is already gone — a job
+                // started now could only fail it invisibly
+                // later. Say so now instead.
+                Toast.makeText(
+                    context,
+                    "This video link no longer works — reload the page and try again",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
             }
             val variants = fetched.variants
             if (Downloads.offersQualityChoice(variants)) {
