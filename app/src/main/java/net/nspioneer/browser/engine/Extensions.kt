@@ -50,29 +50,12 @@ class ExtensionManager(
         private const val PROBE_LOCATION = "resource://android/assets/extensions/pioneer-probe/"
         private const val PROBE_ID = "pioneer-probe@pioneer"
         const val PROBE_APP = "pioneer"
-        // Alpha.52: the MAIN-world experiment extension (own
-        // manifest asking for "world": "MAIN" + main-world.js).
-        private const val MAIN_WORLD_LOCATION =
-            "resource://android/assets/extensions/pioneer-main-world/"
-        private const val MAIN_WORLD_ID = "pioneer-main-world@pioneer"
     }
 
     val uBlockState = mutableStateOf("not installed")
     val googleSearchFixerState = mutableStateOf("not installed")
 
     private var probeExtension: WebExtension? = null
-
-    /** Alpha.52: the experiment extension once installed, and
-     *  whether the install was attempted this session (at most
-     *  once — a flag-off call must not consume the attempt). */
-    private var mainWorldExtension: WebExtension? = null
-    private var mainWorldAttempted = false
-
-    /** Alpha.52: true once the experiment extension installed
-     *  — the page-load arming only starts the bounded wait
-     *  after this, so a load that merely triggered the install
-     *  cannot time out before the script ever had a page. */
-    fun isMainWorldInstalled(): Boolean = mainWorldExtension != null
 
     // ------------------------------------------------------------------
     // Probe extension (own built-in, media + EME reporting + zoom)
@@ -125,65 +108,6 @@ class ExtensionManager(
     }
 
     /**
-     * Alpha.52 — install the MAIN-world experiment extension,
-     * ONLY when the probeMainWorld flag is on (default OFF).
-     * The install result is itself part of the verdict: a
-     * failed install records REJECTED (the ceiling is
-     * confirmed); a successful install leaves the verdict
-     * UNKNOWN until the sentinel arrives. Guarded so the
-     * attempt happens at most once per session; a flag-off
-     * call returns before setting the guard, so flipping the
-     * flag on mid-session (Settings toggle or next page load)
-     * still attempts it.
-     */
-    fun installMainWorldExperiment() {
-        if (!host.probeMainWorldEnabled()) return
-        if (mainWorldAttempted) return
-        mainWorldAttempted = true
-        try {
-            runtime.webExtensionController
-                .ensureBuiltIn(MAIN_WORLD_LOCATION, MAIN_WORLD_ID)
-                .accept(
-                    { ext ->
-                        status.status("MAIN-world experiment: installed (${ext?.id})")
-                        ext?.let { extension ->
-                            mainWorldExtension = extension
-                            sessionProvider().forEach { session ->
-                                registerExperimentSession(session)
-                            }
-                        }
-                    },
-                    { e ->
-                        status.status("MAIN-world experiment: INSTALL FAILED: ${e?.message}")
-                        host.noteMainWorldInstallFailed(e?.message)
-                    },
-                )
-        } catch (e: Throwable) {
-            status.status("MAIN-world experiment: threw ${e.javaClass.simpleName}: ${e.message}")
-            host.noteMainWorldInstallFailed(e.message)
-        }
-    }
-
-    /**
-     * Register the probe message delegate for the experiment
-     * extension on one session — the sentinel
-     * (`probe-main-world-ok`) arrives through the same
-     * delegate as the probe's messages. Called for every tab
-     * at creation once the experiment extension is installed.
-     */
-    private fun registerExperimentSession(session: GeckoSession) {
-        mainWorldExtension?.let { extension ->
-            runCatching {
-                session.webExtensionController.setMessageDelegate(
-                    extension, probeMessageDelegate, PROBE_APP
-                )
-            }.onFailure { e ->
-                status.status("MAIN-world experiment: delegate for new tab failed: ${e.message}")
-            }
-        }
-    }
-
-    /**
      * Register the probe message delegate for one session. Called for
      * every tab at creation — tabs created after the probe install
      * (e.g. from window.open) need it too.
@@ -198,9 +122,6 @@ class ExtensionManager(
                 status.status("probe: delegate for new tab failed: ${e.message}")
             }
         }
-        // Alpha.52: tabs created after the experiment install
-        // need its delegate too, or the sentinel never arrives.
-        registerExperimentSession(session)
     }
 
     private val probePortDelegate = object : WebExtension.PortDelegate {
@@ -266,76 +187,6 @@ class ExtensionManager(
         senderSession: GeckoSession?
     ): Boolean {
         val type = message.optString("type")
-        // Alpha.59: the cookie-capture experiment. The probe
-        // reports cookie NAMES only — never values — for an
-        // in-scope request that carried a `Cookie` header
-        // (`cookie-capture`), and a tick with the in-scope
-        // request count (`cookie-capture-tick`). The verdict
-        // lives in CookieCaptureExperiment (first-wins,
-        // conservative — only a seen header accepts). A
-        // missing `names` array reads as empty — never a
-        // false accept.
-        if (type == "cookie-capture") {
-            val namesArray = message.optJSONArray("names")
-            val names = if (namesArray != null) {
-                List(namesArray.length()) { namesArray.optString(it) }
-            } else {
-                emptyList()
-            }
-            host.noteCookieCapture(
-                message.optString("host"), names,
-                message.optInt("requests", 0)
-            )
-            return true
-        }
-        if (type == "cookie-capture-tick") {
-            host.noteCookieCaptureTick(message.optInt("requests", 0))
-            return true
-        }
-        // Alpha.60: the cookie-capture probe. The probe
-        // reports how many onBeforeSendHeaders invocations
-        // it has seen, how many were in scope, and the
-        // background script's own flag value — counts and
-        // the flag only, no URLs, no names, no values.
-        // A missing field reads as zero / off — never a
-        // false positive.
-        if (type == "cookie-capture-probe") {
-            host.noteCookieCaptureProbe(
-                message.optInt("events", 0),
-                message.optInt("inScope", 0),
-                message.optBoolean("flagOn", false)
-            )
-            return true
-        }
-        // Alpha.63: the cookies-API probe. The background
-        // script reports whether browser.cookies is exposed
-        // there, and per-store cookie NAMES (never values)
-        // for the probed page — or an error name when getAll
-        // threw. A missing `api` reads as absent, a missing
-        // `stores` array as empty — never a false accept.
-        if (type == "cookie-api-probe") {            val storesArray = message.optJSONArray("stores")
-            val stores = if (storesArray != null) {
-                List(storesArray.length()) { i ->
-                    val obj = storesArray.optJSONObject(i)
-                    val namesArray = obj?.optJSONArray("names")
-                    val names = if (namesArray != null) {
-                        List(namesArray.length()) { namesArray.optString(it) }
-                    } else {
-                        emptyList()
-                    }
-                    (obj?.optString("storeId") ?: "") to names
-                }
-            } else {
-                emptyList()
-            }
-            host.noteCookiesApiProbe(
-                message.optBoolean("api", false),
-                message.optString("host"),
-                message.optString("error").takeIf { it.isNotEmpty() },
-                stores
-            )
-            return true
-        }
         // Alpha.64: the download job's cookie reply. The
         // background script answers a `cookies-request`
         // with name/value pairs for the requested URL (the
@@ -453,16 +304,6 @@ class ExtensionManager(
                 host.noteVideoPopupLongPress(sender.session, message.optString("url"))
                 return null
             }
-            // Alpha.52: the MAIN-world experiment sentinel. The
-            // script reports whether it found itself in the
-            // page's own world; the verdict lives in
-            // MainWorldExperiment (first-wins, conservative —
-            // only a MAIN-world proof accepts). An absent field
-            // reads as false — never a false accept.
-            if (type == "probe-main-world-ok") {
-                host.noteMainWorldSentinel(message.optBoolean("mainWorld", false))
-                return null
-            }
             // Alpha.61: the background script's reports
             // (cookie-*, media-net, background-alive) share
             // one sink with the native-port delegate — see
@@ -498,19 +339,6 @@ class ExtensionManager(
             val items = message.optJSONArray("items")
             val count = items?.length() ?: 0
             val eme = message.optJSONObject("eme")
-            // Alpha.52: a probe report means a page loaded — the
-            // bounded wait for the MAIN-world sentinel runs from
-            // here (and a mid-session flip-on attempts the
-            // install on this load).
-            host.noteMainWorldPageLoad()
-            // Alpha.59: the same report arms the bounded wait
-            // for a `Cookie` header (re-arms per load while
-            // the verdict is UNKNOWN).
-            host.noteCookieCapturePageLoad()
-            // Alpha.63: the same report arms the bounded wait
-            // for a cookie name (re-arms per load while the
-            // verdict is UNKNOWN).
-            host.noteCookiesApiPageLoad()
             status.status(
                 "probe tab $tabNumber [${message.optString("phase")}]: " +
                     "$count media URLs on $url" +
@@ -733,58 +561,6 @@ interface ProbeHost {
     /** alpha.51: global on-video button option
      *  (`showVideoPopupButton`, default ON). */
     fun showVideoPopupButton(): Boolean
-    /** Alpha.52: the MAIN-world experiment flag
-     *  (`probeMainWorld`, default OFF). */
-    fun probeMainWorldEnabled(): Boolean = false
-    /** Alpha.52: the experiment extension's install failed —
-     *  the ceiling is confirmed. */
-    fun noteMainWorldInstallFailed(message: String?) {}
-    /** Alpha.52: one sentinel arrived; [mainWorld] is true
-     *  only when the script proved it runs in the page's own
-     *  world. */
-    fun noteMainWorldSentinel(mainWorld: Boolean) {}
-    /** Alpha.52: a probe report means a page loaded — arm the
-     *  bounded wait for the sentinel, and attempt the install
-     *  if the flag was flipped on mid-session. */
-    fun noteMainWorldPageLoad() {}
-    /** Alpha.59: the cookie-capture experiment flag
-     *  (`probeCookieCapture`, default OFF). */
-    fun cookieCaptureEnabled(): Boolean = false
-    /** Alpha.59: one `Cookie` header seen on [host] for
-     *  [names] (names only — never values); [requests] is
-     *  the probe's in-scope request count at that moment. */
-    fun noteCookieCapture(host: String, names: List<String>, requests: Int) {}
-    /** Alpha.59: a tick from the probe — [requests]
-     *  in-scope requests observed with no `Cookie` header
-     *  yet. */
-    fun noteCookieCaptureTick(requests: Int) {}
-    /** Alpha.60: a probe report from the background script —
-     *  [events] onBeforeSendHeaders invocations seen,
-     *  [inScope] of them in scope, and the background
-     *  script's own flag value [flagOn]. Counts and the
-     *  flag only — no URLs, no names, no values. */
-    fun noteCookieCaptureProbe(events: Int, inScope: Int, flagOn: Boolean) {}
-    /** Alpha.59: a probe report means a page loaded — arm
-     *  the bounded wait for a `Cookie` header (re-arms per
-     *  load while the verdict is UNKNOWN). */
-    fun noteCookieCapturePageLoad() {}
-    /** Alpha.63: the cookies-API experiment flag
-     *  (`probeCookiesApi`, default OFF). */
-    fun cookiesApiEnabled(): Boolean = false
-    /** Alpha.63: one cookies-API probe report — [apiPresent]
-     *  false means browser.cookies is undefined in the
-     *  background script; [error] names a getAll failure;
-     *  [stores] maps storeId to cookie NAMES (never values). */
-    fun noteCookiesApiProbe(
-        apiPresent: Boolean,
-        host: String,
-        error: String?,
-        stores: List<Pair<String, List<String>>>
-    ) {}
-    /** Alpha.63: a probe report means a page loaded — arm
-     *  the bounded wait for a cookie name (re-arms per load
-     *  while the verdict is UNKNOWN). */
-    fun noteCookiesApiPageLoad() {}
     /** Alpha.61: the background script posted its startup
      *  handshake (`background-alive`) on the native port —
      *  it is alive and the port channel works. */

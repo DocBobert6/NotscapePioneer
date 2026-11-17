@@ -3921,48 +3921,12 @@ fun DiagnosticsScreen(
                 engine.mediaNetState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
-            // alpha.52: the MAIN-world experiment verdict —
-            // off until the flag flips on, unknown until the
-            // first report, then accepted or rejected.
-            Text(
-                engine.mainWorldState.value,
-                style = MaterialTheme.typography.bodyMedium
-            )
             // alpha.61: the background-script handshake —
             // alive once the background script has posted its
             // startup handshake on the native port, not seen
-            // yet until then. Reads first so the next device
-            // test can say whether the background script is
-            // alive at all before reading the observer line.
+            // yet until then.
             Text(
                 engine.backgroundState.value,
-                style = MaterialTheme.typography.bodyMedium
-            )
-            // alpha.59: the cookie-capture experiment verdict —
-            // off until the flag flips on, unknown until the
-            // first report, then accepted with the hosts and
-            // cookie names seen (names only — never values),
-            // or rejected with the request count.
-            Text(
-                engine.cookieCaptureState.value,
-                style = MaterialTheme.typography.bodyMedium
-            )
-            // alpha.60: the observer counts — how many
-            // onBeforeSendHeaders invocations the background
-            // script has seen, how many were in scope, and
-            // its own flag value. The three suspects read
-            // straight off this line.
-            Text(
-                engine.cookieObserverState.value,
-                style = MaterialTheme.typography.bodyMedium
-            )
-            // alpha.63: the cookies-API experiment verdict —
-            // off until the flag flips on, unknown until the
-            // first probe, then accepted with the host and the
-            // per-store cookie names seen (names only — never
-            // values), or rejected with the reason.
-            Text(
-                engine.cookieApiState.value,
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(

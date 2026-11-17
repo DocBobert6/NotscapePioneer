@@ -295,23 +295,6 @@ interface Engine {
     // alpha.50: "media-net sightings: N (M manifests)"
     // — for Diagnostics
     val mediaNetState: State<String>
-    // alpha.52: attempt the MAIN-world experiment install
-    // (flag-gated, at most once per session) — called from
-    // engine init, from the Settings toggle when the flag
-    // flips on, and from the next page load as a fallback.
-    fun installMainWorldExperiment()
-    // alpha.52: "probe MAIN world: off/unknown/accepted/
-    // rejected" — for Diagnostics
-    val mainWorldState: State<String>
-    // alpha.59: "cookie capture: off/unknown/accepted/
-    // rejected · N hosts, names ..." — for Diagnostics
-    val cookieCaptureState: State<String>
-    // alpha.60: "cookie observer: N events · M in scope ·
-    // flag on/off" — the probe counts, for Diagnostics
-    val cookieObserverState: State<String>
-    // alpha.63: "cookies API: off/unknown/accepted/
-    // rejected · host · store summary" — for Diagnostics
-    val cookieApiState: State<String>
     // alpha.61: "background: alive · port connected" once
     // the background script has posted its startup
     // handshake on the native port, "background: not seen

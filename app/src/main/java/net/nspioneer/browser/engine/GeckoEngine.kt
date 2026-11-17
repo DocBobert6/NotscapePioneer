@@ -196,42 +196,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         it.onMediaNetStateChanged = { refreshMediaNetState() }
     }
 
-    /** Alpha.52: the MAIN-world experiment verdict. The
-     *  callback refreshes the Diagnostics state line and
-     *  logs the verdict once (first-wins, so exactly one
-     *  line per session). */
-    private val mainWorldExperiment = MainWorldExperiment().also {
-        it.onStateChanged = {
-            refreshMainWorldState()
-            val reason = it.rejectReason?.let { r -> " ($r)" } ?: ""
-            statusPanel.status("probe MAIN world: ${it.verdict.name.lowercase()}$reason")
-        }
-    }
-
-    /** Alpha.59: the cookie-capture experiment verdict. The
-     *  callback refreshes the Diagnostics state line and
-     *  logs the verdict once (first-wins, so exactly one
-     *  line per session). */
-    private val cookieCaptureExperiment = CookieCaptureExperiment().also {
-        it.onStateChanged = {
-            refreshCookieCaptureState()
-            val reason = it.rejectReason?.let { r -> " ($r)" } ?: ""
-            statusPanel.status("cookie capture: ${it.verdict.name.lowercase()}$reason")
-        }
-    }
-
-    /** Alpha.63: the cookies-API experiment verdict. The
-     *  callback refreshes the Diagnostics state line and
-     *  logs the verdict once (first-wins, so exactly one
-     *  line per session). */
-    private val cookieApiExperiment = CookieApiExperiment().also {
-        it.onStateChanged = {
-            refreshCookiesApiState()
-            val reason = it.rejectReason?.let { r -> " ($r)" } ?: ""
-            statusPanel.status("cookies API: ${it.verdict.name.lowercase()}$reason")
-        }
-    }
-
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
@@ -248,19 +212,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
                 listOf(
                     store.setting("blockAds", "true"),
                     store.setting("blockTrackers", "true"),
-                    // alpha.59: the cookie-capture flag rides
-                    // the same push — flipping the experiment
-                    // toggle re-sends rules-update at once.
-                    store.setting(
-                        CookieCaptureExperiment.flagKey(), "false"
-                    ),
-                    // alpha.63: the cookies-API flag rides the
-                    // same push — flipping its toggle re-sends
-                    // rules-update at once. (A list, not a
-                    // Triple: four values do not fit one.)
-                    store.setting(
-                        CookieApiExperiment.flagKey(), "false"
-                    )
                 )
             }.distinctUntilChanged().drop(1).collect {
                 blockingObserver.syncBlockingFlags()
@@ -424,36 +375,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         }
     }
 
-    private val _mainWorldState =
-        mutableStateOf(
-            mainWorldExperiment.mainWorldStateText(
-                MainWorldExperiment.isEnabled(store)
-            )
-        )
-    override val mainWorldState: State<String> get() = _mainWorldState
-
-    private val _cookieCaptureState =
-        mutableStateOf(
-            cookieCaptureExperiment.cookieCaptureStateText(
-                CookieCaptureExperiment.isEnabled(store)
-            )
-        )
-    override val cookieCaptureState: State<String> get() = _cookieCaptureState
-
-    private val _cookieObserverState =
-        mutableStateOf(
-            CookieCaptureExperiment.observerStateText(0, 0, false)
-        )
-    override val cookieObserverState: State<String> get() = _cookieObserverState
-
-    private val _cookieApiState =
-        mutableStateOf(
-            cookieApiExperiment.cookiesApiStateText(
-                CookieApiExperiment.isEnabled(store)
-            )
-        )
-    override val cookieApiState: State<String> get() = _cookieApiState
-
     /** Alpha.61: "background: alive · port connected" once
      *  the background script has posted its startup
      *  handshake on the native port, "background: not seen
@@ -463,43 +384,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
             BlockingObserver.backgroundStateText(false)
         )
     override val backgroundState: State<String> get() = _backgroundState
-
-    /** Refresh the MAIN-world experiment status line from the
-     *  verdict (alpha.52: `mainWorldState` ←
-     *  `mainWorldStateText()`). Posted to the main thread:
-     *  the sentinel can arrive off it. The Engine interface
-     *  exposes this state in C2, with the Diagnostics row. */
-    private fun refreshMainWorldState() {
-        mainHandler.post {
-            _mainWorldState.value = mainWorldExperiment.mainWorldStateText(
-                MainWorldExperiment.isEnabled(store)
-            )
-        }
-    }
-
-    /** Refresh the cookie-capture experiment status line
-     *  from the verdict (alpha.59: `cookieCaptureState` ←
-     *  `cookieCaptureStateText()`). Posted to the main
-     *  thread: the capture reports can arrive off it. */
-    private fun refreshCookieCaptureState() {
-        mainHandler.post {
-            _cookieCaptureState.value = cookieCaptureExperiment.cookieCaptureStateText(
-                CookieCaptureExperiment.isEnabled(store)
-            )
-        }
-    }
-
-    /** Refresh the cookies-API experiment status line
-     *  from the verdict (alpha.63: `cookieApiState` ←
-     *  `cookiesApiStateText()`). Posted to the main
-     *  thread: the probe reports can arrive off it. */
-    private fun refreshCookiesApiState() {
-        mainHandler.post {
-            _cookieApiState.value = cookieApiExperiment.cookiesApiStateText(
-                CookieApiExperiment.isEnabled(store)
-            )
-        }
-    }
 
     override var onTabCreated: ((EngineTab) -> Unit)? = null
     override var onTabDestroyed: ((EngineTab) -> Unit)? = null
@@ -548,9 +432,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
 
     init {
         extensions.installProbeExtension()
-        // Alpha.52: the MAIN-world experiment install — a
-        // no-op unless the probeMainWorld flag is on.
-        extensions.installMainWorldExperiment()
         // P-A4 (alpha.38): Cast discovery and the startup
         // private-context wipe used to run here, on the launch
         // path before setContent. They now run after the first
@@ -933,11 +814,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     // ------------------------------------------------------------------
 
     override fun installUBlock() = extensions.installUBlock()
-
-    /** Alpha.52: attempt the MAIN-world experiment install
-     *  (flag-gated inside ExtensionManager). */
-    override fun installMainWorldExperiment() =
-        extensions.installMainWorldExperiment()
 
     override fun installGoogleSearchFixer() = extensions.installGoogleSearchFixer()
 
@@ -1427,16 +1303,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun refererPolicy(): String =
         store.setting("refererPolicy", "")
 
-    /** Alpha.59: the cookie-capture experiment flag
-     *  (`probeCookieCapture`, default OFF). */
-    override fun cookieCaptureEnabled(): Boolean =
-        CookieCaptureExperiment.isEnabled(store)
-
-    /** Alpha.63: the cookies-API experiment flag
-     *  (`probeCookiesApi`, default OFF). */
-    override fun cookiesApiEnabled(): Boolean =
-        CookieApiExperiment.isEnabled(store)
-
     override fun noteStatus(line: String) {
         statusPanel.status(line)
     }
@@ -1549,52 +1415,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
     override fun showVideoPopupButton(): Boolean =
         VideoPopup.isButtonOn(store)
 
-    /** Alpha.52: the MAIN-world experiment flag. */
-    override fun probeMainWorldEnabled(): Boolean =
-        MainWorldExperiment.isEnabled(store)
-
-    override fun noteMainWorldInstallFailed(message: String?) {
-        mainWorldExperiment.noteInstallFailed(message)
-    }
-
-    override fun noteMainWorldSentinel(mainWorld: Boolean) {
-        // Sentinels only count while the flag is on — a script
-        // left installed from an earlier flip-on must not move
-        // the verdict after the flag goes off.
-        if (!MainWorldExperiment.isEnabled(store)) return
-        mainWorldExperiment.noteSentinel(mainWorld)
-    }
-
-    /** Alpha.59: one `Cookie` header seen on [host] for
-     *  [names] (names only — the probe never sends values).
-     *  Reports only count while the flag is on. */
-    override fun noteCookieCapture(host: String, names: List<String>, requests: Int) {
-        if (!CookieCaptureExperiment.isEnabled(store)) return
-        cookieCaptureExperiment.noteCookieNames(host, names, requests)
-    }
-
-    /** Alpha.59: a tick from the probe — [requests]
-     *  in-scope requests observed with no `Cookie` header
-     *  yet. */
-    override fun noteCookieCaptureTick(requests: Int) {
-        if (!CookieCaptureExperiment.isEnabled(store)) return
-        cookieCaptureExperiment.noteTick(requests)
-    }
-
-    /** Alpha.60: a probe report from the background script —
-     *  [events] onBeforeSendHeaders invocations seen,
-     *  [inScope] of them in scope, and the background
-     *  script's own flag value [flagOn]. Accepted regardless
-     *  of the store flag: learning whether the flag arrived
-     *  here is the point. Posted to the main thread: probe
-     *  reports can arrive off it. */
-    override fun noteCookieCaptureProbe(events: Int, inScope: Int, flagOn: Boolean) {
-        mainHandler.post {
-            _cookieObserverState.value =
-                CookieCaptureExperiment.observerStateText(events, inScope, flagOn)
-        }
-    }
-
     /** Alpha.61: the background script posted its startup
      *  handshake on the native port — it is alive and the
      *  port channel works. Posted to the main thread: the
@@ -1603,108 +1423,6 @@ class GeckoEngine(context: Context) : Engine, ProbeHost, BlockingHost {
         mainHandler.post {
             _backgroundState.value = BlockingObserver.backgroundStateText(true)
         }
-    }
-
-    /** Alpha.52: 10 s bounded wait for the sentinel, armed
-     *  once per session on the first page load AFTER the
-     *  install completed — a load that merely triggered the
-     *  install cannot time out before the script ever had a
-     *  page. */
-    private var mainWorldTimeoutArmed = false
-
-    override fun noteMainWorldPageLoad() {
-        if (!MainWorldExperiment.isEnabled(store)) return
-        // Mid-session flip-on: the install runs on the next
-        // page load (the Settings toggle also attempts it at
-        // once, so this is the fallback path).
-        extensions.installMainWorldExperiment()
-        if (!extensions.isMainWorldInstalled()) return
-        if (mainWorldExperiment.verdict != MainWorldExperiment.Verdict.UNKNOWN ||
-            mainWorldTimeoutArmed
-        ) return
-        mainWorldTimeoutArmed = true
-        mainHandler.postDelayed({ mainWorldExperiment.noteTimeout() }, 10_000)
-    }
-
-    /** Alpha.59: 10 s bounded wait for a `Cookie` header,
-     *  armed once per page load while the verdict is UNKNOWN
-     *  (a probe report means a page loaded). Unlike the
-     *  MAIN-world wait it re-arms: a timeout with zero
-     *  requests observed leaves the verdict UNKNOWN (no
-     *  evidence either way), so the next load tries again. */
-    private var cookieCaptureTimeoutArmed = false
-
-    override fun noteCookieCapturePageLoad() {
-        if (!CookieCaptureExperiment.isEnabled(store)) return
-        if (cookieCaptureExperiment.verdict != CookieCaptureExperiment.Verdict.UNKNOWN ||
-            cookieCaptureTimeoutArmed
-        ) return
-        cookieCaptureTimeoutArmed = true
-        mainHandler.postDelayed({
-            cookieCaptureExperiment.noteTimeout()
-            cookieCaptureTimeoutArmed = false
-        }, 10_000)
-    }
-
-    /** Alpha.63: one cookies-API probe report from the
-     *  background script. Accepted regardless of the store
-     *  flag (like the alpha.60 probe): a report that
-     *  arrives after a mid-flight flip-off is still
-     *  evidence, and the Diagnostics line reads "off"
-     *  while the flag is off anyway. Posted to the main
-     *  thread: probe reports can arrive off it. The first
-     *  report also logs a status line with the per-store
-     *  counts, so Copy status shows what the probe found. */
-    override fun noteCookiesApiProbe(
-        apiPresent: Boolean,
-        host: String,
-        error: String?,
-        stores: List<Pair<String, List<String>>>
-    ) {
-        val first = cookieApiExperiment.probesRun == 0
-        mainHandler.post {
-            if (!apiPresent) {
-                cookieApiExperiment.noteApiAbsent(host)
-            } else if (error != null) {
-                cookieApiExperiment.noteApiError(host, error)
-            } else {
-                cookieApiExperiment.noteProbe(
-                    host,
-                    stores.map { CookieApiExperiment.StoreResult(it.first, it.second) }
-                )
-            }
-            refreshCookiesApiState()
-            if (first) {
-                val summary = when {
-                    !apiPresent -> "browser.cookies undefined"
-                    error != null -> "error: $error"
-                    else -> stores.joinToString("; ") { (id, names) ->
-                        "$id: ${names.size} name(s)"
-                    }
-                }
-                statusPanel.status("cookies API: probed $host · $summary")
-            }
-        }
-    }
-
-    /** Alpha.63: 10 s bounded wait for a cookie name,
-     *  armed once per page load while the verdict is UNKNOWN
-     *  (a probe report means a page loaded). Unlike the
-     *  MAIN-world wait it re-arms: a timeout with zero
-     *  probe runs leaves the verdict UNKNOWN (no evidence
-     *  either way), so the next load tries again. */
-    private var cookiesApiTimeoutArmed = false
-
-    override fun noteCookiesApiPageLoad() {
-        if (!CookieApiExperiment.isEnabled(store)) return
-        if (cookieApiExperiment.verdict != CookieApiExperiment.Verdict.UNKNOWN ||
-            cookiesApiTimeoutArmed
-        ) return
-        cookiesApiTimeoutArmed = true
-        mainHandler.postDelayed({
-            cookieApiExperiment.noteTimeout()
-            cookiesApiTimeoutArmed = false
-        }, 10_000)
     }
 
     /** Worker A fallthrough: the blocking bridge owns

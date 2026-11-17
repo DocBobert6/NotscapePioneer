@@ -79,9 +79,6 @@ class BackgroundPortTest {
         assertTrue(js.contains("type: \"rules-request\""))
         assertTrue(js.contains("connectNative"))
         assertTrue(js.contains("onDisconnect"))
-        assertTrue(js.contains("type: \"cookie-capture-probe\""))
-        assertTrue(js.contains("type: \"cookie-capture\""))
-        assertTrue(js.contains("type: \"cookie-capture-tick\""))
         assertTrue(js.contains("type: \"headers-state\""))
         // No one-shot send left for background code.
         assertFalse(js.contains("sendNativeMessage"))
@@ -103,9 +100,6 @@ class BackgroundPortTest {
     private class RecordingHost : ProbeHost {
         val calls = mutableListOf<String>()
         val netMedia = mutableListOf<Triple<String, String?, Long?>>()
-        var lastCapture: Triple<String, List<String>, Int>? = null
-        var lastTick: Int? = null
-        var lastProbe: Triple<Int, Int, Boolean>? = null
 
         override fun tabNumberFor(session: GeckoSession?): Int = -1
         override fun zoomFactorFor(session: GeckoSession?): Float = 1.0f
@@ -161,18 +155,6 @@ class BackgroundPortTest {
         override fun onBackgroundPortDisconnected(port: WebExtension.Port) {
             calls.add("portDisconnected")
         }
-        override fun noteCookieCapture(host: String, names: List<String>, requests: Int) {
-            calls.add("cookieCapture")
-            lastCapture = Triple(host, names, requests)
-        }
-        override fun noteCookieCaptureTick(requests: Int) {
-            calls.add("cookieCaptureTick")
-            lastTick = requests
-        }
-        override fun noteCookieCaptureProbe(events: Int, inScope: Int, flagOn: Boolean) {
-            calls.add("cookieCaptureProbe")
-            lastProbe = Triple(events, inScope, flagOn)
-        }
         override fun noteBackgroundAlive() {
             calls.add("backgroundAlive")
         }
@@ -209,39 +191,6 @@ class BackgroundPortTest {
     fun port_routes_background_alive() {
         val host = routed(RecordingHost(), """{"type":"background-alive"}""")
         assertEquals(listOf("backgroundAlive"), host.calls)
-    }
-
-    @Test
-    fun port_routes_cookie_capture() {
-        val host = routed(
-            RecordingHost(),
-            """{"type":"cookie-capture","host":"example.com","names":["sessionid","csrftoken"],"requests":7}"""
-        )
-        assertEquals(listOf("cookieCapture"), host.calls)
-        assertEquals(
-            Triple("example.com", listOf("sessionid", "csrftoken"), 7),
-            host.lastCapture
-        )
-    }
-
-    @Test
-    fun port_routes_cookie_capture_tick() {
-        val host = routed(
-            RecordingHost(),
-            """{"type":"cookie-capture-tick","requests":9}"""
-        )
-        assertEquals(listOf("cookieCaptureTick"), host.calls)
-        assertEquals(9, host.lastTick)
-    }
-
-    @Test
-    fun port_routes_cookie_capture_probe() {
-        val host = routed(
-            RecordingHost(),
-            """{"type":"cookie-capture-probe","events":27,"inScope":12,"flagOn":true}"""
-        )
-        assertEquals(listOf("cookieCaptureProbe"), host.calls)
-        assertEquals(Triple(27, 12, true), host.lastProbe)
     }
 
     @Test
@@ -341,13 +290,6 @@ class BackgroundPortTest {
         val p = port()
         delegate.onPortMessage(JSONObject("""{"type":"background-alive"}"""), p)
         delegate.onPortMessage(
-            JSONObject("""{"type":"cookie-capture","host":"h","names":[],"requests":1}"""), p
-        )
-        delegate.onPortMessage(JSONObject("""{"type":"cookie-capture-tick","requests":2}"""), p)
-        delegate.onPortMessage(
-            JSONObject("""{"type":"cookie-capture-probe","events":3,"inScope":3,"flagOn":false}"""), p
-        )
-        delegate.onPortMessage(
             JSONObject("""{"type":"media-net","url":"https://example.com/a.mp4"}"""), p
         )
         delegate.onPortMessage(JSONObject("""{"type":"headers-state","on":false}"""), p)
@@ -356,9 +298,6 @@ class BackgroundPortTest {
         assertEquals(
             listOf(
                 "backgroundAlive",
-                "cookieCapture",
-                "cookieCaptureTick",
-                "cookieCaptureProbe",
                 "noteNetMedia",
                 "blocking:headers-state",
                 "blocking:blocked",

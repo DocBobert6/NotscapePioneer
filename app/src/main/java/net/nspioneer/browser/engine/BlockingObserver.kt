@@ -476,14 +476,6 @@ class BlockingObserver(private val host: BlockingHost) {
             // per-site image-blocking hosts ride inside the
             // rules, beside disabledHosts.
             put("refererPolicy", host.refererPolicy())
-            // Alpha.59: the cookie-capture experiment flag
-            // rides top-level with the flags; the background
-            // script reads it fresh on every push.
-            put("cookieCapture", host.cookieCaptureEnabled())
-            // Alpha.63: the cookies-API experiment flag
-            // rides top-level with the flags; the background
-            // script reads it fresh on every push.
-            put("cookiesApi", host.cookiesApiEnabled())
             put("rules", rules)
         }
     }
@@ -688,14 +680,6 @@ interface BlockingHost {
     /** Batch 4: the stored referer policy ("", "origin" or
      *  "never"). */
     fun refererPolicy(): String = ""
-
-    /** Alpha.59: the cookie-capture experiment flag
-     *  (`probeCookieCapture`, default OFF). */
-    fun cookieCaptureEnabled(): Boolean = false
-
-    /** Alpha.63: the cookies-API experiment flag
-     *  (`probeCookiesApi`, default OFF). */
-    fun cookiesApiEnabled(): Boolean = false
 
     /** Status-panel line (diagnostics only). */
     fun noteStatus(line: String) {}
