@@ -167,66 +167,13 @@
     return s;
   }
 
-  var flags = { blockAds: true, blockTrackers: true, refererPolicy: "", cookieCapture: false, cookiesApi: false };
-
-  /* Cookie-capture experiment (alpha.59) — observation
-   * state. `requests` counts in-scope requests seen while
-   * the flag is on; `reported` is the per-host set of cookie
-   * names already sent to the app; `lastTicked` is the
-   * request count of the last tick sent. Reset when the
-   * flag flips off, so a later flip-on reports fresh. */
-  function freshCookieObs() {
-    return { requests: 0, reported: {}, lastTicked: 0 };
-  }
-
-  var cookieObs = freshCookieObs();
-
-  /* Cookie-capture probe (alpha.60) — listener
-   * instrumentation. `events` counts EVERY
-   * onBeforeSendHeaders invocation, flag on or off;
-   * `inScope` counts the ones the scope rule matches;
-   * `lastReported` is the event count of the last probe
-   * message sent. Monotonic since background start — never
-   * reset on a flag flip, so the line keeps showing the
-   * listener is alive even while the flag is off. Counts
-   * and the flag only — no URLs, no names, no values. */
-  function freshCookieProbe() {
-    return { events: 0, inScope: 0, lastReported: 0 };
-  }
-
-  var cookieProbe = freshCookieProbe();
-
-  /* Cookies-API experiment (alpha.63): the re-probe timer
-   * for a main-frame navigation — cookies can arrive late,
-   * so the probe runs again 10 s after the load. One timer
-   * at a time; the next navigation clears it. Null when no
-   * re-probe is pending. */
-  var cookiesApiTimer = null;
+  var flags = { blockAds: true, blockTrackers: true, refererPolicy: "" };
 
   function applyRules(r) {
     r = r || {};
     if (r.blockAds !== undefined) flags.blockAds = !!r.blockAds;
     if (r.blockTrackers !== undefined) flags.blockTrackers = !!r.blockTrackers;
     if (r.refererPolicy !== undefined) flags.refererPolicy = String(r.refererPolicy || "");
-    if (r.cookieCapture !== undefined) {
-      var wasCapture = flags.cookieCapture;
-      flags.cookieCapture = !!r.cookieCapture;
-      /* Flipping the experiment off clears the observation
-       * state, so a later flip-on reports names fresh
-       * instead of staying silent on already-seen names. */
-      if (wasCapture && !flags.cookieCapture) cookieObs = freshCookieObs();
-    }
-    if (r.cookiesApi !== undefined) {
-      flags.cookiesApi = !!r.cookiesApi;
-      /* Flipping the experiment off cancels the pending
-       * re-probe, so a stale timer cannot probe after the
-       * flag went off (probeCookiesApi also checks the
-       * flag, so this is belt and braces). */
-      if (!flags.cookiesApi && cookiesApiTimer) {
-        clearTimeout(cookiesApiTimer);
-        cookiesApiTimer = null;
-      }
-    }
     r = r.rules || r;
     rules.hosts = toSet(r.hosts);
     rules.trackerHosts = toSet(r.trackerHosts);
@@ -494,215 +441,6 @@
     return AUDIO_RE.test(url.toLowerCase()) ? "audio" : "video";
   }
 
-  /* Cookie-capture experiment (alpha.59): does GeckoView
-   * deliver the `Cookie` header to the webRequest observer?
-   * Desktop Firefox does (MDN's onSendHeaders example logs
-   * cookies from requestHeaders); the app already has the
-   * host-scoped CookieSnapshot plumbing waiting for a source.
-   * This alpha PROVES the source and wires nothing into
-   * downloads.
-   *
-   * SECURITY — names only, NEVER values: the experiment
-   * records cookie NAMES (e.g. "sessionid, csrftoken").
-   * No cookie value is logged, stored, persisted, or sent
-   * anywhere. A Diagnostics line showing names proves
-   * delivery without ever touching a secret. */
-  function cookieNamesFromHeaders(headers) {
-    var names = [];
-    var seen = {};
-    for (var i = 0; i < headers.length; i++) {
-      var h = headers[i] || {};
-      if (String(h.name || "").toLowerCase() !== "cookie") continue;
-      var pairs = String(h.value || "").split(";");
-      for (var j = 0; j < pairs.length; j++) {
-        var name = pairs[j].split("=")[0].trim();
-        if (name && !seen[name]) { seen[name] = 1; names.push(name); }
-      }
-    }
-    return names;
-  }
-
-  /* In scope: the request URL looks like media (any media
-   * extension, segments included — the segment-noise filter
-   * is a picker concern, not an observation concern), or it
-   * goes to the page's own host. Everything else
-   * (third-party trackers, ads, analytics) is never
-   * observed. */
-  function cookieCaptureInScope(url, pageHost) {
-    if (STREAM_RE.test(url || "")) return true;
-    /* Segments (.m4s) are not in STREAM_RE's extension list,
-     * but a segment request to a media host is in scope. */
-    if (/\.m4s(\?|#|$)/i.test(url || "")) return true;
-    var host = hostFromUrl(url);
-    return !!host && host === String(pageHost || "").toLowerCase();
-  }
-
-  /* One in-scope request passed the observer. A Cookie
-   * header is reported once per host per name (names only,
-   * never values); requests without one advance the tick
-   * count, so the app's rejection verdict can state how
-   * many requests were observed with zero Cookie headers.
-   * Ticks go out every 10th in-scope request and on every
-   * main-frame load — bounded traffic, not one message per
-   * request. */
-  /* Cookie-capture probe (alpha.60): count this
-   * invocation and, on the same bounded cadence as the
-   * ticks (every 10th event, and on every main-frame
-   * load), report the counts plus the background
-   * script's own flag value. Runs before the flag check
-   * in onBeforeSendHeaders, so the counts separate the
-   * three suspects: events 0 means the listener never
-   * fires; events above 0 with inScope 0 means the scope
-   * never matches; flagOn false means the flag never
-   * arrived here. */
-  function probeCookieListener(details) {
-    var url = details.url || "";
-    var pageHost = hostFromUrl(details.originUrl || details.documentUrl || "");
-    cookieProbe.events++;
-    if (cookieCaptureInScope(url, pageHost)) cookieProbe.inScope++;
-    if (cookieProbe.events % 10 === 0 || details.type === "main_frame") {
-      if (cookieProbe.lastReported !== cookieProbe.events) {
-        cookieProbe.lastReported = cookieProbe.events;
-        postNative({
-          type: "cookie-capture-probe",
-          events: cookieProbe.events,
-          inScope: cookieProbe.inScope,
-          flagOn: !!flags.cookieCapture
-        });
-      }
-    }
-  }
-
-  function observeCookieHeader(details) {
-    var url = details.url || "";
-    var pageHost = hostFromUrl(details.originUrl || details.documentUrl || "");
-    if (!cookieCaptureInScope(url, pageHost)) return;
-    var urlHost = hostFromUrl(url);
-    cookieObs.requests++;
-    var names = cookieNamesFromHeaders(details.requestHeaders || []);
-    if (names.length) {
-      var known = cookieObs.reported[urlHost] ||
-        (cookieObs.reported[urlHost] = {});
-      var fresh = [];
-      for (var i = 0; i < names.length; i++) {
-        if (!known[names[i]]) { known[names[i]] = 1; fresh.push(names[i]); }
-      }
-      if (Object.keys(cookieObs.reported).length > 64) cookieObs.reported = {};
-      if (fresh.length) {
-        postNative({
-          type: "cookie-capture", host: urlHost, names: fresh,
-          requests: cookieObs.requests
-        });
-      }
-      return;
-    }
-    if (cookieObs.requests % 10 === 0 || details.type === "main_frame") {
-      if (cookieObs.lastTicked !== cookieObs.requests) {
-        cookieObs.lastTicked = cookieObs.requests;
-        postNative({
-          type: "cookie-capture-tick", requests: cookieObs.requests
-        });
-      }
-    }
-  }
-
-  /* Cookies-API experiment (alpha.63): does GeckoView
-   * expose browser.cookies to the background script, and
-   * do the tab's cookies live in the default store or a
-   * per-session store? The API is present in GeckoView 160
-   * (schema cookies.json + ext-cookies.js in the shipped
-   * omni.ja, permission "cookies", no GeckoView gating),
-   * and getAll returns HttpOnly cookies with values — but
-   * it defaults to the default store (userContextId 0),
-   * and Pioneer's tabs may use per-session context IDs.
-   * So the probe queries the default store (no storeId)
-   * AND every listed store by id, and reports per-store
-   * counts + names. That is the one question this
-   * experiment settles; nothing is wired into downloads.
-   *
-   * SECURITY — names only, NEVER values: the report
-   * carries cookie NAMES (e.g. "SID, HSID, SSID") and
-   * per-store counts. No cookie value is read into a
-   * report, logged, stored, persisted, or sent anywhere.
-   * A Diagnostics line showing names proves delivery
-   * without ever touching a secret. */
-  var COOKIES_API_MAX_STORES = 5;
-  var COOKIES_API_MAX_NAMES = 8;
-
-  /* Names of the cookies in one getAll result, deduped
-   * and capped. Reads .name only — never .value. */
-  function cookieNamesOf(cookies) {
-    var names = [];
-    var seen = {};
-    for (var i = 0; i < (cookies || []).length; i++) {
-      var name = String((cookies[i] || {}).name || "");
-      if (name && !seen[name]) { seen[name] = 1; names.push(name); }
-    }
-    return names.slice(0, COOKIES_API_MAX_NAMES);
-  }
-
-  /* One probe run for pageUrl: default store + every
-   * listed store. Reports {api, host, stores} on the
-   * port, or {api: false} when browser.cookies is not
-   * exposed here at all, or {api: true, error} when a
-   * getAll call throws (e.g. a missing host permission).
-   * A failing store listing falls back to the default
-   * store only; a failing non-default store reports as
-   * empty for that store; only a failing default-store
-   * query is an error, because that is the query the
-   * download job would make. Never throws. */
-  function probeCookiesApi(pageUrl) {
-    if (!flags.cookiesApi) return;
-    var host = hostFromUrl(pageUrl || "");
-    if (typeof browser === "undefined" || !browser.cookies ||
-        typeof browser.cookies.getAll !== "function") {
-      postNative({ type: "cookie-api-probe", api: false, host: host });
-      return;
-    }
-    var storesPromise = null;
-    try {
-      storesPromise = (typeof browser.cookies.getAllCookieStores === "function")
-        ? browser.cookies.getAllCookieStores()
-        : Promise.resolve([]);
-    } catch (e) {
-      postNative({
-        type: "cookie-api-probe", api: true, host: host,
-        error: (e && e.name) || "Error"
-      });
-      return;
-    }
-    Promise.resolve(storesPromise).catch(function () { return []; }).then(function (stores) {
-      var queries = [];
-      queries.push(browser.cookies.getAll({ url: pageUrl }).then(function (cs) {
-        return { storeId: "default", names: cookieNamesOf(cs) };
-      }));
-      (stores || []).forEach(function (s) {
-        var id = String((s || {}).id || "");
-        /* The default store is already queried above
-         * (without a storeId); the private store throws
-         * for an extension without private-browsing
-         * access, so neither is queried again here. */
-        if (!id || id === "firefox-default" || id === "firefox-private") return;
-        queries.push(browser.cookies.getAll({ url: pageUrl, storeId: id }).then(function (cs) {
-          return { storeId: id, names: cookieNamesOf(cs) };
-        }, function () {
-          return { storeId: id, names: [] };
-        }));
-      });
-      return Promise.all(queries);
-    }).then(function (results) {
-      postNative({
-        type: "cookie-api-probe", api: true, host: host,
-        stores: (results || []).slice(0, COOKIES_API_MAX_STORES)
-      });
-    }).catch(function (e) {
-      postNative({
-        type: "cookie-api-probe", api: true, host: host,
-        error: (e && e.name) || "Error"
-      });
-    });
-  }
-
   /* Cookies wiring (alpha.64): the download job asks for
    * ONE host's cookies so it can replay them host-scoped.
    * The app sends {type:"cookies-request", id, url} on the
@@ -857,18 +595,6 @@
       });
     }
 
-    /* Cookies-API experiment (alpha.63): on every main-frame
-     * navigation, ask the cookies API for this page's
-     * cookies — and again 10 s later, because cookies can
-     * arrive late. Runs for any method: a POST navigation
-     * is still a navigation, and the probe reads cookies,
-     * never the request body. */
-    if (isMainFrame && flags.cookiesApi) {
-      probeCookiesApi(url);
-      if (cookiesApiTimer) clearTimeout(cookiesApiTimer);
-      cookiesApiTimer = setTimeout(function () { probeCookiesApi(url); }, 10000);
-    }
-
     /* GET/HEAD only — POST/PUT uploads and sign-ins are never
      * blocked (Mariner Phase G repair). */
     if (method !== "GET" && method !== "HEAD") return {};
@@ -924,15 +650,6 @@
    *  header, "origin" truncates it to scheme://host/.
    *  "Default" (empty) leaves it alone. */
   function onBeforeSendHeaders(details) {
-    /* Cookie-capture experiment (alpha.59): observe first —
-     * this runs even when there is no referer policy, so the
-     * early return below must not skip it. Observation never
-     * modifies headers. */
-    /* Cookie-capture probe (alpha.60): count every
-     * invocation, flag on or off — the counts are what
-     * separate the three suspects. */
-    probeCookieListener(details);
-    if (flags.cookieCapture) observeCookieHeader(details);
     var policy = flags.refererPolicy || "";
     if (!policy) return {};
     var headers = details.requestHeaders || [];
@@ -1106,12 +823,7 @@
       mediaKindFor: mediaKindFor,
       mediaKindForMime: mediaKindForMime,
       isSegmentNoise: isSegmentNoise,
-      cookieNamesFromHeaders: cookieNamesFromHeaders,
-      cookieCaptureInScope: cookieCaptureInScope,
-      probeCookieListener: probeCookieListener,
-      probeCookiesApi: probeCookiesApi,
       handleCookiesRequest: handleCookiesRequest,
-      cookieNamesOf: cookieNamesOf,
       onBeforeSendHeaders: onBeforeSendHeaders,
       isManifest: isManifest,
       sameSite: sameSite,
