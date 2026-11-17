@@ -488,4 +488,157 @@ class DownloadsTest {
         assertFalse(Downloads.isBlobLike("https://example.com/f.bin"))
         assertFalse(Downloads.isBlobLike("http://example.com/f.bin"))
     }
+
+    // ---------- parseHlsMedia (alpha.68) ----------
+
+    @Test
+    fun parseHlsMedia_parsesSegmentsWithDurations() {
+        val text = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-TARGETDURATION:6
+            #EXTINF:6.006,
+            seg0.ts
+            #EXTINF:6.006,
+            seg1.ts
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        val media = Downloads.parseHlsMedia(text, "https://cdn.example.com/hls/list.m3u8")
+        assertEquals(2, media.segments.size)
+        assertEquals("https://cdn.example.com/hls/seg0.ts", media.segments[0].url)
+        assertEquals(6.006, media.segments[0].duration, 0.0001)
+        assertEquals("https://cdn.example.com/hls/seg1.ts", media.segments[1].url)
+        assertFalse(media.isLive)
+    }
+
+    @Test
+    fun parseHlsMedia_noEndlistMeansLive() {
+        val text = """
+            #EXTM3U
+            #EXTINF:6.0,
+            seg0.ts
+        """.trimIndent()
+        val media = Downloads.parseHlsMedia(text, "https://cdn.example.com/list.m3u8")
+        assertEquals(1, media.segments.size)
+        assertTrue(media.isLive)
+    }
+
+    @Test
+    fun parseHlsMedia_resolvesRelativeSegmentUrls() {
+        val text = """
+            #EXTM3U
+            #EXTINF:6.0,
+            seg/s0.ts
+            #EXTINF:6.0,
+            /x/s1.ts
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        val media = Downloads.parseHlsMedia(text, "https://cdn.example.com/a/b/list.m3u8")
+        assertEquals("https://cdn.example.com/a/b/seg/s0.ts", media.segments[0].url)
+        assertEquals("https://cdn.example.com/x/s1.ts", media.segments[1].url)
+    }
+
+    @Test
+    fun parseHlsMedia_parsesAes128Key() {
+        val text = """
+            #EXTM3U
+            #EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x00000000000000000000000000000001
+            #EXTINF:6.0,
+            seg0.ts
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        val media = Downloads.parseHlsMedia(text, "https://cdn.example.com/hls/list.m3u8")
+        assertEquals("https://cdn.example.com/hls/key.bin", media.segments[0].keyUri)
+        assertEquals("00000000000000000000000000000001", media.segments[0].keyIv)
+    }
+
+    @Test
+    fun parseHlsMedia_emptyTextHasNoSegments() {
+        val media = Downloads.parseHlsMedia("", "https://example.com/list.m3u8")
+        assertTrue(media.segments.isEmpty())
+        assertTrue(media.isLive)
+    }
+
+    // ---------- stageFetchError / isDeadLinkError (alpha.68) ----------
+
+    @Test
+    fun stageFetchError_prefixesMessage() {
+        val e = Downloads.stageFetchError("Manifest", java.io.IOException("HTTP 404"))
+        assertEquals("Manifest: HTTP 404", e.message)
+    }
+
+    @Test
+    fun isDeadLinkError_404Only() {
+        assertTrue(Downloads.isDeadLinkError(Downloads.HttpStatusException(404)))
+        assertFalse(Downloads.isDeadLinkError(Downloads.HttpStatusException(403)))
+        assertFalse(Downloads.isDeadLinkError(Downloads.HttpStatusException(500)))
+        assertTrue(Downloads.isDeadLinkError(java.io.IOException("HTTP 404")))
+        assertFalse(Downloads.isDeadLinkError(java.io.IOException("HTTP 403")))
+        assertFalse(Downloads.isDeadLinkError(java.net.SocketTimeoutException("timed out")))
+        assertFalse(Downloads.isDeadLinkError(IllegalStateException("x")))
+    }
+
+    // ---------- remappedSegment (alpha.68) ----------
+
+    private fun hlsMedia(
+        urls: List<String>, live: Boolean = false, duration: Double = 6.0
+    ): Downloads.HlsMedia =
+        Downloads.HlsMedia(
+            urls.map { Downloads.HlsSegment(it, duration, null, null) },
+            live
+        )
+
+    @Test
+    fun remappedSegment_returnsNewUrlWhenChanged() {
+        val old = hlsMedia(
+            listOf("https://cdn.example.com/s0.ts?tok=old", "https://cdn.example.com/s1.ts?tok=old")
+        )
+        val fresh = hlsMedia(
+            listOf("https://cdn.example.com/s0.ts?tok=new", "https://cdn.example.com/s1.ts?tok=new")
+        )
+        assertEquals(
+            "https://cdn.example.com/s0.ts?tok=new",
+            Downloads.remappedSegment(old, fresh, 0)?.url
+        )
+    }
+
+    @Test
+    fun remappedSegment_nullWhenLive() {
+        val old = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=old"), live = true)
+        val fresh = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=new"), live = true)
+        assertNull(Downloads.remappedSegment(old, fresh, 0))
+    }
+
+    @Test
+    fun remappedSegment_nullWhenCountDiffers() {
+        val old = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=old"))
+        val fresh = hlsMedia(
+            listOf(
+                "https://cdn.example.com/s0.ts?tok=new",
+                "https://cdn.example.com/s1.ts?tok=new"
+            )
+        )
+        assertNull(Downloads.remappedSegment(old, fresh, 0))
+    }
+
+    @Test
+    fun remappedSegment_nullWhenUrlUnchanged() {
+        val old = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=same"))
+        val fresh = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=same"))
+        assertNull(Downloads.remappedSegment(old, fresh, 0))
+    }
+
+    @Test
+    fun remappedSegment_nullWhenDurationDiffers() {
+        val old = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=old"), duration = 6.0)
+        val fresh = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=new"), duration = 4.0)
+        assertNull(Downloads.remappedSegment(old, fresh, 0))
+    }
+
+    @Test
+    fun remappedSegment_nullWhenIndexOutOfRange() {
+        val old = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=old"))
+        val fresh = hlsMedia(listOf("https://cdn.example.com/s0.ts?tok=new"))
+        assertNull(Downloads.remappedSegment(old, fresh, 5))
+    }
 }

@@ -1349,7 +1349,7 @@ object Downloads {
 
     private fun checkStatus(conn: HttpURLConnection) {
         if (conn.responseCode !in 200..299 && conn.responseCode != 206) {
-            throw java.io.IOException("HTTP ${conn.responseCode}")
+            throw HttpStatusException(conn.responseCode)
         }
     }
 
@@ -1824,8 +1824,8 @@ object Downloads {
         /** Separate audio rendition URL (#EXT-X-MEDIA), if the master splits audio out. */
         val audioUrl: String? = null,
     )
-    private data class HlsSegment(val url: String, val duration: Double, val keyUri: String?, val keyIv: String?)
-    private data class HlsMedia(val segments: List<HlsSegment>, val isLive: Boolean)
+    internal data class HlsSegment(val url: String, val duration: Double, val keyUri: String?, val keyIv: String?)
+    internal data class HlsMedia(val segments: List<HlsSegment>, val isLive: Boolean)
 
     private fun stagingDir(context: Context, rec: DownloadRecord): File =
         File(
@@ -1901,6 +1901,54 @@ object Downloads {
         return out
     }
 
+    /** An HTTP failure that keeps its status code, so the
+     *  job can tell a dead link (403/404) from a transient
+     *  failure (timeout, dropped connection). Thrown by
+     *  [checkStatus] in place of a plain IOException with
+     *  the same message, so every existing catch and the
+     *  [errorLabel] rendering ("HTTP <code>") are unchanged. */
+    internal class HttpStatusException(val code: Int) : java.io.IOException("HTTP $code")
+
+    /** Tag a fetch failure with the stage that failed, so
+     *  the Downloads row names the failing fetch instead of
+     *  showing a bare HTTP code: "Manifest: HTTP 404",
+     *  "Media playlist: HTTP 404", "Segment 12: HTTP 404".
+     *  Pure: the message flows through [errorLabel] unchanged. */
+    internal fun stageFetchError(stage: String, e: java.io.IOException): java.io.IOException =
+        java.io.IOException("$stage: ${e.message}")
+
+    /** True only for an HTTP 404 — the link itself is gone.
+     *  A 403 stays ambiguous (missing cookies look the same
+     *  as an expired token), and timeouts are transient, so
+     *  neither counts as a dead link. Pure. */
+    internal fun isDeadLinkError(e: Exception): Boolean = when (e) {
+        is HttpStatusException -> e.code == 404
+        is java.io.IOException -> e.message?.contains("HTTP 404") == true
+        else -> false
+    }
+
+    /** The segment to retry after a playlist refresh: the
+     *  segment at the same index in the refreshed playlist,
+     *  but only when the refresh is trustworthy — the
+     *  original playlist was VOD (not live), the refreshed
+     *  playlist has the same number of segments with the
+     *  same duration at this index, and its URL actually
+     *  changed (an identical URL would fail again the same
+     *  way). Anything else yields null: fail with the
+     *  original error instead of downloading the wrong
+     *  segment. Pure. */
+    internal fun remappedSegment(
+        old: HlsMedia, refreshed: HlsMedia, index: Int
+    ): HlsSegment? {
+        if (old.isLive) return null
+        if (old.segments.size != refreshed.segments.size) return null
+        val before = old.segments.getOrNull(index) ?: return null
+        val after = refreshed.segments.getOrNull(index) ?: return null
+        if (before.duration != after.duration) return null
+        if (before.url == after.url) return null
+        return after
+    }
+
     internal fun parseHlsMaster(text: String, baseUrl: String): List<HlsVariant> {
         val lines = text.lines()
         // #EXT-X-MEDIA audio renditions, by GROUP-ID; within a
@@ -1942,7 +1990,7 @@ object Downloads {
         return out
     }
 
-    private fun parseHlsMedia(text: String, baseUrl: String): HlsMedia {
+    internal fun parseHlsMedia(text: String, baseUrl: String): HlsMedia {
         val lines = text.lines()
         val segments = mutableListOf<HlsSegment>()
         var duration = 0.0
